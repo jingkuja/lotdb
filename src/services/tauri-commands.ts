@@ -245,6 +245,51 @@ export async function clearHistory(connectionId?: string): Promise<void> {
   return invoke<void>("clear_history", { connectionId });
 }
 
+// ─── Table data ───────────────────────────────────────────────────
+
+export interface TableDataResult {
+  columns: string[];
+  rows: unknown[][];
+  totalCount: number;
+}
+
+export interface ColumnFilter {
+  column: string;
+  op: "=" | "!=" | "LIKE" | "NOT LIKE" | ">" | "<" | ">=" | "<=" | "IS NULL" | "IS NOT NULL";
+  value: string;
+}
+
+export async function getTableData(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  table: string,
+  limit: number,
+  offset: number,
+  orderBy?: string,
+  orderDir?: "ASC" | "DESC",
+  filters?: ColumnFilter[],
+): Promise<TableDataResult> {
+  return invoke<TableDataResult>("get_table_data", {
+    connectionId,
+    database,
+    schema,
+    table,
+    limit,
+    offset,
+    orderBy: orderBy ?? null,
+    orderDir: orderDir ?? null,
+    filters: filters && filters.length > 0 ? filters : null,
+  });
+}
+
+export async function executeStatements(
+  connectionId: string,
+  sqls: string[],
+): Promise<number> {
+  return invoke<number>("execute_statements", { connectionId, sqls });
+}
+
 // ─── Snippets ─────────────────────────────────────────────────────
 
 export interface SnippetEntry {

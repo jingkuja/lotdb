@@ -7,6 +7,7 @@ import {
   Plus,
   Search,
   Terminal,
+  Table2,
   Pencil,
   Trash2,
   Unplug,
@@ -61,6 +62,13 @@ export function Sidebar() {
   } = useConnectionStore();
 
   const addTab = useWorkspaceStore((s) => s.addTab);
+
+  const handleNewDesigner = (connId?: string) => {
+    const id = connId ?? activeConnectionId;
+    if (!id || !openPoolIds.has(id)) return;
+    const tabId = `designer-${id}-${Date.now()}`;
+    addTab({ id: tabId, title: "新建表", type: "designer", connectionId: id });
+  };
 
   const handleNewQuery = (connId?: string) => {
     const id = connId ?? activeConnectionId;
@@ -191,6 +199,21 @@ export function Sidebar() {
             </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">新建查询</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => handleNewDesigner()}
+              disabled={
+                !activeConnectionId || !openPoolIds.has(activeConnectionId)
+              }
+            >
+              <Table2 className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">新建表</TooltipContent>
         </Tooltip>
         <div className="flex-1" />
         <Tooltip>

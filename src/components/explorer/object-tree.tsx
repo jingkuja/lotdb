@@ -10,6 +10,7 @@ import {
   Folder,
   Loader2,
   AlertCircle,
+  Pencil,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatabases, useSchemas, useObjects } from "@/hooks/use-schema";
@@ -43,6 +44,7 @@ function TreeRow({
   active,
   onClick,
   onDoubleClick,
+  children,
 }: TreeRowProps) {
   return (
     <div
@@ -81,6 +83,13 @@ function TreeRow({
 
       {/* Label */}
       <span className="min-w-0 flex-1 truncate">{label}</span>
+
+      {/* Hover actions */}
+      {children && (
+        <span className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100">
+          {children}
+        </span>
+      )}
     </div>
   );
 }
@@ -121,19 +130,36 @@ function ObjectLeaf({
       <FunctionSquare className="size-3" />
     );
 
-  const handleOpen = () => {
-    const existing = tabs.find((t) => t.id === tabId);
+  const openTab = (tabType: "table-structure" | "table-data" | "query" | "designer") => {
+    const id =
+      tabType === "table-data" ? `${tabId}/data` :
+      tabType === "designer" ? `${tabId}/designer` :
+      tabId;
+    const existing = tabs.find((t) => t.id === id);
     if (existing) {
-      setActiveTab(tabId);
+      setActiveTab(id);
     } else {
       addTab({
-        id: tabId,
-        title: name,
-        type: type === "table" ? "table-structure" : "query",
+        id,
+        title:
+          tabType === "table-data" ? `${name} (数据)` :
+          tabType === "designer" ? `${name} (设计)` :
+          name,
+        type: tabType === "designer" ? "designer" : tabType,
         connectionId,
         metadata: { database, schema, objectName: name, objectType: type },
       });
     }
+  };
+
+  const handleClick = () => {
+    if (type === "table") openTab("table-structure");
+    else openTab("query");
+  };
+
+  const handleDoubleClick = () => {
+    if (type === "table") openTab("table-data");
+    else openTab("query");
   };
 
   return (
@@ -142,9 +168,22 @@ function ObjectLeaf({
       icon={icon}
       label={name}
       expandable={false}
-      onClick={handleOpen}
-      onDoubleClick={handleOpen}
-    />
+      onClick={handleClick}
+      onDoubleClick={handleDoubleClick}
+    >
+      {type === "table" && (
+        <button
+          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+          title="在设计器中编辑"
+          onClick={(e) => {
+            e.stopPropagation();
+            openTab("designer");
+          }}
+        >
+          <Pencil className="size-3" />
+        </button>
+      )}
+    </TreeRow>
   );
 }
 

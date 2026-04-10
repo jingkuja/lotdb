@@ -66,6 +66,9 @@ pub fn run() {
             commands::snippets::create_snippet,
             commands::snippets::update_snippet,
             commands::snippets::delete_snippet,
+            // Table data
+            commands::data::get_table_data,
+            commands::data::execute_statements,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm init:)",
+      "Bash(pnpm add:*)",
+      "Bash(npx tsc:*)",
+      "Bash(pnpm vite:*)",
+      "Bash(cargo check:*)",
+      "Bash(pnpm tauri:*)",
+      "Bash(pnpm lint:*)",
+      "Bash(pnpm dlx:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo add:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(python3 -c \"import sys,json; pkgs=json.load\\(sys.stdin\\)['packages']; [print\\(p['name'], p['version'], [f['name'] for f in p['features'].items\\(\\) if f]\\) for p in pkgs if p['name']=='russh']\")",
+      "Bash(cargo tree:*)",
+      "Bash(cargo doc:*)",
+      "Bash(python3 -c \"import sys,re; t=sys.stdin.read\\(\\); methods=re.findall\\(r'fn \\(\\\\w+\\)\\\\\\([^\\)]*\\\\\\)', t\\); [print\\(m\\) for m in sorted\\(set\\(methods\\)\\)]\")",
+      "Bash(grep -r \"ssl_mode\\\\|SslMode\\\\|ssl_ca\\\\|ssl_root_cert\\\\|ssl_client\" ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-mysql-0.8.*/src/connection/establish.rs)",
+      "Bash(grep -n \"pub fn ssl_mode\\\\|pub fn ssl_ca\\\\|pub fn ssl_client\" ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-mysql-0.8.*/src/options/mod.rs)",
+      "Bash(grep -n \"pub fn ssl_mode\\\\|pub fn ssl_root_cert\\\\|pub fn ssl_client\" ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-postgres-0.8.*/src/options/mod.rs)",
+      "Bash(pnpm tsc:*)",
+      "Bash(pnpm build:*)"
+    ]
+  }
+}
