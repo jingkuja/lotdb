@@ -1,0 +1,46 @@
+[package]
+name = "lotdb"
+version = "0.1.0"
+description = "A lightweight database management tool"
+authors = []
+edition = "2021"
+
+[lib]
+name = "lotdb_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "lotdb"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = [
+  "runtime-tokio",
+  "tls-native-tls",
+  "mysql",
+  "postgres",
+  "sqlite",
+  "json",
+  "chrono",
+  "uuid",
+] }
+tokio = { version = "1", features = ["full"] }
+russh = "0.60"
+native-tls = "0.2"
+security-framework = "3"
+calamine = "0.34"
+rust_xlsxwriter = "0.94"
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+log = "0.4"
+env_logger = "0.11"
+dashmap = "6.1.0"

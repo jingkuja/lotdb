@@ -1,0 +1,44 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicehash/tauri/v2/crates/tauri-cli/schema.json",
+  "productName": "LotDB",
+  "version": "0.1.0",
+  "identifier": "com.lotdb.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "LotDB",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "sql": {
+      "preload": {
+        "db": "sqlite:lotdb.db"
+      }
+    }
+  }
+}

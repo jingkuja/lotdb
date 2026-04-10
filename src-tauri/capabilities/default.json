@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicehash/tauri/v2/crates/tauri/schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for LotDB",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "sql:default"
+  ]
+}
