@@ -11,11 +11,25 @@ import {
   Loader2,
   AlertCircle,
   Pencil,
+  Download,
+  Plus,
+  Trash2,
+  Users,
+  Activity,
+  HardDrive,
+  GitCompare,
+  Send,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatabases, useSchemas, useObjects } from "@/hooks/use-schema";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { DatabaseType } from "@/types/database";
+import { BatchExportDialog } from "@/components/transfer/batch-export-dialog";
+import { DataTransferDialog } from "@/components/transfer/data-transfer-dialog";
+import { CreateDatabaseDialog } from "@/components/admin/create-database-dialog";
+import { dropDatabase } from "@/services/tauri-commands";
+import { useQueryClient } from "@tanstack/react-query";
+import { useConnections } from "@/hooks/use-connections";
 
 // ─── TreeRow — generic row with indent, icon, label ──────────────
 
@@ -209,6 +223,7 @@ function CategoryNode({
   schema,
 }: CategoryNodeProps) {
   const [expanded, setExpanded] = useState(false);
+  const [batchExportOpen, setBatchExportOpen] = useState(false);
 
   if (items.length === 0) return null;
 
@@ -221,7 +236,20 @@ function CategoryNode({
         expandable
         expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
-      />
+      >
+        {type === "table" && (
+          <button
+            className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+            title="批量导出所有表"
+            onClick={(e) => {
+              e.stopPropagation();
+              setBatchExportOpen(true);
+            }}
+          >
+            <Download className="size-3" />
+          </button>
+        )}
+      </TreeRow>
       {expanded &&
         items.map((name) => (
           <ObjectLeaf
@@ -234,6 +262,16 @@ function CategoryNode({
             schema={schema}
           />
         ))}
+      {type === "table" && (
+        <BatchExportDialog
+          open={batchExportOpen}
+          onOpenChange={setBatchExportOpen}
+          connectionId={connectionId}
+          database={database}
+          schema={schema}
+          tables={items}
+        />
+      )}
     </>
   );
 }
@@ -313,12 +351,28 @@ interface MySqlDbNodeProps {
 
 function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
   const [expanded, setExpanded] = useState(false);
+  const [dropping, setDropping] = useState(false);
   const { data, isLoading, isError } = useObjects(
     connectionId,
     database,
     undefined,
     expanded,
   );
+  const queryClient = useQueryClient();
+
+  const handleDrop = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm(`确定要删除数据库 "${database}" 吗？此操作不可撤销！`)) return;
+    setDropping(true);
+    try {
+      await dropDatabase(connectionId, database);
+      queryClient.invalidateQueries({ queryKey: ["databases", connectionId] });
+    } catch (err) {
+      alert(String(err));
+    } finally {
+      setDropping(false);
+    }
+  };
 
   return (
     <>
@@ -328,10 +382,18 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
         label={database}
         expandable
         expanded={expanded}
-        loading={expanded && isLoading}
+        loading={(expanded && isLoading) || dropping}
         error={isError}
         onClick={() => setExpanded((v) => !v)}
-      />
+      >
+        <button
+          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-destructive"
+          title="删除数据库"
+          onClick={handleDrop}
+        >
+          <Trash2 className="size-3" />
+        </button>
+      </TreeRow>
       {expanded && data && (
         <>
           <CategoryNode
@@ -416,6 +478,73 @@ interface ObjectTreeProps {
 
 export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
   const { data: databases = [], isLoading, isError } = useDatabases(connectionId);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const queryClient = useQueryClient();
+  const { data: connections = [] } = useConnections();
+  const addTab = useWorkspaceStore((s) => s.addTab);
+  const tabs = useWorkspaceStore((s) => s.tabs);
+  const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
+
+  const openUsersTab = () => {
+    const tabId = `${connectionId}/users`;
+    const existing = tabs.find((t) => t.id === tabId);
+    if (existing) {
+      setActiveTab(tabId);
+    } else {
+      addTab({
+        id: tabId,
+        title: "用户管理",
+        type: "users",
+        connectionId,
+      });
+    }
+  };
+
+  const openProcessTab = () => {
+    const tabId = `${connectionId}/processes`;
+    const existing = tabs.find((t) => t.id === tabId);
+    if (existing) {
+      setActiveTab(tabId);
+    } else {
+      addTab({
+        id: tabId,
+        title: "活跃查询",
+        type: "process-list",
+        connectionId,
+      });
+    }
+  };
+
+  const openDiskUsageTab = () => {
+    const tabId = `${connectionId}/disk-usage`;
+    const existing = tabs.find((t) => t.id === tabId);
+    if (existing) {
+      setActiveTab(tabId);
+    } else {
+      addTab({
+        id: tabId,
+        title: "磁盘占用",
+        type: "disk-usage",
+        connectionId,
+      });
+    }
+  };
+
+  const openSchemaDiffTab = () => {
+    const tabId = "schema-diff";
+    const existing = tabs.find((t) => t.id === tabId);
+    if (existing) {
+      setActiveTab(tabId);
+    } else {
+      addTab({
+        id: tabId,
+        title: "结构对比",
+        type: "schema-diff",
+        connectionId,
+      });
+    }
+  };
 
   if (isLoading) {
     return (
@@ -436,24 +565,94 @@ export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
   }
 
   return (
-    <div className="py-0.5">
-      {databases.map((db) =>
-        dbType === "mysql" ? (
-          <MySqlDbNode
-            key={db}
-            database={db}
-            connectionId={connectionId}
-            level={1}
-          />
-        ) : (
-          <PgDbNode
-            key={db}
-            database={db}
-            connectionId={connectionId}
-            level={1}
-          />
-        ),
-      )}
-    </div>
+    <>
+      <div className="py-0.5">
+        {/* Header row with action buttons */}
+        <div className="group flex items-center justify-between px-2 py-0.5">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            数据库
+          </span>
+          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+            <button
+              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+              title="跨连接传输"
+              onClick={() => setTransferOpen(true)}
+            >
+              <Send className="size-3" />
+            </button>
+            <button
+              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+              title="结构对比"
+              onClick={openSchemaDiffTab}
+            >
+              <GitCompare className="size-3" />
+            </button>
+            <button
+              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+              title="磁盘占用"
+              onClick={openDiskUsageTab}
+            >
+              <HardDrive className="size-3" />
+            </button>
+            <button
+              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+              title="活跃查询"
+              onClick={openProcessTab}
+            >
+              <Activity className="size-3" />
+            </button>
+            <button
+              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+              title="用户管理"
+              onClick={openUsersTab}
+            >
+              <Users className="size-3" />
+            </button>
+            {dbType === "mysql" && (
+              <button
+                className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+                title="新建数据库"
+                onClick={() => setCreateOpen(true)}
+              >
+                <Plus className="size-3" />
+              </button>
+            )}
+          </div>
+        </div>
+        {databases.map((db) =>
+          dbType === "mysql" ? (
+            <MySqlDbNode
+              key={db}
+              database={db}
+              connectionId={connectionId}
+              level={1}
+            />
+          ) : (
+            <PgDbNode
+              key={db}
+              database={db}
+              connectionId={connectionId}
+              level={1}
+            />
+          ),
+        )}
+      </div>
+
+      <CreateDatabaseDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        connectionId={connectionId}
+        dbType={dbType}
+        onSuccess={() =>
+          queryClient.invalidateQueries({ queryKey: ["databases", connectionId] })
+        }
+      />
+
+      <DataTransferDialog
+        open={transferOpen}
+        onOpenChange={setTransferOpen}
+        connections={connections}
+      />
+    </>
   );
 }

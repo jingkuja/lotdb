@@ -1,5 +1,5 @@
 import { useState, useCallback, useId } from "react";
-import { Plus, Trash2, GripVertical, ArrowUp, ArrowDown } from "lucide-react";
+import { Plus, Trash2, GripVertical, ArrowUp, ArrowDown, Code2, GitCompare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -13,6 +13,8 @@ import {
 } from "@/types/designer";
 import { IndexEditor } from "./index-editor";
 import { ForeignKeyEditor } from "./foreign-key-editor";
+import { DdlPreviewDialog } from "./ddl-preview-dialog";
+import { DdlDiffDialog } from "./ddl-diff-dialog";
 import {
   getTypeGroups,
   supportsLength,
@@ -301,10 +303,14 @@ type PanelTab = "columns" | "indexes" | "foreign-keys";
 
 export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps) {
   const uid = useId();
+  // Freeze original state at mount for ALTER TABLE diff
+  const [originalState] = useState<DesignerState | undefined>(initialState);
   const [state, setState] = useState<DesignerState>(initialState ?? emptyState());
   const [activePanel, setActivePanel] = useState<PanelTab>("columns");
   const [dragFromIdx, setDragFromIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+  const [ddlOpen, setDdlOpen] = useState(false);
+  const [diffOpen, setDiffOpen] = useState(false);
 
   const nextId = () => `${uid}-${Date.now()}-${Math.random()}`;
 
@@ -412,6 +418,30 @@ export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps
             <Plus className="size-3" />添加外键
           </Button>
         )}
+
+        <div className="flex-1" />
+
+        {originalState && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1 px-2 text-xs"
+            onClick={() => setDiffOpen(true)}
+          >
+            <GitCompare className="size-3" />
+            DDL 对比
+          </Button>
+        )}
+
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 gap-1 px-2 text-xs"
+          onClick={() => setDdlOpen(true)}
+        >
+          <Code2 className="size-3" />
+          预览 DDL
+        </Button>
       </div>
 
       {/* Table meta */}
@@ -498,6 +528,24 @@ export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps
           )}
         </div>
       </div>}
+
+      <DdlPreviewDialog
+        open={ddlOpen}
+        onOpenChange={setDdlOpen}
+        state={state}
+        originalState={originalState}
+        dbType={dbType}
+      />
+
+      {originalState && (
+        <DdlDiffDialog
+          open={diffOpen}
+          onOpenChange={setDiffOpen}
+          originalState={originalState}
+          currentState={state}
+          dbType={dbType}
+        />
+      )}
     </div>
   );
 }

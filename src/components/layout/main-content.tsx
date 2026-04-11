@@ -3,6 +3,10 @@ import { TableStructurePanel } from "@/components/explorer/table-structure-panel
 import { QueryTab } from "@/components/editor/query-tab";
 import { TableDataTab } from "@/components/grid/table-data-tab";
 import { TableDesignerTab } from "@/components/designer/table-designer-tab";
+import { UserManagementTab } from "@/components/admin/user-management-tab";
+import { ProcessListTab } from "@/components/admin/process-list-tab";
+import { DiskUsageTab } from "@/components/admin/disk-usage-tab";
+import { SchemaDiffTab } from "@/components/admin/schema-diff-tab";
 import { useConnections } from "@/hooks/use-connections";
 import { useQuery } from "@tanstack/react-query";
 import { getTableDesignerState } from "@/lib/designer-loader";
@@ -142,6 +146,43 @@ export function MainContent() {
         dbType={dbType}
       />
     );
+  }
+
+  if (activeTab.type === "users") {
+    const conn = connections.find((c) => c.id === activeTab.connectionId);
+    const dbType: DatabaseType = conn?.dbType ?? "mysql";
+    return (
+      <UserManagementTab
+        connectionId={activeTab.connectionId}
+        dbType={dbType}
+      />
+    );
+  }
+
+  if (activeTab.type === "process-list") {
+    const conn = connections.find((c) => c.id === activeTab.connectionId);
+    const dbType: DatabaseType = conn?.dbType ?? "mysql";
+    return (
+      <ProcessListTab
+        connectionId={activeTab.connectionId}
+        dbType={dbType}
+      />
+    );
+  }
+
+  if (activeTab.type === "disk-usage") {
+    const conn = connections.find((c) => c.id === activeTab.connectionId);
+    const dbType: DatabaseType = conn?.dbType ?? "mysql";
+    return (
+      <DiskUsageTab
+        connectionId={activeTab.connectionId}
+        dbType={dbType}
+      />
+    );
+  }
+
+  if (activeTab.type === "schema-diff") {
+    return <SchemaDiffTab />;
   }
 
   return (

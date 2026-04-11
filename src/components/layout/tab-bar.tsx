@@ -1,4 +1,4 @@
-import { X, Terminal, Table2, Hash, PenSquare } from "lucide-react";
+import { X, Terminal, Table2, Hash, PenSquare, Users, Activity, HardDrive, GitCompare } from "lucide-react";
 import { useWorkspaceStore, type Tab } from "@/stores/workspace-store";
 import { cn } from "@/lib/utils";
 
@@ -11,6 +11,10 @@ function TabItem({ tab }: { tab: Tab }) {
     "table-data": Table2,
     "table-structure": Hash,
     designer: PenSquare,
+    users: Users,
+    "process-list": Activity,
+    "disk-usage": HardDrive,
+    "schema-diff": GitCompare,
   };
   const Icon = iconMap[tab.type] ?? Terminal;
 

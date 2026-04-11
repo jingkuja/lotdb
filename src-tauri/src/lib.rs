@@ -69,6 +69,30 @@ pub fn run() {
             // Table data
             commands::data::get_table_data,
             commands::data::execute_statements,
+            // Export / Import
+            commands::transfer::export_table_data,
+            commands::transfer::batch_export_tables,
+            commands::transfer::preview_import_file,
+            commands::transfer::import_table_data,
+            commands::transfer::transfer_table_data,
+            // Database management
+            commands::admin::create_database,
+            commands::admin::drop_database,
+            // User management
+            commands::admin::list_users,
+            commands::admin::get_user_grants,
+            commands::admin::create_user,
+            commands::admin::drop_user,
+            commands::admin::grant_privilege,
+            commands::admin::revoke_privilege,
+            // Process list & kill
+            commands::admin::list_processes,
+            commands::admin::kill_process,
+            // Disk usage
+            commands::admin::get_disk_usage,
+            commands::admin::get_table_sizes,
+            // Explain
+            commands::admin::explain_query,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

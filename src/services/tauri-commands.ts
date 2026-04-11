@@ -325,3 +325,329 @@ export async function updateSnippet(
 export async function deleteSnippet(id: number): Promise<void> {
   return invoke<void>("delete_snippet", { id });
 }
+
+// ─── Export ───────────────────────────────────────────────────────
+
+export type ExportFormat = "csv" | "json" | "sql_insert" | "excel";
+
+export interface ExportOptions {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  table: string;
+  format: ExportFormat;
+  /** Selected column names; empty array = all columns */
+  columns: string[];
+  /** Raw WHERE expression (without keyword), optional */
+  whereClause?: string;
+  /** Max rows to export; 0 = no limit */
+  limit: number;
+  /** Absolute path to the output file */
+  filePath: string;
+}
+
+export interface ExportResult {
+  rowsExported: number;
+  filePath: string;
+}
+
+export async function exportTableData(opts: ExportOptions): Promise<ExportResult> {
+  return invoke<ExportResult>("export_table_data", {
+    connectionId: opts.connectionId,
+    database: opts.database,
+    schema: opts.schema,
+    table: opts.table,
+    format: opts.format,
+    columns: opts.columns,
+    whereClause: opts.whereClause ?? null,
+    limit: opts.limit,
+    filePath: opts.filePath,
+  });
+}
+
+export interface TableExportStatus {
+  table: string;
+  rowsExported: number;
+  filePath: string;
+  error: string | null;
+}
+
+// ─── Import ───────────────────────────────────────────────────────
+
+// ─── Progress event payloads ──────────────────────────────────────
+
+export interface ImportProgressEvent {
+  current: number;
+  total: number;
+  rowsPerSec: number;
+  etaSec: number;
+}
+
+export interface BatchExportProgressEvent {
+  tableIndex: number;
+  totalTables: number;
+  table: string;
+}
+
+// ─── Import ───────────────────────────────────────────────────────
+
+export type ImportFormat = "csv" | "json" | "sql";
+
+export interface ImportResult {
+  rowsImported: number;
+  rowsFailed: number;
+  errorMessage: string | null;
+}
+
+export interface FilePreview {
+  columns: string[];
+  rows: (string | null)[][];
+}
+
+export async function previewImportFile(
+  filePath: string,
+  format: ImportFormat,
+  hasHeader: boolean,
+  previewRows?: number,
+): Promise<FilePreview> {
+  return invoke<FilePreview>("preview_import_file", {
+    filePath,
+    format,
+    hasHeader,
+    previewRows: previewRows ?? 5,
+  });
+}
+
+export async function importTableData(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  table: string,
+  filePath: string,
+  format: ImportFormat,
+  hasHeader: boolean,
+  truncateFirst: boolean,
+  columnMapping: (string | null)[],
+): Promise<ImportResult> {
+  return invoke<ImportResult>("import_table_data", {
+    connectionId,
+    database,
+    schema,
+    table,
+    filePath,
+    format,
+    hasHeader,
+    truncateFirst,
+    columnMapping,
+  });
+}
+
+export async function batchExportTables(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  tables: string[],
+  format: ExportFormat,
+  limit: number,
+  outputDir: string,
+): Promise<TableExportStatus[]> {
+  return invoke<TableExportStatus[]>("batch_export_tables", {
+    connectionId,
+    database,
+    schema,
+    tables,
+    format,
+    limit,
+    outputDir,
+  });
+}
+
+// ─── Database management ──────────────────────────────────────────
+
+export async function createDatabase(
+  connectionId: string,
+  dbName: string,
+  charset?: string,
+  collation?: string,
+): Promise<void> {
+  return invoke<void>("create_database", { connectionId, dbName, charset, collation });
+}
+
+export async function dropDatabase(
+  connectionId: string,
+  dbName: string,
+): Promise<void> {
+  return invoke<void>("drop_database", { connectionId, dbName });
+}
+
+// ─── User management ──────────────────────────────────────────────
+
+export interface UserInfo {
+  username: string;
+  host: string;      // empty for PG
+  isSuper: boolean;
+  canLogin: boolean; // PG only
+}
+
+export interface DbPrivilege {
+  database: string;
+  privileges: string;
+}
+
+export async function listUsers(connectionId: string): Promise<UserInfo[]> {
+  return invoke<UserInfo[]>("list_users", { connectionId });
+}
+
+export async function getUserGrants(
+  connectionId: string,
+  username: string,
+  host: string,
+): Promise<DbPrivilege[]> {
+  return invoke<DbPrivilege[]>("get_user_grants", { connectionId, username, host });
+}
+
+export async function createUser(
+  connectionId: string,
+  username: string,
+  host: string,
+  password: string,
+): Promise<void> {
+  return invoke<void>("create_user", { connectionId, username, host, password });
+}
+
+export async function dropUser(
+  connectionId: string,
+  username: string,
+  host: string,
+): Promise<void> {
+  return invoke<void>("drop_user", { connectionId, username, host });
+}
+
+export async function grantPrivilege(
+  connectionId: string,
+  username: string,
+  host: string,
+  database: string,
+): Promise<void> {
+  return invoke<void>("grant_privilege", { connectionId, username, host, database });
+}
+
+export async function revokePrivilege(
+  connectionId: string,
+  username: string,
+  host: string,
+  database: string,
+): Promise<void> {
+  return invoke<void>("revoke_privilege", { connectionId, username, host, database });
+}
+
+// ─── Process list ─────────────────────────────────────────────────
+
+export interface ProcessInfo {
+  id: number;
+  user: string;
+  host: string;
+  database: string | null;
+  command: string;
+  timeSec: number;
+  state: string;
+  info: string | null;
+}
+
+export async function listProcesses(connectionId: string): Promise<ProcessInfo[]> {
+  return invoke<ProcessInfo[]>("list_processes", { connectionId });
+}
+
+export async function killProcess(
+  connectionId: string,
+  processId: number,
+  killType: "connection" | "query",
+): Promise<void> {
+  return invoke<void>("kill_process", { connectionId, processId, killType });
+}
+
+// ─── Disk usage ───────────────────────────────────────────────────
+
+export interface DbSizeInfo {
+  database: string;
+  sizeBytes: number;
+}
+
+export interface TableSizeInfo {
+  tableName: string;
+  dataBytes: number;
+  indexBytes: number;
+  totalBytes: number;
+  rowCount: number | null;
+}
+
+export async function getDiskUsage(connectionId: string): Promise<DbSizeInfo[]> {
+  return invoke<DbSizeInfo[]>("get_disk_usage", { connectionId });
+}
+
+export async function getTableSizes(
+  connectionId: string,
+  database: string,
+  schema?: string,
+): Promise<TableSizeInfo[]> {
+  return invoke<TableSizeInfo[]>("get_table_sizes", { connectionId, database, schema });
+}
+
+// ─── Explain ──────────────────────────────────────────────────────
+
+export interface ExplainResult {
+  isText: boolean;
+  columns: string[];
+  rows: (string | null)[][];
+}
+
+export async function explainQuery(
+  connectionId: string,
+  sql: string,
+  analyze: boolean,
+): Promise<ExplainResult> {
+  return invoke<ExplainResult>("explain_query", { connectionId, sql, analyze });
+}
+
+// ─── Cross-connection data transfer ──────────────────────────────
+
+export interface ColumnMap {
+  src: string;
+  tgt: string;
+}
+
+export interface TransferResult {
+  rowsTransferred: number;
+  rowsFailed: number;
+  errorMessage: string | null;
+}
+
+export async function transferTableData(
+  srcConnectionId: string,
+  srcDatabase: string,
+  srcSchema: string | undefined,
+  srcTable: string,
+  tgtConnectionId: string,
+  tgtDatabase: string,
+  tgtSchema: string | undefined,
+  tgtTable: string,
+  columnMapping: ColumnMap[],
+  truncateFirst: boolean,
+  whereClause: string | undefined,
+  limit: number,
+): Promise<TransferResult> {
+  return invoke<TransferResult>("transfer_table_data", {
+    srcConnectionId,
+    srcDatabase,
+    srcSchema,
+    srcTable,
+    tgtConnectionId,
+    tgtDatabase,
+    tgtSchema,
+    tgtTable,
+    columnMapping,
+    truncateFirst,
+    whereClause,
+    limit,
+  });
+}

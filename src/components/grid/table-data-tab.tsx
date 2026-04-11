@@ -13,6 +13,8 @@ import {
   RotateCcw,
   Copy,
   Check,
+  Download,
+  Upload,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -25,6 +27,8 @@ import { Button } from "@/components/ui/button";
 import { DataGrid, type SortState, type SortDir, type PendingEdit, type NewRow, type CellViewTarget, editKey } from "./data-grid";
 import { ChangePreviewDialog } from "./change-preview-dialog";
 import { CellViewerDialog } from "./cell-viewer-dialog";
+import { ExportDialog } from "@/components/transfer/export-dialog";
+import { ImportDialog } from "@/components/transfer/import-dialog";
 import { getTableData, getTableColumns, executeStatements, type ColumnFilter } from "@/services/tauri-commands";
 import { generateChangeSql } from "@/lib/generate-change-sql";
 import { useConnections } from "@/hooks/use-connections";
@@ -52,6 +56,8 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
   const [cellView, setCellView] = useState<CellViewTarget | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [copyHint, setCopyHint] = useState<string | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const { data: connections = [] } = useConnections();
   const conn = connections.find((c) => c.id === connectionId);
@@ -241,6 +247,19 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
         </DropdownMenu>
 
         <Button
+          variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs"
+          onClick={() => setExportOpen(true)} title="导出数据"
+        >
+          <Download className="size-3" />导出
+        </Button>
+        <Button
+          variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs"
+          onClick={() => setImportOpen(true)} title="导入数据"
+        >
+          <Upload className="size-3" />导入
+        </Button>
+
+        <Button
           variant={showFilterRow ? "secondary" : "ghost"} size="sm"
           className="h-7 gap-1 px-2 text-xs" onClick={() => setShowFilterRow((v) => !v)}
         >
@@ -359,6 +378,26 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
         onOpenChange={(open) => { if (!open) setCellView(null); }}
         columnName={cellView?.columnName ?? ""}
         value={cellView?.value}
+      />
+
+      <ExportDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        connectionId={connectionId}
+        database={database}
+        schema={schema}
+        table={table}
+        columnDefs={columnDefs}
+      />
+      <ImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        connectionId={connectionId}
+        database={database}
+        schema={schema}
+        table={table}
+        columnDefs={columnDefs}
+        onSuccess={() => qc.invalidateQueries({ queryKey: ["table-data"] })}
       />
     </div>
   );

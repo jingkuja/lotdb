@@ -1,13 +1,14 @@
 import { useRef, useState, useCallback } from "react";
-import { Play, Square, Database, WandSparkles, History, Bookmark } from "lucide-react";
+import { Play, Square, Database, WandSparkles, History, Bookmark, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SqlEditor, type SqlEditorHandle } from "./sql-editor";
 import { ResultPanel, type ResultState } from "./result-panel";
+import { ExplainPanel } from "./explain-panel";
 import { HistoryDialog } from "./history-dialog";
 import { SnippetsDialog } from "./snippets-dialog";
 import { ParamInputDialog } from "./param-input-dialog";
 import { useEditorStore } from "@/stores/editor-store";
-import { executeQuery, executeQueryWithParams } from "@/services/tauri-commands";
+import { executeQuery, executeQueryWithParams, explainQuery, type ExplainResult } from "@/services/tauri-commands";
 import { useConnections } from "@/hooks/use-connections";
 import { useCompletionSchema } from "@/hooks/use-completion-schema";
 import { useSaveHistory } from "@/hooks/use-history";
@@ -48,6 +49,11 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const editorRef = useRef<SqlEditorHandle>(null);
   const [resultState, setResultState] = useState<ResultState>({ status: "idle" });
   const [running, setRunning] = useState(false);
+  const [explainResult, setExplainResult] = useState<ExplainResult | null>(null);
+  const [explainAnalyzed, setExplainAnalyzed] = useState(false);
+  const [explaining, setExplaining] = useState(false);
+  // "query" | "explain"
+  const [resultMode, setResultMode] = useState<"query" | "explain">("query");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [snippetsOpen, setSnippetsOpen] = useState(false);
   const [snippetCreateMode, setSnippetCreateMode] = useState(false);
@@ -127,9 +133,31 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   );
 
   const handleRun = () => {
+    setResultMode("query");
     const sql = editorRef.current?.getSelection() ?? "";
     runQuery(sql);
   };
+
+  const handleExplain = useCallback(
+    async (analyze: boolean) => {
+      const sql = (editorRef.current?.getSelection() ?? "").trim();
+      if (!sql) return;
+      setExplaining(true);
+      setResultMode("explain");
+      try {
+        const result = await explainQuery(connectionId, sql, analyze);
+        setExplainResult(result);
+        setExplainAnalyzed(analyze);
+      } catch (e) {
+        setExplainResult(null);
+        setResultMode("query");
+        setResultState({ status: "error", message: `EXPLAIN 失败: ${String(e)}` });
+      } finally {
+        setExplaining(false);
+      }
+    },
+    [connectionId],
+  );
 
   const handleStop = () => {
     setRunning(false);
@@ -245,6 +273,30 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           variant="ghost"
           size="sm"
           className="h-7 gap-1.5 px-2.5 text-xs"
+          disabled={explaining}
+          onClick={() => handleExplain(false)}
+          title="执行 EXPLAIN（不含实际运行时间）"
+        >
+          <Search className="size-3" />
+          Explain
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1.5 px-2.5 text-xs"
+          disabled={explaining}
+          onClick={() => handleExplain(true)}
+          title="执行 EXPLAIN ANALYZE（实际运行，含耗时）"
+        >
+          <Search className="size-3" />
+          Analyze
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1.5 px-2.5 text-xs"
           onClick={() => setHistoryOpen(true)}
         >
           <History className="size-3" />
@@ -307,7 +359,16 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
 
       {/* Result pane */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        <ResultPanel state={resultState} />
+        {resultMode === "explain" && explainResult ? (
+          <ExplainPanel result={explainResult} analyzed={explainAnalyzed} />
+        ) : resultMode === "explain" && explaining ? (
+          <div className="flex flex-1 items-center justify-center gap-2 text-muted-foreground text-xs">
+            <Search className="size-3.5 animate-pulse" />
+            正在执行 EXPLAIN…
+          </div>
+        ) : (
+          <ResultPanel state={resultState} />
+        )}
       </div>
 
       {/* History dialog */}

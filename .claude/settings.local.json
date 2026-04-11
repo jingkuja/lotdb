@@ -21,7 +21,9 @@
       "Bash(grep -n \"pub fn ssl_mode\\\\|pub fn ssl_ca\\\\|pub fn ssl_client\" ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-mysql-0.8.*/src/options/mod.rs)",
       "Bash(grep -n \"pub fn ssl_mode\\\\|pub fn ssl_root_cert\\\\|pub fn ssl_client\" ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sqlx-postgres-0.8.*/src/options/mod.rs)",
       "Bash(pnpm tsc:*)",
-      "Bash(pnpm build:*)"
+      "Bash(pnpm build:*)",
+      "Bash(cargo search:*)",
+      "Bash(npm run:*)"
     ]
   }
 }

@@ -240,9 +240,9 @@ pub async fn get_table_columns(
             }
 
             let rows: Vec<MysqlCol> = sqlx::query_as(
-                "SELECT COLUMN_NAME as column_name, COLUMN_TYPE as column_type, \
-                 IS_NULLABLE as is_nullable, COLUMN_DEFAULT as column_default, \
-                 EXTRA as extra, COLUMN_COMMENT as column_comment \
+                "SELECT COLUMN_NAME as column_name, CAST(COLUMN_TYPE AS CHAR) as column_type, \
+                 IS_NULLABLE as is_nullable, CAST(COLUMN_DEFAULT AS CHAR) as column_default, \
+                 EXTRA as extra, CAST(COLUMN_COMMENT AS CHAR) as column_comment \
                  FROM information_schema.COLUMNS \
                  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
                  ORDER BY ORDINAL_POSITION",
@@ -361,7 +361,7 @@ pub async fn get_table_indexes(
 
             let rows: Vec<MysqlIdx> = sqlx::query_as(
                 "SELECT INDEX_NAME as index_name, COLUMN_NAME as column_name, \
-                 NON_UNIQUE as non_unique, INDEX_TYPE as index_type \
+                 NON_UNIQUE as non_unique, CAST(INDEX_TYPE AS CHAR) AS index_type \
                  FROM information_schema.STATISTICS \
                  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
                  ORDER BY INDEX_NAME, SEQ_IN_INDEX",
