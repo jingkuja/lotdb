@@ -38,6 +38,7 @@ pub fn run() {
             commands::connection::update_connection,
             commands::connection::delete_connection,
             commands::connection::test_connection,
+            commands::connection::import_connections,
             // Pool management + query execution
             commands::query::open_connection,
             commands::query::close_connection,
@@ -93,6 +94,9 @@ pub fn run() {
             commands::admin::get_table_sizes,
             // Explain
             commands::admin::explain_query,
+            // Backup / Restore
+            commands::backup::backup_database,
+            commands::backup::restore_database,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

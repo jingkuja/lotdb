@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod backup;
 pub mod connection;
 pub mod data;
 pub mod history;

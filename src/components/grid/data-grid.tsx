@@ -1,4 +1,5 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from "react";
+import { useDebounce } from "@/hooks/use-debounce";
 import {
   useReactTable,
   getCoreRowModel,
@@ -51,8 +52,24 @@ function FilterCell({
   onChange: (f: ColumnFilter | null) => void;
 }) {
   const op: FilterOp = filter?.op ?? "=";
-  const value = filter?.value ?? "";
   const noValue = NO_VALUE_OPS.includes(op);
+
+  // Local input state so keystrokes don't lag; debounce propagation to parent
+  const [localValue, setLocalValue] = useState(filter?.value ?? "");
+  const debouncedValue = useDebounce(localValue, 300);
+
+  // Propagate debounced value upstream
+  useEffect(() => {
+    if (noValue) return;
+    onChange(debouncedValue === "" ? null : { column: colName, op, value: debouncedValue });
+    // Only trigger when debounced value or op changes; onChange identity is stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedValue, op, noValue, colName]);
+
+  // Sync local value when external filter is cleared (e.g., "清除筛选" button)
+  useEffect(() => {
+    setLocalValue(filter?.value ?? "");
+  }, [filter?.value]);
 
   return (
     <div
@@ -67,8 +84,13 @@ function FilterCell({
         value={op}
         onChange={(e) => {
           const newOp = e.target.value as FilterOp;
-          if (NO_VALUE_OPS.includes(newOp)) onChange({ column: colName, op: newOp, value: "" });
-          else onChange(null);
+          if (NO_VALUE_OPS.includes(newOp)) {
+            setLocalValue("");
+            onChange({ column: colName, op: newOp, value: "" });
+          } else {
+            onChange(null);
+            setLocalValue("");
+          }
         }}
       >
         {OPS.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -77,10 +99,8 @@ function FilterCell({
         <input
           className="min-w-0 flex-1 rounded bg-transparent px-1 text-[11px] outline-none focus:ring-1 focus:ring-ring"
           placeholder="值…"
-          value={value}
-          onChange={(e) =>
-            onChange(e.target.value === "" ? null : { column: colName, op, value: e.target.value })
-          }
+          value={localValue}
+          onChange={(e) => setLocalValue(e.target.value)}
         />
       )}
     </div>
@@ -462,7 +482,10 @@ export function DataGrid({
   const headerHeight = showFilterRow ? HEADER_HEIGHT + FILTER_ROW_HEIGHT : HEADER_HEIGHT;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
+    <div
+      className="flex h-full flex-col overflow-hidden"
+      style={{ fontSize: "var(--grid-font-size, 12px)" }}
+    >
       {/* Sticky header */}
       <div
         className="shrink-0 overflow-hidden border-b border-border bg-muted/60"

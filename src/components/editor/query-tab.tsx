@@ -12,6 +12,7 @@ import { executeQuery, executeQueryWithParams, explainQuery, type ExplainResult 
 import { useConnections } from "@/hooks/use-connections";
 import { useCompletionSchema } from "@/hooks/use-completion-schema";
 import { useSaveHistory } from "@/hooks/use-history";
+import { usePreferencesStore } from "@/stores/preferences-store";
 import { format as formatSql } from "sql-formatter";
 import { detectParams, type SqlParam } from "@/lib/sql-params";
 import type { DatabaseType } from "@/types/database";
@@ -47,6 +48,7 @@ function SplitHandle({ onDrag }: { onDrag: (dy: number) => void }) {
 
 export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const editorRef = useRef<SqlEditorHandle>(null);
+  const { editorFontSize, editorFontFamily, saveQueryHistory } = usePreferencesStore((s) => s.prefs);
   const [resultState, setResultState] = useState<ResultState>({ status: "idle" });
   const [running, setRunning] = useState(false);
   const [explainResult, setExplainResult] = useState<ExplainResult | null>(null);
@@ -83,30 +85,34 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
             ? await executeQueryWithParams(connectionId, trimmed, params)
             : await executeQuery(connectionId, trimmed);
         setResultState({ status: "success", result });
-        saveHistoryMutation.mutate({
-          connectionId,
-          connectionName: conn?.name ?? connectionId,
-          sql: trimmed,
-          status: "success",
-          rowsAffected: result.affectedRows ?? null,
-          executionMs: result.executionMs ?? null,
-        });
+        if (saveQueryHistory) {
+          saveHistoryMutation.mutate({
+            connectionId,
+            connectionName: conn?.name ?? connectionId,
+            sql: trimmed,
+            status: "success",
+            rowsAffected: result.affectedRows ?? null,
+            executionMs: result.executionMs ?? null,
+          });
+        }
       } catch (e) {
         const errMsg = String(e);
         setResultState({ status: "error", message: errMsg });
-        saveHistoryMutation.mutate({
-          connectionId,
-          connectionName: conn?.name ?? connectionId,
-          sql: trimmed,
-          status: "error",
-          errorMessage: errMsg,
-        });
+        if (saveQueryHistory) {
+          saveHistoryMutation.mutate({
+            connectionId,
+            connectionName: conn?.name ?? connectionId,
+            sql: trimmed,
+            status: "error",
+            errorMessage: errMsg,
+          });
+        }
       } finally {
         setRunning(false);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [connectionId, conn?.name],
+    [connectionId, conn?.name, saveQueryHistory],
   );
 
   const runQuery = useCallback(
@@ -351,6 +357,8 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           onChange={(v) => setContent(tabId, v)}
           onExecute={runQuery}
           onFormat={handleFormat}
+          fontSize={editorFontSize}
+          fontFamily={editorFontFamily}
         />
       </div>
 

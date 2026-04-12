@@ -115,6 +115,72 @@ pub async fn delete_connection(pool: State<'_, DbPool>, id: String) -> Result<()
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+pub struct ImportConnectionsResult {
+    pub imported: u32,
+    pub skipped: u32,
+}
+
+#[tauri::command]
+pub async fn import_connections(
+    pool: State<'_, DbPool>,
+    configs: Vec<ConnectionConfig>,
+) -> Result<ImportConnectionsResult, String> {
+    let mut imported = 0u32;
+    let mut skipped = 0u32;
+
+    for config in configs {
+        // Check if ID already exists
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM connections WHERE id=?)")
+            .bind(&config.id)
+            .fetch_one(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if exists {
+            skipped += 1;
+            continue;
+        }
+
+        // Store password in Keychain if provided
+        if !config.password.is_empty() {
+            keychain::store_password(&config.id, &config.password)?;
+        }
+
+        let ssh_json = config
+            .ssh
+            .as_ref()
+            .map(|s| serde_json::to_string(s).unwrap());
+        let ssl_json = config
+            .ssl
+            .as_ref()
+            .map(|s| serde_json::to_string(s).unwrap());
+
+        sqlx::query(
+            "INSERT INTO connections (id, name, db_type, host, port, user, database_name, group_id, ssh_config, ssl_config, color)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&config.id)
+        .bind(&config.name)
+        .bind(config.db_type.to_string())
+        .bind(&config.host)
+        .bind(config.port as i64)
+        .bind(&config.user)
+        .bind(&config.database)
+        .bind(&config.group_id)
+        .bind(&ssh_json)
+        .bind(&ssl_json)
+        .bind(&config.color)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+        imported += 1;
+    }
+
+    Ok(ImportConnectionsResult { imported, skipped })
+}
+
 #[tauri::command]
 pub async fn test_connection(config: ConnectionConfig) -> Result<String, String> {
     // Re-use the same pool builder (includes SSH tunnel + SSL logic).

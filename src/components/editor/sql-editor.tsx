@@ -33,11 +33,16 @@ interface SqlEditorProps {
   onExecute?: (sql: string) => void;
   /** Sync formatter: receives current SQL, returns formatted SQL */
   onFormat?: (sql: string) => string;
+  /** Editor font size in px (default 13) */
+  fontSize?: number;
+  /** Editor font family (default JetBrains Mono) */
+  fontFamily?: string;
 }
 
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
   function SqlEditor(
-    { tabId, initialValue = "", dbType, schema, onChange, onExecute, onFormat },
+    { tabId, initialValue = "", dbType, schema, onChange, onExecute, onFormat,
+      fontSize = 13, fontFamily = "JetBrains Mono" },
     ref,
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -45,6 +50,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
     // Compartment lets us reconfigure just the SQL extension without tearing
     // down the entire editor (preserves cursor position, history, etc.)
     const sqlCompartmentRef = useRef(new Compartment());
+    // Separate compartment for font theme — hot-swappable
+    const fontCompartmentRef = useRef(new Compartment());
 
     // Stable callback refs — avoids re-registering extensions on every render
     const onChangeRef = useRef(onChange);
@@ -117,6 +124,18 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
         },
       );
 
+      const makeFontTheme = (fs: number, ff: string) =>
+        EditorView.theme({
+          "&": { height: "100%", fontSize: `${fs}px` },
+          ".cm-scroller": {
+            overflow: "auto",
+            fontFamily: `'${ff}', 'JetBrains Mono', 'Fira Code', monospace`,
+          },
+          ".cm-content": { padding: "8px 0", minHeight: "100%" },
+        });
+
+      const fontComp = fontCompartmentRef.current;
+
       const state = EditorState.create({
         doc: initialValue,
         extensions: [
@@ -124,19 +143,12 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
           oneDark,
           // SQL extension is inside a compartment so schema can be updated later
           compartment.of(sql({ dialect, schema: {} })),
+          // Font theme in its own compartment for hot-swap
+          fontComp.of(makeFontTheme(fontSize, fontFamily)),
           editorCmds,
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
           changeListener,
           placeholder("-- 在此输入 SQL，Cmd+Enter 执行"),
-          EditorView.theme({
-            "&": { height: "100%", fontSize: "13px" },
-            ".cm-scroller": {
-              overflow: "auto",
-              fontFamily:
-                "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
-            },
-            ".cm-content": { padding: "8px 0", minHeight: "100%" },
-          }),
         ],
       });
 
@@ -161,6 +173,24 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
         ),
       });
     }, [schema, dbType]);
+
+    // ── Hot-swap font theme ────────────────────────────────────────
+    useEffect(() => {
+      const view = viewRef.current;
+      if (!view) return;
+      view.dispatch({
+        effects: fontCompartmentRef.current.reconfigure(
+          EditorView.theme({
+            "&": { height: "100%", fontSize: `${fontSize}px` },
+            ".cm-scroller": {
+              overflow: "auto",
+              fontFamily: `'${fontFamily}', 'JetBrains Mono', 'Fira Code', monospace`,
+            },
+            ".cm-content": { padding: "8px 0", minHeight: "100%" },
+          }),
+        ),
+      });
+    }, [fontSize, fontFamily]);
 
     return (
       <div

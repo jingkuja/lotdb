@@ -11,6 +11,12 @@ use std::{str::FromStr, time::Duration};
 /// A live connection — pool plus an optional SSH tunnel keeping it alive.
 pub struct ActiveConnection {
     pub pool: DbPool,
+    /// Effective DB host for external tools (mysqldump / pg_dump).
+    /// For SSH connections this is 127.0.0.1; otherwise the real host.
+    pub effective_host: String,
+    /// Effective DB port for external tools.
+    /// For SSH connections this is the local tunnel port.
+    pub effective_port: u16,
     /// Kept alive until this connection is closed.
     _tunnel: Option<SshTunnel>,
 }
@@ -156,6 +162,8 @@ async fn build_connection(config: &ConnectionConfig) -> Result<ActiveConnection,
 
     Ok(ActiveConnection {
         pool,
+        effective_host: host,
+        effective_port: port,
         _tunnel: tunnel,
     })
 }

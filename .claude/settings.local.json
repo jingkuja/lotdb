@@ -23,7 +23,8 @@
       "Bash(pnpm tsc:*)",
       "Bash(pnpm build:*)",
       "Bash(cargo search:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(npx vitest:*)"
     ]
   }
 }

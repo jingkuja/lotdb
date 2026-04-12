@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   ChevronRight,
   ChevronDown,
@@ -13,7 +13,15 @@ import {
   Unplug,
   Wifi,
   Loader2,
+  Sun,
+  Moon,
+  Monitor,
+  Keyboard,
+  Settings,
+  ArrowLeftRight,
 } from "lucide-react";
+import { useThemeStore, type ThemeMode } from "@/stores/theme-store";
+import { PreferencesDialog } from "@/components/layout/preferences-dialog";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -22,8 +30,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ConnectionDialog } from "@/components/connection/connection-dialog";
+import { ImportExportConnectionsDialog } from "@/components/connection/import-export-connections-dialog";
 import { ObjectTree } from "@/components/explorer/object-tree";
 import { ObjectSearchDialog } from "@/components/explorer/object-search-dialog";
+import { RecentPanel } from "@/components/layout/recent-panel";
 import {
   useConnections,
   useCreateConnection,
@@ -40,9 +50,35 @@ import {
 import type { ConnectionConfig } from "@/types/database";
 import { cn } from "@/lib/utils";
 
-export function Sidebar() {
+const THEME_CYCLE: ThemeMode[] = ["light", "dark", "system"];
+const THEME_ICONS: Record<ThemeMode, React.ElementType> = {
+  light: Sun,
+  dark: Moon,
+  system: Monitor,
+};
+const THEME_LABELS: Record<ThemeMode, string> = {
+  light: "浅色",
+  dark: "深色",
+  system: "跟随系统",
+};
+
+interface SidebarProps {
+  searchOpen: boolean;
+  onSearchOpenChange: (open: boolean) => void;
+}
+
+export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const [importExportOpen, setImportExportOpen] = useState(false);
+  const themeMode = useThemeStore((s) => s.mode);
+  const setThemeMode = useThemeStore((s) => s.setMode);
+  const ThemeIcon = THEME_ICONS[themeMode];
+  const cycleTheme = () => {
+    const idx = THEME_CYCLE.indexOf(themeMode);
+    const next = THEME_CYCLE[(idx + 1) % THEME_CYCLE.length];
+    if (next) setThemeMode(next);
+  };
   const [editingConn, setEditingConn] = useState<ConnectionConfig | undefined>(
     undefined,
   );
@@ -82,17 +118,6 @@ export function Sidebar() {
     });
   };
 
-  // Cmd+K / Ctrl+K opens search
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setSearchOpen(true);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, []);
 
   const toggleExpand = (id: string) => {
     setExpandedIds((prev) => {
@@ -221,18 +246,66 @@ export function Sidebar() {
             <Button
               variant="ghost"
               size="icon-xs"
-              onClick={() => setSearchOpen(true)}
+              onClick={() => onSearchOpenChange(true)}
             >
               <Search className="size-4" />
             </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">搜索对象 (⌘K)</TooltipContent>
         </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => setImportExportOpen(true)}
+            >
+              <ArrowLeftRight className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">导入/导出连接配置</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="icon-xs" onClick={cycleTheme}>
+              <ThemeIcon className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            当前：{THEME_LABELS[themeMode]}（点击切换）
+          </TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => {
+                /* dispatched via global shortcut — trigger via key event */
+                window.dispatchEvent(
+                  new KeyboardEvent("keydown", { key: "?", bubbles: true }),
+                );
+              }}
+            >
+              <Keyboard className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">快捷键帮助 (?)</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="icon-xs" onClick={() => setPrefsOpen(true)}>
+              <Settings className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">偏好设置</TooltipContent>
+        </Tooltip>
       </div>
 
       {/* Tree */}
       <ScrollArea className="flex-1">
         <div className="p-1">
+          <RecentPanel />
           {isLoading && (
             <div className="flex items-center gap-2 px-2 py-4 text-xs text-muted-foreground">
               <Loader2 className="size-3 animate-spin" />
@@ -373,7 +446,7 @@ export function Sidebar() {
       {/* Object Search Dialog */}
       <ObjectSearchDialog
         open={searchOpen}
-        onOpenChange={setSearchOpen}
+        onOpenChange={onSearchOpenChange}
         connectionId={
           // Prefer the active connected pool; fall back to first open pool
           activeConnectionId && openPoolIds.has(activeConnectionId)
@@ -389,6 +462,15 @@ export function Sidebar() {
         initial={editingConn}
         onSave={handleSave}
         onTest={testConnection}
+      />
+
+      {/* Preferences Dialog */}
+      <PreferencesDialog open={prefsOpen} onOpenChange={setPrefsOpen} />
+
+      {/* Import/Export Connections Dialog */}
+      <ImportExportConnectionsDialog
+        open={importExportOpen}
+        onOpenChange={setImportExportOpen}
       />
     </div>
   );

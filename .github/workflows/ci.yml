@@ -35,6 +35,9 @@ jobs:
       - name: Type Check
         run: npx tsc -b
 
+      - name: Unit Tests
+        run: pnpm test
+
       - name: Build
         run: pnpm vite build
 

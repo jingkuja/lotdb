@@ -33,8 +33,7 @@ import { getTableData, getTableColumns, executeStatements, type ColumnFilter } f
 import { generateChangeSql } from "@/lib/generate-change-sql";
 import { useConnections } from "@/hooks/use-connections";
 import type { DatabaseType } from "@/types/database";
-
-const PAGE_SIZE = 200;
+import { usePreferencesStore } from "@/stores/preferences-store";
 
 interface TableDataTabProps {
   connectionId: string;
@@ -62,6 +61,7 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
   const { data: connections = [] } = useConnections();
   const conn = connections.find((c) => c.id === connectionId);
   const dbType: DatabaseType = conn?.dbType ?? "mysql";
+  const { pageSize: PAGE_SIZE, gridFontSize, confirmDml } = usePreferencesStore((s) => s.prefs);
 
   const activeFilters = Object.values(filterMap);
   const offset = page * PAGE_SIZE;
@@ -208,7 +208,10 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
   const pendingCount = Object.keys(pendingEdits).length + pendingDeletes.size + newRows.length;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
+    <div
+      className="flex h-full flex-col overflow-hidden"
+      style={{ "--grid-font-size": `${gridFontSize}px` } as React.CSSProperties}
+    >
       {/* Toolbar */}
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
         <Button
@@ -290,6 +293,14 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
             >
               <Eye className="size-3" />预览
             </Button>
+            {!confirmDml && (
+              <Button
+                variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-emerald-600 dark:text-emerald-400"
+                onClick={() => void handleCommit()} title="直接提交（已关闭 DML 确认）"
+              >
+                提交
+              </Button>
+            )}
             <Button
               variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-muted-foreground"
               onClick={handleRollback} title="回滚所有变更"

@@ -19,6 +19,8 @@ import {
   HardDrive,
   GitCompare,
   Send,
+  Archive,
+  ArchiveRestore,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatabases, useSchemas, useObjects } from "@/hooks/use-schema";
@@ -26,6 +28,8 @@ import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { DatabaseType } from "@/types/database";
 import { BatchExportDialog } from "@/components/transfer/batch-export-dialog";
 import { DataTransferDialog } from "@/components/transfer/data-transfer-dialog";
+import { BackupDialog } from "@/components/transfer/backup-dialog";
+import { RestoreDialog } from "@/components/transfer/restore-dialog";
 import { CreateDatabaseDialog } from "@/components/admin/create-database-dialog";
 import { dropDatabase } from "@/services/tauri-commands";
 import { useQueryClient } from "@tanstack/react-query";
@@ -352,6 +356,8 @@ interface MySqlDbNodeProps {
 function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const [dropping, setDropping] = useState(false);
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [restoreOpen, setRestoreOpen] = useState(false);
   const { data, isLoading, isError } = useObjects(
     connectionId,
     database,
@@ -387,6 +393,20 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
         onClick={() => setExpanded((v) => !v)}
       >
         <button
+          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+          title="备份数据库"
+          onClick={(e) => { e.stopPropagation(); setBackupOpen(true); }}
+        >
+          <Archive className="size-3" />
+        </button>
+        <button
+          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+          title="恢复数据库"
+          onClick={(e) => { e.stopPropagation(); setRestoreOpen(true); }}
+        >
+          <ArchiveRestore className="size-3" />
+        </button>
+        <button
           className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-destructive"
           title="删除数据库"
           onClick={handleDrop}
@@ -394,6 +414,18 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
           <Trash2 className="size-3" />
         </button>
       </TreeRow>
+      <BackupDialog
+        open={backupOpen}
+        onOpenChange={setBackupOpen}
+        connectionId={connectionId}
+        database={database}
+      />
+      <RestoreDialog
+        open={restoreOpen}
+        onOpenChange={setRestoreOpen}
+        connectionId={connectionId}
+        database={database}
+      />
       {expanded && data && (
         <>
           <CategoryNode
@@ -437,6 +469,8 @@ interface PgDbNodeProps {
 function PgDbNode({ database, connectionId, level }: PgDbNodeProps) {
   // Auto-expand since PG always shows a single database
   const [expanded, setExpanded] = useState(true);
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [restoreOpen, setRestoreOpen] = useState(false);
   const { data: schemas = [], isLoading, isError } = useSchemas(
     connectionId,
     database,
@@ -454,6 +488,33 @@ function PgDbNode({ database, connectionId, level }: PgDbNodeProps) {
         loading={expanded && isLoading}
         error={isError}
         onClick={() => setExpanded((v) => !v)}
+      >
+        <button
+          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+          title="备份数据库"
+          onClick={(e) => { e.stopPropagation(); setBackupOpen(true); }}
+        >
+          <Archive className="size-3" />
+        </button>
+        <button
+          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+          title="恢复数据库"
+          onClick={(e) => { e.stopPropagation(); setRestoreOpen(true); }}
+        >
+          <ArchiveRestore className="size-3" />
+        </button>
+      </TreeRow>
+      <BackupDialog
+        open={backupOpen}
+        onOpenChange={setBackupOpen}
+        connectionId={connectionId}
+        database={database}
+      />
+      <RestoreDialog
+        open={restoreOpen}
+        onOpenChange={setRestoreOpen}
+        connectionId={connectionId}
+        database={database}
       />
       {expanded &&
         schemas.map((schema) => (

@@ -622,6 +622,51 @@ export interface TransferResult {
   errorMessage: string | null;
 }
 
+// ─── Backup / Restore ─────────────────────────────────────────────
+
+export interface BackupResult {
+  filePath: string;
+  sizeBytes: number;
+  stderrOutput: string;
+}
+
+export interface RestoreResult {
+  rowsAffected: number;
+  stderrOutput: string;
+}
+
+export async function backupDatabase(
+  connectionId: string,
+  database: string,
+  filePath: string,
+  noData: boolean,
+  noSchema: boolean,
+  tables: string[],
+): Promise<BackupResult> {
+  return invoke<BackupResult>("backup_database", {
+    connectionId,
+    database,
+    filePath,
+    noData,
+    noSchema,
+    tables,
+  });
+}
+
+export async function restoreDatabase(
+  connectionId: string,
+  database: string,
+  filePath: string,
+  createDb: boolean,
+): Promise<RestoreResult> {
+  return invoke<RestoreResult>("restore_database", {
+    connectionId,
+    database,
+    filePath,
+    createDb,
+  });
+}
+
 export async function transferTableData(
   srcConnectionId: string,
   srcDatabase: string,
@@ -650,4 +695,17 @@ export async function transferTableData(
     whereClause,
     limit,
   });
+}
+
+// ─── Connection import/export ──────────────────────────────────────
+
+export interface ImportConnectionsResult {
+  imported: number;
+  skipped: number;
+}
+
+export async function importConnections(
+  configs: ConnectionConfig[],
+): Promise<ImportConnectionsResult> {
+  return invoke<ImportConnectionsResult>("import_connections", { configs });
 }
