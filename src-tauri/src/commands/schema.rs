@@ -12,7 +12,7 @@ pub struct SchemaObjects {
 }
 
 /// List databases visible to the current connection.
-/// MySQL: SHOW DATABASES; PostgreSQL: returns the single connected database.
+/// MySQL: SHOW DATABASES; PostgreSQL: pg_database WHERE datistemplate=false.
 #[tauri::command]
 pub async fn list_databases(
     pools: State<'_, PoolManager>,
@@ -32,44 +32,48 @@ pub async fn list_databases(
             Ok(rows.into_iter().map(|(name,)| name).collect())
         }
         DbPool::Postgres(pool) => {
-            let (name,): (String,) =
-                sqlx::query_as("SELECT current_database()::text")
-                    .fetch_one(pool)
-                    .await
-                    .map_err(|e| format!("查询当前数据库失败: {e}"))?;
-            Ok(vec![name])
+            let rows: Vec<(String,)> = sqlx::query_as(
+                "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
+            )
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("查询数据库列表失败: {e}"))?;
+            Ok(rows.into_iter().map(|(name,)| name).collect())
         }
     }
 }
 
 /// List schemas within a database.
 /// MySQL: always returns empty (schemas == databases in MySQL).
-/// PostgreSQL: lists non-system schemas in the connected database.
+/// PostgreSQL: lists non-system schemas in the target database.
 #[tauri::command]
 pub async fn list_schemas(
     pools: State<'_, PoolManager>,
     connection_id: String,
-    _database: String,
+    database: String,
 ) -> Result<Vec<String>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+    let is_pg = {
+        let entry = pools
+            .pools
+            .get(&connection_id)
+            .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+        matches!(entry.pool, DbPool::Postgres(_))
+    };
 
-    match &entry.pool {
-        DbPool::MySQL(_) => Ok(vec![]),
-        DbPool::Postgres(pool) => {
-            let rows: Vec<(String,)> = sqlx::query_as(
-                "SELECT nspname FROM pg_namespace \
-                 WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema' \
-                 ORDER BY nspname",
-            )
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("查询 Schema 列表失败: {e}"))?;
-            Ok(rows.into_iter().map(|(name,)| name).collect())
-        }
+    if !is_pg {
+        return Ok(vec![]);
     }
+
+    let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT nspname FROM pg_namespace \
+         WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema' \
+         ORDER BY nspname",
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| format!("查询 Schema 列表失败: {e}"))?;
+    Ok(rows.into_iter().map(|(name,)| name).collect())
 }
 
 /// List tables, views, and functions in a database/schema.
@@ -123,7 +127,10 @@ pub async fn list_objects(
                 functions: functions.into_iter().map(|(n,)| n).collect(),
             })
         }
-        DbPool::Postgres(pool) => {
+        DbPool::Postgres(_) => {
+            // Drop the entry lock before awaiting
+            drop(entry);
+            let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
             let schema_name = schema.as_deref().unwrap_or("public");
 
             let tables: Vec<(String,)> = sqlx::query_as(
@@ -132,7 +139,7 @@ pub async fn list_objects(
                  ORDER BY table_name",
             )
             .bind(schema_name)
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .map_err(|e| format!("查询表列表失败: {e}"))?;
 
@@ -141,7 +148,7 @@ pub async fn list_objects(
                  WHERE table_schema = $1 ORDER BY table_name",
             )
             .bind(schema_name)
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .map_err(|e| format!("查询视图列表失败: {e}"))?;
 
@@ -151,7 +158,7 @@ pub async fn list_objects(
                  ORDER BY routine_name",
             )
             .bind(schema_name)
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .map_err(|e| format!("查询函数列表失败: {e}"))?;
 
@@ -274,7 +281,9 @@ pub async fn get_table_columns(
                 })
                 .collect())
         }
-        DbPool::Postgres(pool) => {
+        DbPool::Postgres(_) => {
+            drop(entry);
+            let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
             let schema_name = schema.as_deref().unwrap_or("public");
 
             #[derive(sqlx::FromRow)]
@@ -315,7 +324,7 @@ pub async fn get_table_columns(
             )
             .bind(schema_name)
             .bind(&table)
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .map_err(|e| format!("查询列失败: {e}"))?;
 
@@ -386,7 +395,9 @@ pub async fn get_table_indexes(
             }
             Ok(map.into_values().collect())
         }
-        DbPool::Postgres(pool) => {
+        DbPool::Postgres(_) => {
+            drop(entry);
+            let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
             let schema_name = schema.as_deref().unwrap_or("public");
 
             #[derive(sqlx::FromRow)]
@@ -420,7 +431,7 @@ pub async fn get_table_indexes(
             )
             .bind(schema_name)
             .bind(&table)
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .map_err(|e| format!("查询索引失败: {e}"))?;
 
@@ -513,7 +524,9 @@ pub async fn get_table_foreign_keys(
             }
             Ok(map.into_values().collect())
         }
-        DbPool::Postgres(pool) => {
+        DbPool::Postgres(_) => {
+            drop(entry);
+            let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
             let schema_name = schema.as_deref().unwrap_or("public");
 
             #[derive(sqlx::FromRow)]
@@ -547,7 +560,7 @@ pub async fn get_table_foreign_keys(
             )
             .bind(schema_name)
             .bind(&table)
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .map_err(|e| format!("查询外键失败: {e}"))?;
 

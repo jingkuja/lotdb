@@ -358,6 +358,7 @@ export function DataGrid({
   onSelectAll,
 }: DataGridProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
   const [activeEdit, setActiveEdit] = useState<{ rowIndex: number; colIndex: number } | null>(null);
   const [columnOrder, setColumnOrder] = useState<ColumnOrderState>([]);
   const [draggingColId, setDraggingColId] = useState<string | null>(null);
@@ -488,6 +489,7 @@ export function DataGrid({
     >
       {/* Sticky header */}
       <div
+        ref={headerRef}
         className="shrink-0 overflow-hidden border-b border-border bg-muted/60"
         style={{ height: headerHeight }}
       >
@@ -584,7 +586,15 @@ export function DataGrid({
       </div>
 
       {/* Scrollable body */}
-      <div ref={containerRef} className="flex-1 overflow-auto">
+      <div
+        ref={containerRef}
+        className="flex-1 overflow-auto"
+        onScroll={() => {
+          if (headerRef.current && containerRef.current) {
+            headerRef.current.scrollLeft = containerRef.current.scrollLeft;
+          }
+        }}
+      >
         <div style={{ height: totalHeight, position: "relative" }}>
           {paddingTop > 0 && <div style={{ height: paddingTop }} />}
 

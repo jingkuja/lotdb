@@ -46,12 +46,19 @@ impl DbPool {
 /// Global manager — holds all active connections keyed by connection ID.
 pub struct PoolManager {
     pub pools: DashMap<String, ActiveConnection>,
+    /// Cached per-database sub-pools for PG cross-database access.
+    /// Key: "{connection_id}::{database}"
+    pg_sub_pools: DashMap<String, PgPool>,
+    /// Original configs (user/password/ssl) for building PG sub-pools.
+    configs: DashMap<String, ConnectionConfig>,
 }
 
 impl PoolManager {
     pub fn new() -> Self {
         Self {
             pools: DashMap::new(),
+            pg_sub_pools: DashMap::new(),
+            configs: DashMap::new(),
         }
     }
 
@@ -60,6 +67,7 @@ impl PoolManager {
         self.close(&config.id).await;
         let conn = build_connection(config).await?;
         self.pools.insert(config.id.clone(), conn);
+        self.configs.insert(config.id.clone(), config.clone());
         Ok(())
     }
 
@@ -69,6 +77,73 @@ impl PoolManager {
             conn.pool.close().await;
             // _tunnel dropped here → SSH session closed
         }
+        self.configs.remove(id);
+        // Drop all cached sub-pools for this connection
+        let prefix = format!("{id}::");
+        self.pg_sub_pools.retain(|k, _| !k.starts_with(&prefix));
+    }
+
+    /// For PostgreSQL: return (or lazily build) a PgPool connected to `database`.
+    /// Caches sub-pools so repeated calls are cheap.
+    pub async fn pg_pool_for_database(
+        &self,
+        id: &str,
+        database: &str,
+    ) -> Result<PgPool, String> {
+        let entry = self
+            .pools
+            .get(id)
+            .ok_or_else(|| format!("连接 {id} 未打开"))?;
+
+        let main_pool = match &entry.pool {
+            DbPool::Postgres(p) => p,
+            DbPool::MySQL(_) => return Err("该连接是 MySQL，无法切换 PG 数据库".into()),
+        };
+
+        let sub_key = format!("{id}::{database}");
+
+        // Return cached sub-pool if already built
+        if let Some(p) = self.pg_sub_pools.get(&sub_key) {
+            return Ok(p.clone());
+        }
+
+        // Check whether main pool is already connected to this database
+        // by running a quick query — avoids building a new pool for the default db
+        let current_db: String =
+            sqlx::query_scalar("SELECT current_database()::text")
+                .fetch_one(main_pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+        if current_db == database {
+            return Ok(main_pool.clone());
+        }
+
+        // Build a new pool for the requested database
+        let config = self
+            .configs
+            .get(id)
+            .ok_or_else(|| format!("找不到连接配置 {id}"))?;
+
+        let opts = build_pg_opts(
+            &config.user,
+            &config.password,
+            &entry.effective_host,
+            entry.effective_port,
+            &config,
+        )
+        .map_err(|e| format!("PG 连接配置错误: {e}"))?
+        .database(database);
+
+        let pool = PgPoolOptions::new()
+            .max_connections(3)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect_with(opts)
+            .await
+            .map_err(|e| format!("连接数据库 {database} 失败: {e}"))?;
+
+        self.pg_sub_pools.insert(sub_key, pool.clone());
+        Ok(pool)
     }
 
     /// Return IDs of all currently open connections.

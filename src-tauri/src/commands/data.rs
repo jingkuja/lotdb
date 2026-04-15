@@ -92,9 +92,11 @@ pub async fn get_table_data(
         DbPool::MySQL(pool) => {
             fetch_mysql(pool, &database, &table, limit, offset, order_by.as_deref(), dir, filters_ref).await
         }
-        DbPool::Postgres(pool) => {
+        DbPool::Postgres(_) => {
+            drop(entry);
+            let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
             let schema_ref = schema.as_deref().unwrap_or("public");
-            fetch_postgres(pool, &database, schema_ref, &table, limit, offset, order_by.as_deref(), dir, filters_ref).await
+            fetch_postgres(&pool, &database, schema_ref, &table, limit, offset, order_by.as_deref(), dir, filters_ref).await
         }
     }
 }
@@ -196,6 +198,7 @@ async fn fetch_postgres(
 pub async fn execute_statements(
     pools: State<'_, PoolManager>,
     connection_id: String,
+    database: Option<String>,
     sqls: Vec<String>,
 ) -> Result<u64, String> {
     let entry = pools
@@ -217,7 +220,18 @@ pub async fn execute_statements(
             tx.commit().await.map_err(|e| format!("提交事务失败: {e}"))?;
             Ok(total)
         }
-        DbPool::Postgres(pool) => {
+        DbPool::Postgres(_) => {
+            drop(entry);
+            let pool = if let Some(db) = &database {
+                pools.pg_pool_for_database(&connection_id, db).await?
+            } else {
+                let e = pools.pools.get(&connection_id)
+                    .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+                match &e.pool {
+                    DbPool::Postgres(p) => p.clone(),
+                    _ => unreachable!(),
+                }
+            };
             let mut tx = pool.begin().await.map_err(|e| format!("开启事务失败: {e}"))?;
             let mut total: u64 = 0;
             for sql in &sqls {
@@ -234,6 +248,8 @@ pub async fn execute_statements(
 }
 
 fn mysql_val(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+
     let raw = match row.try_get_raw(i) {
         Ok(v) => v,
         Err(_) => return serde_json::Value::Null,
@@ -242,6 +258,7 @@ fn mysql_val(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
         return serde_json::Value::Null;
     }
     let type_name = raw.type_info().name().to_ascii_lowercase();
+
     if type_name.contains("int") {
         if let Ok(n) = row.try_get::<i64, _>(i) {
             return serde_json::json!(n);
@@ -257,13 +274,46 @@ fn mysql_val(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
             return serde_json::json!(b);
         }
     }
+
+    // DATETIME / TIMESTAMP → NaiveDateTime
+    if type_name == "datetime" || type_name == "timestamp" {
+        if let Ok(dt) = row.try_get::<NaiveDateTime, _>(i) {
+            return serde_json::json!(dt.to_string());
+        }
+    }
+
+    // DATE
+    if type_name == "date" {
+        if let Ok(d) = row.try_get::<NaiveDate, _>(i) {
+            return serde_json::json!(d.to_string());
+        }
+    }
+
+    // TIME
+    if type_name == "time" {
+        if let Ok(t) = row.try_get::<NaiveTime, _>(i) {
+            return serde_json::json!(t.to_string());
+        }
+    }
+
+    // JSON
+    if type_name == "json" {
+        if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
+            return v;
+        }
+    }
+
+    // Fallback: text / varchar / enum / set / blob …
     if let Ok(s) = row.try_get::<String, _>(i) {
         return serde_json::json!(s);
     }
+
     serde_json::Value::Null
 }
 
 fn pg_val(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+
     let raw = match row.try_get_raw(i) {
         Ok(v) => v,
         Err(_) => return serde_json::Value::Null,
@@ -272,23 +322,91 @@ fn pg_val(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
         return serde_json::Value::Null;
     }
     let type_name = raw.type_info().name().to_ascii_lowercase();
-    if ["int2", "int4", "int8", "oid"].iter().any(|t| type_name.contains(t)) {
+
+    // Integer types
+    if ["int2", "int4", "int8", "oid"].iter().any(|t| type_name.as_str() == *t) {
         if let Ok(n) = row.try_get::<i64, _>(i) {
             return serde_json::json!(n);
         }
     }
-    if ["float4", "float8", "numeric"].iter().any(|t| type_name.contains(t)) {
+
+    // Float / numeric
+    if ["float4", "float8"].iter().any(|t| type_name.as_str() == *t) {
         if let Ok(n) = row.try_get::<f64, _>(i) {
             return serde_json::json!(n);
         }
     }
+    if type_name == "numeric" {
+        // numeric may not fit f64 — return as string
+        if let Ok(n) = row.try_get::<f64, _>(i) {
+            return serde_json::json!(n);
+        }
+        if let Ok(s) = row.try_get::<String, _>(i) {
+            return serde_json::json!(s);
+        }
+    }
+
+    // Boolean
     if type_name == "bool" {
         if let Ok(b) = row.try_get::<bool, _>(i) {
             return serde_json::json!(b);
         }
     }
+
+    // JSON / JSONB — return the value directly so the frontend gets a real object
+    if type_name == "json" || type_name == "jsonb" {
+        if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
+            return v;
+        }
+    }
+
+    // Timestamp with time zone
+    if type_name == "timestamptz" {
+        if let Ok(dt) = row.try_get::<DateTime<Utc>, _>(i) {
+            return serde_json::json!(dt.to_rfc3339());
+        }
+    }
+
+    // Timestamp without time zone
+    if type_name == "timestamp" {
+        if let Ok(dt) = row.try_get::<NaiveDateTime, _>(i) {
+            return serde_json::json!(dt.to_string());
+        }
+    }
+
+    // Date
+    if type_name == "date" {
+        if let Ok(d) = row.try_get::<NaiveDate, _>(i) {
+            return serde_json::json!(d.to_string());
+        }
+    }
+
+    // Time / timetz
+    if type_name == "time" || type_name == "timetz" {
+        if let Ok(t) = row.try_get::<NaiveTime, _>(i) {
+            return serde_json::json!(t.to_string());
+        }
+    }
+
+    // UUID
+    if type_name == "uuid" {
+        if let Ok(u) = row.try_get::<uuid::Uuid, _>(i) {
+            return serde_json::json!(u.to_string());
+        }
+    }
+
+    // Bytea — hex-encode
+    if type_name == "bytea" {
+        if let Ok(b) = row.try_get::<Vec<u8>, _>(i) {
+            let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
+            return serde_json::json!(format!("\\x{hex}"));
+        }
+    }
+
+    // Fallback: anything that can be decoded as text
     if let Ok(s) = row.try_get::<String, _>(i) {
         return serde_json::json!(s);
     }
+
     serde_json::Value::Null
 }

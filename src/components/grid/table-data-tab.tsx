@@ -197,7 +197,7 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
   // ── Commit ────────────────────────────────────────────────────────
 
   const handleCommit = useCallback(async () => {
-    await executeStatements(connectionId, changeSqls);
+    await executeStatements(connectionId, changeSqls, database);
     // Reset pending state and refresh data
     setPendingEdits({});
     setPendingDeletes(new Set());

@@ -171,12 +171,12 @@ function ObjectLeaf({
   };
 
   const handleClick = () => {
-    if (type === "table") openTab("table-structure");
+    if (type === "table") openTab("table-data");
     else openTab("query");
   };
 
   const handleDoubleClick = () => {
-    if (type === "table") openTab("table-data");
+    if (type === "table") openTab("table-structure");
     else openTab("query");
   };
 

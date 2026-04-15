@@ -286,8 +286,9 @@ export async function getTableData(
 export async function executeStatements(
   connectionId: string,
   sqls: string[],
+  database?: string,
 ): Promise<number> {
-  return invoke<number>("execute_statements", { connectionId, sqls });
+  return invoke<number>("execute_statements", { connectionId, sqls, database: database ?? null });
 }
 
 // ─── Snippets ─────────────────────────────────────────────────────
