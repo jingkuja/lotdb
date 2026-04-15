@@ -18,5 +18,3 @@ src-tauri/target/
 
 # Logs
 *.log
-plan.md
-.claude
