@@ -9,6 +9,8 @@ export interface ConnectionConfig {
   user: string;
   password: string;
   database?: string;
+  /** 只读模式：拦截 DML/DDL */
+  readonly?: boolean;
   groupId?: string;
   ssh?: SSHConfig;
   ssl?: SSLConfig;

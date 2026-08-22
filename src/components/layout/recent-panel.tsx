@@ -8,6 +8,8 @@ import {
   PenSquare,
   X,
   Trash2,
+  FileCode2,
+  Boxes,
 } from "lucide-react";
 import { useRecentStore, type RecentItem } from "@/stores/recent-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
@@ -24,6 +26,8 @@ const ICON_MAP: Record<Tab["type"], React.ElementType> = {
   "process-list": Terminal,
   "disk-usage": Terminal,
   "schema-diff": Terminal,
+  "object-ddl": FileCode2,
+  "object-manager": Boxes,
 };
 
 function RecentRow({ item }: { item: RecentItem }) {

@@ -34,6 +34,15 @@ export interface QueryResult {
   rows: unknown[][];
   affectedRows: number;
   executionMs: number;
+  /** 结果超出上限被截断 */
+  truncated: boolean;
+}
+
+export interface ExecuteOptions {
+  /** 结果行数上限；0 = 不限制 */
+  maxRows?: number;
+  /** 本次执行的唯一 ID，用于取消查询 */
+  executionId?: string;
 }
 
 export async function openConnection(config: ConnectionConfig): Promise<void> {
@@ -51,16 +60,34 @@ export async function getActiveConnections(): Promise<string[]> {
 export async function executeQuery(
   connectionId: string,
   sql: string,
+  opts?: ExecuteOptions,
 ): Promise<QueryResult> {
-  return invoke<QueryResult>("execute_query", { connectionId, sql });
+  return invoke<QueryResult>("execute_query", {
+    connectionId,
+    sql,
+    maxRows: opts?.maxRows ?? null,
+    executionId: opts?.executionId ?? null,
+  });
 }
 
 export async function executeQueryWithParams(
   connectionId: string,
   sql: string,
   params: (string | number | boolean | null)[],
+  opts?: ExecuteOptions,
 ): Promise<QueryResult> {
-  return invoke<QueryResult>("execute_query_with_params", { connectionId, sql, params });
+  return invoke<QueryResult>("execute_query_with_params", {
+    connectionId,
+    sql,
+    params,
+    maxRows: opts?.maxRows ?? null,
+    executionId: opts?.executionId ?? null,
+  });
+}
+
+/** 取消一个正在执行的查询（经独立连接发送 KILL / pg_cancel_backend）。 */
+export async function cancelQuery(executionId: string): Promise<void> {
+  return invoke<void>("cancel_query", { executionId });
 }
 
 // ─── Schema / object browser ──────────────────────────────────────
@@ -191,6 +218,215 @@ export async function getCompletionSchema(
   connectionId: string,
 ): Promise<CompletionTable[]> {
   return invoke<CompletionTable[]>("get_completion_schema", { connectionId });
+}
+
+// ─── Object DDL (views / functions) ───────────────────────────────
+
+export interface ObjectDdl {
+  objectType: "view" | "function" | "procedure" | "trigger";
+  name: string;
+  ddl: string;
+}
+
+export async function getViewDdl(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  name: string,
+): Promise<ObjectDdl> {
+  return invoke<ObjectDdl>("get_view_ddl", { connectionId, database, schema: schema ?? null, name });
+}
+
+export async function getFunctionDdl(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  name: string,
+): Promise<ObjectDdl> {
+  return invoke<ObjectDdl>("get_function_ddl", { connectionId, database, schema: schema ?? null, name });
+}
+
+// ─── Triggers ─────────────────────────────────────────────────────
+
+export interface TriggerInfo {
+  name: string;
+  table: string;
+  timing: string;
+  event: string;
+  ddl: string;
+}
+
+export async function listTriggers(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  table?: string,
+): Promise<TriggerInfo[]> {
+  return invoke<TriggerInfo[]>("list_triggers", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    table: table ?? null,
+  });
+}
+
+export async function getTriggerDdl(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  table: string | undefined,
+  name: string,
+): Promise<ObjectDdl> {
+  return invoke<ObjectDdl>("get_trigger_ddl", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    table: table ?? null,
+    name,
+  });
+}
+
+export async function dropTrigger(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  table: string,
+  name: string,
+): Promise<void> {
+  return invoke<void>("drop_trigger", { connectionId, database, schema: schema ?? null, table, name });
+}
+
+// ─── PG sequences ─────────────────────────────────────────────────
+
+export interface SequenceInfo {
+  name: string;
+  dataType: string;
+  startValue: number;
+  minValue: number;
+  maxValue: number;
+  incrementBy: number;
+  cycle: boolean;
+  lastValue: number | null;
+}
+
+export interface SequenceOptions {
+  start?: number | null;
+  increment?: number | null;
+  min?: number | null;
+  max?: number | null;
+  cycle: boolean;
+}
+
+export async function listSequences(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+): Promise<SequenceInfo[]> {
+  return invoke<SequenceInfo[]>("list_sequences", { connectionId, database, schema: schema ?? null });
+}
+
+export async function createSequence(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  name: string,
+  options: SequenceOptions,
+): Promise<void> {
+  return invoke<void>("create_sequence", { connectionId, database, schema: schema ?? null, name, options });
+}
+
+export async function restartSequence(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  name: string,
+  value?: number | null,
+): Promise<void> {
+  return invoke<void>("restart_sequence", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    name,
+    value: value ?? null,
+  });
+}
+
+export async function dropSequence(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  name: string,
+): Promise<void> {
+  return invoke<void>("drop_sequence", { connectionId, database, schema: schema ?? null, name });
+}
+
+// ─── PG enum types ────────────────────────────────────────────────
+
+export interface EnumTypeInfo {
+  name: string;
+  labels: string[];
+}
+
+export async function listEnums(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+): Promise<EnumTypeInfo[]> {
+  return invoke<EnumTypeInfo[]>("list_enums", { connectionId, database, schema: schema ?? null });
+}
+
+export async function createEnumType(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  name: string,
+  labels: string[],
+): Promise<void> {
+  return invoke<void>("create_enum_type", { connectionId, database, schema: schema ?? null, name, labels });
+}
+
+export async function addEnumValue(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  name: string,
+  label: string,
+): Promise<void> {
+  return invoke<void>("add_enum_value", { connectionId, database, schema: schema ?? null, name, label });
+}
+
+export async function dropEnumType(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  name: string,
+  cascade: boolean,
+): Promise<void> {
+  return invoke<void>("drop_enum_type", { connectionId, database, schema: schema ?? null, name, cascade });
+}
+
+// ─── Connection groups ────────────────────────────────────────────
+
+export interface ConnectionGroup {
+  id: string;
+  name: string;
+  parentId?: string;
+}
+
+export async function listGroups(): Promise<ConnectionGroup[]> {
+  return invoke<ConnectionGroup[]>("list_groups");
+}
+
+export async function createGroup(name: string): Promise<ConnectionGroup> {
+  return invoke<ConnectionGroup>("create_group", { name, parentId: null });
+}
+
+export async function renameGroup(id: string, name: string): Promise<void> {
+  return invoke<void>("rename_group", { id, name });
+}
+
+export async function deleteGroup(id: string): Promise<void> {
+  return invoke<void>("delete_group", { id });
 }
 
 // ─── Query history ────────────────────────────────────────────────

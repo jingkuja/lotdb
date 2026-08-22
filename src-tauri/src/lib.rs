@@ -1,8 +1,10 @@
 pub mod commands;
 pub mod db;
+pub mod error;
 pub mod models;
 pub mod utils;
 
+use commands::query::QueryRegistry;
 use db::pool::PoolManager;
 use tauri::Manager;
 
@@ -10,6 +12,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .manage(PoolManager::new())
+        .manage(QueryRegistry::default())
         .setup(|app| {
             let app_data_dir = app
                 .path()
@@ -45,6 +48,7 @@ pub fn run() {
             commands::query::get_active_connections,
             commands::query::execute_query,
             commands::query::execute_query_with_params,
+            commands::query::cancel_query,
             // Schema / object browser
             commands::schema::list_databases,
             commands::schema::list_schemas,
@@ -57,6 +61,25 @@ pub fn run() {
             commands::schema::search_objects,
             // Autocomplete schema
             commands::schema::get_completion_schema,
+            // Object DDL / triggers / sequences / enums
+            commands::objects::get_view_ddl,
+            commands::objects::get_function_ddl,
+            commands::objects::list_triggers,
+            commands::objects::get_trigger_ddl,
+            commands::objects::drop_trigger,
+            commands::objects::list_sequences,
+            commands::objects::create_sequence,
+            commands::objects::restart_sequence,
+            commands::objects::drop_sequence,
+            commands::objects::list_enums,
+            commands::objects::create_enum_type,
+            commands::objects::add_enum_value,
+            commands::objects::drop_enum_type,
+            // Connection groups
+            commands::groups::list_groups,
+            commands::groups::create_group,
+            commands::groups::rename_group,
+            commands::groups::delete_group,
             // Query history
             commands::history::save_history,
             commands::history::get_history,

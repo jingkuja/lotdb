@@ -3,7 +3,17 @@ import { create } from "zustand";
 export interface Tab {
   id: string;
   title: string;
-  type: "query" | "table-data" | "table-structure" | "designer" | "users" | "process-list" | "disk-usage" | "schema-diff";
+  type:
+    | "query"
+    | "table-data"
+    | "table-structure"
+    | "designer"
+    | "users"
+    | "process-list"
+    | "disk-usage"
+    | "schema-diff"
+    | "object-ddl"
+    | "object-manager";
   connectionId: string;
   metadata?: Record<string, unknown>;
 }

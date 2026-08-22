@@ -328,6 +328,37 @@ lotdb/
 - [ ] DMG 打包 + 代码签名 + 公证
 - [ ] 自动更新（tauri-plugin-updater）
 
+### Phase 9 — 查询执行链路加固（2 周）
+
+> 2026-07 代码审查发现的正确性问题，日常使用必然触发，优先级最高。
+
+- [x] 结果集行数上限：`execute_query` 弃用 `fetch_all` 全量加载，改为流式取前 N 行（默认 1000，偏好设置可调），结果面板提示"已截断"（query.rs）
+- [x] 查询取消：执行前记录会话 ID（MySQL `CONNECTION_ID()` / PG `pg_backend_pid()`），前端加"停止"按钮，经独立连接发 `KILL QUERY` / `pg_cancel_backend`
+- [x] 修复 DML 影响行数恒为 0：按语句类型分流，SELECT/SHOW/EXPLAIN 走 fetch，其余走 `execute()` 取 `rows_affected()`（query.rs:114/214）
+- [x] 统一值转换器，消灭静默 NULL：uuid/jsonb/数组转字符串，bytea/BLOB 显示 hex 或大小占位，DECIMAL / BIGINT UNSIGNED 保留字符串防精度丢失，未知类型显示 `(不支持的类型)` 而非 NULL；合并 query.rs 与 data.rs 两套转换逻辑（统一至 db/value.rs，transfer.rs 一并接入）
+- [x] 表数据筛选改参数绑定：`build_where` 的值改 `query_with` 绑定，列名过 `quote_ident`（转义内部反引号/双引号），LIKE 转义 `%`/`_`，MySQL 处理反斜杠（data.rs:25-66；PG 按列类型 `$n::int4` 显式 cast，避免 text 参数与数值列比较报错）
+- [x] 参数绑定不吞错误：`bind_*_arg` 的 `.unwrap_or(())` 改为返回 `Result` 上抛，杜绝参数错位（query.rs:121-135）
+
+### Phase 10 — 对象管理补全（2 周）
+
+> 对齐功能规格第 2 节中尚未落地的部分。
+
+- [x] 视图 DDL 查看（`SHOW CREATE VIEW` / `pg_get_viewdef`），只读源码 tab
+- [x] 函数/存储过程 DDL 查看（`SHOW CREATE FUNCTION` / `pg_get_functiondef`）与编辑执行（"编辑执行"按钮把 DDL 带入查询标签页）
+- [x] 多语句拆分执行：编辑器按分号拆分（跳过字符串/注释/dollar-quote 内的分号），逐条执行，结果区多结果集标签（lib/split-statements.ts + result-panel.tsx 多结果 tab）
+- [x] 触发器浏览与查看/删除（对象树 Triggers 分类，MySQL/PG 均支持）
+- [x] 序列(PG) 浏览与管理（对象树 Sequences 分类 + 管理 tab：新建/重置/删除）
+- [x] 枚举类型(PG) 浏览与管理（对象树 Enums 分类 + 管理 tab：新建/加值/删除）
+- [x] 连接分组 UI（模型 `group_id` 字段已预留，connection.rs:70；侧边栏分组渲染/新建/重命名/删除 + 连接对话框分组选择）
+
+### Phase 11 — 工程质量与健壮性（1.5 周）
+
+- [x] Rust 侧单元测试：`build_where`、值转换、DDL 拼接等纯逻辑先补齐（transfer.rs / schema.rs 重点）——25 个单测覆盖 sql_val/csv_cell/build_select_sql/pg_action_code/BLOB 占位/数组引号/错误分类等
+- [x] testcontainers 集成测试：真实 MySQL/PG 跑查询链路，接入 CI（tests/integration.rs，env 门控：本地指向容器、CI 用 GitHub Actions services 起 mysql:8/postgres:16；覆盖值转换精度/DML 行数/截断/取消/筛选防注入/只读，共 2 条全链路用例；顺带修了一个真 bug：PG NUMERIC 需 bigdecimal 解码）
+- [x] 错误类型化：`Result<_, String>` 改为 `AppError` enum（连接错误/SQL 错误/IO 错误），前端按类别提示（error.rs；查询/数据/连接命令返回 `{code, message}`，其余渐进迁移）
+- [x] 断线体验：捕获连接类错误提示"连接已断开"并提供一键重连（关旧池重开）；SSH 隧道断开恢复（重连即重建整池+隧道；结果面板与数据网格均带"重新连接"按钮）
+- [x] 连接级只读模式：生产库防误操作，在 `execute_statements` 层拦截 DML/DDL（同时覆盖 SQL 编辑器 `execute_query` 路径；连接对话框开关 + 侧边栏锁图标 + SQLite 迁移）
+
 ---
 
 ## 五、里程碑
@@ -343,6 +374,9 @@ lotdb/
 | **M6 - 能管理** | W14.5 | 数据库管理功能完整 |
 | **M7 - 能同步备份** | W16.5 | 传输与备份功能完整 |
 | **M8 - 可发布** | W18.5 | 主题/快捷键/打包/签名完成，Alpha 发布 |
+| **M9 - 查询链路扎实** | W20.5 | 结果截断/取消/类型转换/参数绑定问题清零 |
+| **M10 - 对象管理完整** | W22.5 | 视图/函数/触发器/序列/枚举 + 多语句执行 |
+| **M11 - 质量加固** | W24 | Rust 测试 + 错误类型化 + 断线恢复 + 只读模式 |
 
 ---
 

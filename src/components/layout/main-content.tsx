@@ -1,5 +1,8 @@
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { TableStructurePanel } from "@/components/explorer/table-structure-panel";
+import { ObjectDdlTab } from "@/components/explorer/object-ddl-tab";
+import { SequenceManagerTab } from "@/components/explorer/sequence-manager-tab";
+import { EnumManagerTab } from "@/components/explorer/enum-manager-tab";
 import { QueryTab } from "@/components/editor/query-tab";
 import { TableDataTab } from "@/components/grid/table-data-tab";
 import { TableDesignerTab } from "@/components/designer/table-designer-tab";
@@ -86,6 +89,12 @@ export function MainContent() {
         schema?: string;
         objectName?: string;
         objectType?: string;
+        /** object-ddl tab: "view" | "function" | "trigger" */
+        ddlKind?: "view" | "function" | "trigger";
+        /** trigger's parent table */
+        table?: string;
+        /** object-manager tab: "sequences" | "enums" */
+        managerKind?: "sequences" | "enums";
       }
     | undefined;
 
@@ -183,6 +192,47 @@ export function MainContent() {
 
   if (activeTab.type === "schema-diff") {
     return <SchemaDiffTab />;
+  }
+
+  if (
+    activeTab.type === "object-ddl" &&
+    meta?.database &&
+    meta?.objectName &&
+    meta?.ddlKind
+  ) {
+    return (
+      <ObjectDdlTab
+        connectionId={activeTab.connectionId}
+        database={meta.database}
+        schema={meta.schema}
+        name={meta.objectName}
+        kind={meta.ddlKind}
+        triggerTable={meta.table}
+      />
+    );
+  }
+
+  if (
+    activeTab.type === "object-manager" &&
+    meta?.database &&
+    meta?.managerKind
+  ) {
+    if (meta.managerKind === "sequences") {
+      return (
+        <SequenceManagerTab
+          connectionId={activeTab.connectionId}
+          database={meta.database}
+          schema={meta.schema}
+        />
+      );
+    }
+    return (
+      <EnumManagerTab
+        connectionId={activeTab.connectionId}
+        database={meta.database}
+        schema={meta.schema}
+      />
+    );
   }
 
   return (

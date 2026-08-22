@@ -32,6 +32,12 @@ pub async fn init_local_db(app_data_dir: PathBuf) -> Result<SqlitePool, sqlx::Er
     .execute(&pool)
     .await?;
 
+    // Migration: readonly flag (added after first release) — ignore
+    // "duplicate column" errors from databases that already have it.
+    let _ = sqlx::query("ALTER TABLE connections ADD COLUMN readonly INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS connection_groups (
             id TEXT PRIMARY KEY,

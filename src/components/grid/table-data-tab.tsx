@@ -32,6 +32,9 @@ import { ImportDialog } from "@/components/transfer/import-dialog";
 import { getTableData, getTableColumns, executeStatements, type ColumnFilter } from "@/services/tauri-commands";
 import { generateChangeSql } from "@/lib/generate-change-sql";
 import { useConnections } from "@/hooks/use-connections";
+import { useConnectionStore } from "@/stores/connection-store";
+import { openConnection } from "@/services/tauri-commands";
+import { formatDbError, isConnectionError } from "@/lib/error";
 import type { DatabaseType } from "@/types/database";
 import { usePreferencesStore } from "@/stores/preferences-store";
 
@@ -61,6 +64,14 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
   const { data: connections = [] } = useConnections();
   const conn = connections.find((c) => c.id === connectionId);
   const dbType: DatabaseType = conn?.dbType ?? "mysql";
+  const markPoolOpen = useConnectionStore((s) => s.markPoolOpen);
+
+  const handleReconnect = async () => {
+    if (!conn) return;
+    await openConnection(conn);
+    markPoolOpen(conn.id);
+    await refetch();
+  };
   const { pageSize: PAGE_SIZE, gridFontSize, confirmDml } = usePreferencesStore((s) => s.prefs);
 
   const activeFilters = Object.values(filterMap);
@@ -345,8 +356,17 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
           </div>
         )}
         {isError && (
-          <div className="flex flex-1 items-center justify-center gap-2 text-sm text-destructive">
-            <AlertCircle className="size-4" />{String(error)}
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-destructive">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="size-4" />
+              {isConnectionError(error) ? "连接已断开" : "加载失败"}
+            </div>
+            <div className="text-xs text-muted-foreground">{formatDbError(error)}</div>
+            {isConnectionError(error) && (
+              <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => void handleReconnect()}>
+                重新连接
+              </Button>
+            )}
           </div>
         )}
         {data && data.rows.length === 0 && !isLoading && (

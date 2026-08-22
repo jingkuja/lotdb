@@ -122,12 +122,11 @@ pub async fn list_users(
 
     match &entry.pool {
         DbPool::MySQL(pool) => {
-            let rows: Vec<(String, String, String)> = sqlx::query_as(
-                "SELECT user, host, Super_priv FROM mysql.user ORDER BY user, host",
-            )
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("查询用户列表失败: {e}"))?;
+            let rows: Vec<(String, String, String)> =
+                sqlx::query_as("SELECT user, host, Super_priv FROM mysql.user ORDER BY user, host")
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|e| format!("查询用户列表失败: {e}"))?;
 
             Ok(rows
                 .into_iter()
@@ -242,12 +241,7 @@ fn parse_mysql_grant_line(line: &str) -> Option<DbPrivilege> {
 
     // Extract database name (between backticks or raw)
     let db_name = if on_target.starts_with('`') {
-        on_target
-            .splitn(2, '`')
-            .nth(1)?
-            .splitn(2, '`')
-            .next()?
-            .to_string()
+        on_target.split_once('`')?.1.split('`').next()?.to_string()
     } else {
         on_target.split('.').next()?.to_string()
     };
@@ -276,8 +270,7 @@ pub async fn create_user(
     match &entry.pool {
         DbPool::MySQL(pool) => {
             let h = if host.is_empty() { "%" } else { &host };
-            let sql =
-                format!("CREATE USER `{username}`@`{h}` IDENTIFIED BY '{password}'");
+            let sql = format!("CREATE USER `{username}`@`{h}` IDENTIFIED BY '{password}'");
             sqlx::query(&sql)
                 .execute(pool)
                 .await
@@ -433,6 +426,28 @@ pub struct ProcessInfo {
     pub info: Option<String>,
 }
 
+/// (id, user, host, db, command, time, state, info)
+type MysqlProcessRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+);
+/// (pid, user, client, db, state, duration, query)
+type PgProcessRow = (
+    i32,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<String>,
+);
+
 #[tauri::command]
 pub async fn list_processes(
     pools: State<'_, PoolManager>,
@@ -446,34 +461,34 @@ pub async fn list_processes(
     match &entry.pool {
         DbPool::MySQL(pool) => {
             // id, user, host, db, command, time, state, info
-            let rows: Vec<(i64, String, String, Option<String>, String, i64, Option<String>, Option<String>)> =
-                sqlx::query_as(
-                    "SELECT id, user, host, db, command, time, state, info \
+            let rows: Vec<MysqlProcessRow> = sqlx::query_as(
+                "SELECT id, user, host, db, command, time, state, info \
                      FROM information_schema.PROCESSLIST \
                      ORDER BY time DESC",
-                )
-                .fetch_all(pool)
-                .await
-                .map_err(|e| format!("查询进程列表失败: {e}"))?;
+            )
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("查询进程列表失败: {e}"))?;
 
             Ok(rows
                 .into_iter()
-                .map(|(id, user, host, db, command, time, state, info)| ProcessInfo {
-                    id,
-                    user,
-                    host,
-                    database: db,
-                    command,
-                    time_sec: time,
-                    state: state.unwrap_or_default(),
-                    info,
-                })
+                .map(
+                    |(id, user, host, db, command, time, state, info)| ProcessInfo {
+                        id,
+                        user,
+                        host,
+                        database: db,
+                        command,
+                        time_sec: time,
+                        state: state.unwrap_or_default(),
+                        info,
+                    },
+                )
                 .collect())
         }
         DbPool::Postgres(pool) => {
-            let rows: Vec<(i32, Option<String>, Option<String>, Option<String>, Option<String>, Option<f64>, Option<String>)> =
-                sqlx::query_as(
-                    "SELECT pid, \
+            let rows: Vec<PgProcessRow> = sqlx::query_as(
+                "SELECT pid, \
                             usename, \
                             COALESCE(client_addr::text, ''), \
                             datname, \
@@ -483,10 +498,10 @@ pub async fn list_processes(
                      FROM pg_stat_activity \
                      WHERE pid <> pg_backend_pid() \
                      ORDER BY query_start DESC NULLS LAST",
-                )
-                .fetch_all(pool)
-                .await
-                .map_err(|e| format!("查询进程列表失败: {e}"))?;
+            )
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("查询进程列表失败: {e}"))?;
 
             Ok(rows
                 .into_iter()
@@ -653,13 +668,15 @@ pub async fn get_table_sizes(
 
             Ok(rows
                 .into_iter()
-                .map(|(table_name, data_bytes, index_bytes, row_count)| TableSizeInfo {
-                    total_bytes: data_bytes + index_bytes,
-                    table_name,
-                    data_bytes,
-                    index_bytes,
-                    row_count,
-                })
+                .map(
+                    |(table_name, data_bytes, index_bytes, row_count)| TableSizeInfo {
+                        total_bytes: data_bytes + index_bytes,
+                        table_name,
+                        data_bytes,
+                        index_bytes,
+                        row_count,
+                    },
+                )
                 .collect())
         }
         DbPool::Postgres(pool) => {
@@ -680,13 +697,15 @@ pub async fn get_table_sizes(
 
             Ok(rows
                 .into_iter()
-                .map(|(table_name, data_bytes, index_bytes, total_bytes)| TableSizeInfo {
-                    table_name,
-                    data_bytes,
-                    index_bytes,
-                    total_bytes,
-                    row_count: None,
-                })
+                .map(
+                    |(table_name, data_bytes, index_bytes, total_bytes)| TableSizeInfo {
+                        table_name,
+                        data_bytes,
+                        index_bytes,
+                        total_bytes,
+                        row_count: None,
+                    },
+                )
                 .collect())
         }
     }
@@ -727,10 +746,7 @@ pub async fn explain_query(
                 Ok(ExplainResult {
                     is_text: true,
                     columns: vec!["EXPLAIN".to_string()],
-                    rows: rows
-                        .into_iter()
-                        .map(|(line,)| vec![Some(line)])
-                        .collect(),
+                    rows: rows.into_iter().map(|(line,)| vec![Some(line)]).collect(),
                 })
             } else {
                 // MySQL EXPLAIN returns tabular rows
@@ -763,11 +779,7 @@ pub async fn explain_query(
                         columns
                             .iter()
                             .enumerate()
-                            .map(|(i, _)| {
-                                row.try_get::<Option<String>, _>(i)
-                                    .ok()
-                                    .flatten()
-                            })
+                            .map(|(i, _)| row.try_get::<Option<String>, _>(i).ok().flatten())
                             .collect()
                     })
                     .collect();
@@ -792,10 +804,7 @@ pub async fn explain_query(
             Ok(ExplainResult {
                 is_text: true,
                 columns: vec!["QUERY PLAN".to_string()],
-                rows: rows
-                    .into_iter()
-                    .map(|(line,)| vec![Some(line)])
-                    .collect(),
+                rows: rows.into_iter().map(|(line,)| vec![Some(line)]).collect(),
             })
         }
     }

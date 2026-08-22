@@ -85,11 +85,7 @@ impl PoolManager {
 
     /// For PostgreSQL: return (or lazily build) a PgPool connected to `database`.
     /// Caches sub-pools so repeated calls are cheap.
-    pub async fn pg_pool_for_database(
-        &self,
-        id: &str,
-        database: &str,
-    ) -> Result<PgPool, String> {
+    pub async fn pg_pool_for_database(&self, id: &str, database: &str) -> Result<PgPool, String> {
         let entry = self
             .pools
             .get(id)
@@ -109,11 +105,10 @@ impl PoolManager {
 
         // Check whether main pool is already connected to this database
         // by running a quick query — avoids building a new pool for the default db
-        let current_db: String =
-            sqlx::query_scalar("SELECT current_database()::text")
-                .fetch_one(main_pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        let current_db: String = sqlx::query_scalar("SELECT current_database()::text")
+            .fetch_one(main_pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
         if current_db == database {
             return Ok(main_pool.clone());
@@ -154,6 +149,11 @@ impl PoolManager {
     /// Check if a connection is currently open.
     pub fn is_open(&self, id: &str) -> bool {
         self.pools.contains_key(id)
+    }
+
+    /// Whether this connection blocks DML/DDL (readonly mode).
+    pub fn is_readonly(&self, id: &str) -> bool {
+        self.configs.get(id).map(|c| c.readonly).unwrap_or(false)
     }
 
     /// Run a closure with a MySQL pool reference.

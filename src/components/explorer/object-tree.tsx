@@ -21,9 +21,19 @@ import {
   Send,
   Archive,
   ArchiveRestore,
+  Zap,
+  ListOrdered,
+  Shapes,
+  ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatabases, useSchemas, useObjects } from "@/hooks/use-schema";
+import {
+  useTriggers,
+  useSequences,
+  useEnums,
+} from "@/hooks/use-objects";
+import { dropTrigger } from "@/services/tauri-commands";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { DatabaseType } from "@/types/database";
 import { BatchExportDialog } from "@/components/transfer/batch-export-dialog";
@@ -148,11 +158,22 @@ function ObjectLeaf({
       <FunctionSquare className="size-3" />
     );
 
-  const openTab = (tabType: "table-structure" | "table-data" | "query" | "designer") => {
+  const openTab = (
+    tabType:
+      | "table-structure"
+      | "table-data"
+      | "query"
+      | "designer"
+      | "object-ddl",
+  ) => {
     const id =
-      tabType === "table-data" ? `${tabId}/data` :
-      tabType === "designer" ? `${tabId}/designer` :
-      tabId;
+      tabType === "table-data"
+        ? `${tabId}/data`
+        : tabType === "designer"
+          ? `${tabId}/designer`
+          : tabType === "object-ddl"
+            ? `${tabId}/ddl`
+            : tabId;
     const existing = tabs.find((t) => t.id === id);
     if (existing) {
       setActiveTab(id);
@@ -160,24 +181,39 @@ function ObjectLeaf({
       addTab({
         id,
         title:
-          tabType === "table-data" ? `${name} (数据)` :
-          tabType === "designer" ? `${name} (设计)` :
-          name,
-        type: tabType === "designer" ? "designer" : tabType,
+          tabType === "table-data"
+            ? `${name} (数据)`
+            : tabType === "designer"
+              ? `${name} (设计)`
+              : name,
+        type: tabType,
         connectionId,
-        metadata: { database, schema, objectName: name, objectType: type },
+        metadata: {
+          database,
+          schema,
+          objectName: name,
+          objectType: type,
+          ddlKind:
+            tabType === "object-ddl"
+              ? type === "view"
+                ? "view"
+                : "function"
+              : undefined,
+        },
       });
     }
   };
 
   const handleClick = () => {
     if (type === "table") openTab("table-data");
-    else openTab("query");
+    else if (type === "view") openTab("object-ddl");
+    else openTab("object-ddl"); // function → read-only DDL
   };
 
   const handleDoubleClick = () => {
     if (type === "table") openTab("table-structure");
-    else openTab("query");
+    else if (type === "view") openTab("table-data"); // views are selectable
+    else openTab("object-ddl");
   };
 
   return (
@@ -280,6 +316,233 @@ function CategoryNode({
   );
 }
 
+// ─── TriggersCategory — lazy trigger list with DDL view / delete ──
+
+interface TriggersCategoryProps {
+  level: number;
+  connectionId: string;
+  database: string;
+  schema?: string;
+}
+
+function TriggersCategory({
+  level,
+  connectionId,
+  database,
+  schema,
+}: TriggersCategoryProps) {
+  const [expanded, setExpanded] = useState(false);
+  const { data: triggers = [], isLoading, isError } = useTriggers(
+    connectionId,
+    database,
+    schema,
+    expanded,
+  );
+  const addTab = useWorkspaceStore((s) => s.addTab);
+  const tabs = useWorkspaceStore((s) => s.tabs);
+  const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
+  const queryClient = useQueryClient();
+  const [deleting, setDeleting] = useState<string | null>(null);
+
+  const openDdl = (name: string, table: string) => {
+    const id = [connectionId, database, schema, "trigger", name, "ddl"].join("/");
+    const existing = tabs.find((t) => t.id === id);
+    if (existing) {
+      setActiveTab(id);
+    } else {
+      addTab({
+        id,
+        title: name,
+        type: "object-ddl",
+        connectionId,
+        metadata: {
+          database,
+          schema,
+          objectName: name,
+          objectType: "trigger",
+          ddlKind: "trigger",
+          table,
+        },
+      });
+    }
+  };
+
+  const handleDelete = async (name: string, table: string) => {
+    if (!confirm(`确定要删除触发器 "${name}" 吗？`)) return;
+    setDeleting(name);
+    try {
+      await dropTrigger(connectionId, database, schema, table, name);
+      queryClient.invalidateQueries({
+        queryKey: ["triggers", connectionId, database],
+      });
+    } catch (err) {
+      alert(String(err));
+    } finally {
+      setDeleting(null);
+    }
+  };
+
+  return (
+    <>
+      <TreeRow
+        level={level}
+        icon={<Zap className="size-3" />}
+        label={`Triggers${expanded && !isLoading ? ` (${triggers.length})` : ""}`}
+        expandable
+        expanded={expanded}
+        loading={expanded && isLoading}
+        error={isError}
+        onClick={() => setExpanded((v) => !v)}
+      />
+      {expanded &&
+        (isLoading ? null : isError ? (
+          <TreeRow
+            level={level + 1}
+            icon={<AlertCircle className="size-3" />}
+            label="加载失败"
+            error
+          />
+        ) : triggers.length === 0 ? (
+          <TreeRow
+            level={level + 1}
+            icon={<Zap className="size-3" />}
+            label="（无）"
+          />
+        ) : (
+          triggers.map((t) => (
+            <TreeRow
+              key={`${t.table}.${t.name}`}
+              level={level + 1}
+              icon={<Zap className="size-3" />}
+              label={`${t.name} · ${t.table}`}
+              onClick={() => openDdl(t.name, t.table)}
+            >
+              <button
+                className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-destructive"
+                title="删除触发器"
+                disabled={deleting !== null}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleDelete(t.name, t.table);
+                }}
+              >
+                {deleting === t.name ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <Trash2 className="size-3" />
+                )}
+              </button>
+            </TreeRow>
+          ))
+        ))}
+    </>
+  );
+}
+
+// ─── PgManagerCategory — Sequences / Enums with a manager tab ─────
+
+interface PgManagerCategoryProps {
+  label: string;
+  icon: React.ReactNode;
+  managerKind: "sequences" | "enums";
+  level: number;
+  connectionId: string;
+  database: string;
+  schema: string;
+  /** Load names for the count badge. */
+  useList: (
+    connectionId: string,
+    database: string,
+    schema: string | undefined,
+    enabled: boolean,
+  ) => { data?: { name: string }[]; isLoading: boolean; isError: boolean };
+}
+
+function PgManagerCategory({
+  label,
+  icon,
+  managerKind,
+  level,
+  connectionId,
+  database,
+  schema,
+  useList,
+}: PgManagerCategoryProps) {
+  const [expanded, setExpanded] = useState(false);
+  const { data: items = [], isLoading, isError } = useList(
+    connectionId,
+    database,
+    schema,
+    expanded,
+  );
+  const addTab = useWorkspaceStore((s) => s.addTab);
+  const tabs = useWorkspaceStore((s) => s.tabs);
+  const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
+
+  const openManager = () => {
+    const id = [connectionId, database, schema, managerKind, "manager"].join("/");
+    const existing = tabs.find((t) => t.id === id);
+    if (existing) {
+      setActiveTab(id);
+    } else {
+      addTab({
+        id,
+        title: `${schema} · ${label}`,
+        type: "object-manager",
+        connectionId,
+        metadata: { database, schema, managerKind },
+      });
+    }
+  };
+
+  return (
+    <>
+      <TreeRow
+        level={level}
+        icon={icon}
+        label={`${label}${expanded && !isLoading ? ` (${items.length})` : ""}`}
+        expandable
+        expanded={expanded}
+        loading={expanded && isLoading}
+        error={isError}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <button
+          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+          title={`管理${label}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            openManager();
+          }}
+        >
+          <ExternalLink className="size-3" />
+        </button>
+      </TreeRow>
+      {expanded &&
+        (isLoading ? null : isError ? (
+          <TreeRow
+            level={level + 1}
+            icon={<AlertCircle className="size-3" />}
+            label="加载失败"
+            error
+          />
+        ) : items.length === 0 ? (
+          <TreeRow level={level + 1} icon={icon} label="（无）" onClick={openManager} />
+        ) : (
+          items.map((item) => (
+            <TreeRow
+              key={item.name}
+              level={level + 1}
+              icon={icon}
+              label={item.name}
+              onClick={openManager}
+            />
+          ))
+        ))}
+    </>
+  );
+}
+
 // ─── SchemaNode — PG schema, loads objects on expand ──────────────
 
 interface SchemaNodeProps {
@@ -338,6 +601,32 @@ function SchemaNode({ schema, database, connectionId, level }: SchemaNodeProps) 
             connectionId={connectionId}
             database={database}
             schema={schema}
+          />
+          <TriggersCategory
+            level={level + 1}
+            connectionId={connectionId}
+            database={database}
+            schema={schema}
+          />
+          <PgManagerCategory
+            label="Sequences"
+            icon={<ListOrdered className="size-3" />}
+            managerKind="sequences"
+            level={level + 1}
+            connectionId={connectionId}
+            database={database}
+            schema={schema}
+            useList={useSequences}
+          />
+          <PgManagerCategory
+            label="Enums"
+            icon={<Shapes className="size-3" />}
+            managerKind="enums"
+            level={level + 1}
+            connectionId={connectionId}
+            database={database}
+            schema={schema}
+            useList={useEnums}
           />
         </>
       )}
@@ -448,6 +737,11 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
             label="Functions"
             items={data.functions}
             type="function"
+            level={level + 1}
+            connectionId={connectionId}
+            database={database}
+          />
+          <TriggersCategory
             level={level + 1}
             connectionId={connectionId}
             database={database}

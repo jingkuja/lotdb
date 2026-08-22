@@ -42,7 +42,7 @@ jobs:
         run: pnpm vite build
 
   rust:
-    name: Rust (check + clippy + fmt)
+    name: Rust (check + clippy + fmt + unit)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +75,71 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy -- -D warnings
 
-      - name: Check
+      - name: Unit Tests
         working-directory: src-tauri
-        run: cargo check
+        run: cargo test --lib
+
+  integration:
+    name: Integration (real MySQL + PostgreSQL)
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: workflow
+          POSTGRES_PASSWORD: workflow-dev-password
+          POSTGRES_DB: workflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      LOTDB_TEST_MYSQL_URL: mysql://root:root@127.0.0.1:3306
+      LOTDB_TEST_PG_URL: postgres://workflow:workflow-dev-password@127.0.0.1:5432/workflow
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Tauri build.rs needs the frontend dist
+      - run: pnpm vite build
+
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Run tests (unit + integration)
+        working-directory: src-tauri
+        run: cargo test

@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import { useConnectionGroups } from "@/hooks/use-connections";
 import { Loader2 } from "lucide-react";
 
 const DEFAULT_PORTS: Record<DatabaseType, number> = {
@@ -52,6 +53,9 @@ export function ConnectionDialog({
   const [user, setUser] = useState(initial?.user ?? "root");
   const [password, setPassword] = useState(initial?.password ?? "");
   const [database, setDatabase] = useState(initial?.database ?? "");
+  const [readonly, setReadonly] = useState(initial?.readonly ?? false);
+  const [groupId, setGroupId] = useState(initial?.groupId ?? "__none__");
+  const { data: groups = [] } = useConnectionGroups();
 
   // SSH
   const [sshEnabled, setSshEnabled] = useState(!!initial?.ssh);
@@ -97,6 +101,8 @@ export function ConnectionDialog({
     user,
     password,
     database: database || undefined,
+    readonly,
+    groupId: groupId !== "__none__" ? groupId : undefined,
     ssh: sshEnabled
       ? {
           host: sshHost,
@@ -198,6 +204,35 @@ export function ConnectionDialog({
                 onChange={(e) => setDatabase(e.target.value)}
                 placeholder="可选"
               />
+
+              <Label>分组</Label>
+              <Select value={groupId} onValueChange={setGroupId}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">不分组</SelectItem>
+                  {groups.map((g) => (
+                    <SelectItem key={g.id} value={g.id}>
+                      {g.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <Label>只读模式</Label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="readonly-enabled"
+                  className="size-4"
+                  checked={readonly}
+                  onChange={(e) => setReadonly(e.target.checked)}
+                />
+                <span className="text-xs text-muted-foreground">
+                  拦截 DML/DDL（INSERT/UPDATE/DELETE/建表等），适合保护生产库
+                </span>
+              </div>
             </div>
           </TabsContent>
 

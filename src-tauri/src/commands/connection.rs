@@ -25,8 +25,8 @@ pub async fn create_connection(
         .map(|s| serde_json::to_string(s).unwrap());
 
     sqlx::query(
-        "INSERT INTO connections (id, name, db_type, host, port, user, database_name, group_id, ssh_config, ssl_config, color)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO connections (id, name, db_type, host, port, user, database_name, readonly, group_id, ssh_config, ssl_config, color)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&config.id)
     .bind(&config.name)
@@ -35,6 +35,7 @@ pub async fn create_connection(
     .bind(config.port as i64)
     .bind(&config.user)
     .bind(&config.database)
+    .bind(config.readonly)
     .bind(&config.group_id)
     .bind(&ssh_json)
     .bind(&ssl_json)
@@ -82,7 +83,7 @@ pub async fn update_connection(
         .map(|s| serde_json::to_string(s).unwrap());
 
     sqlx::query(
-        "UPDATE connections SET name=?, db_type=?, host=?, port=?, user=?, database_name=?, group_id=?, ssh_config=?, ssl_config=?, color=?, updated_at=datetime('now')
+        "UPDATE connections SET name=?, db_type=?, host=?, port=?, user=?, database_name=?, readonly=?, group_id=?, ssh_config=?, ssl_config=?, color=?, updated_at=datetime('now')
          WHERE id=?",
     )
     .bind(&config.name)
@@ -91,6 +92,7 @@ pub async fn update_connection(
     .bind(config.port as i64)
     .bind(&config.user)
     .bind(&config.database)
+    .bind(config.readonly)
     .bind(&config.group_id)
     .bind(&ssh_json)
     .bind(&ssl_json)
@@ -131,11 +133,12 @@ pub async fn import_connections(
 
     for config in configs {
         // Check if ID already exists
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM connections WHERE id=?)")
-            .bind(&config.id)
-            .fetch_one(pool.inner())
-            .await
-            .map_err(|e| e.to_string())?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM connections WHERE id=?)")
+                .bind(&config.id)
+                .fetch_one(pool.inner())
+                .await
+                .map_err(|e| e.to_string())?;
 
         if exists {
             skipped += 1;
@@ -157,8 +160,8 @@ pub async fn import_connections(
             .map(|s| serde_json::to_string(s).unwrap());
 
         sqlx::query(
-            "INSERT INTO connections (id, name, db_type, host, port, user, database_name, group_id, ssh_config, ssl_config, color)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO connections (id, name, db_type, host, port, user, database_name, readonly, group_id, ssh_config, ssl_config, color)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&config.id)
         .bind(&config.name)
@@ -167,6 +170,7 @@ pub async fn import_connections(
         .bind(config.port as i64)
         .bind(&config.user)
         .bind(&config.database)
+        .bind(config.readonly)
         .bind(&config.group_id)
         .bind(&ssh_json)
         .bind(&ssl_json)
@@ -201,6 +205,7 @@ struct ConnectionRow {
     port: i64,
     user: String,
     database_name: Option<String>,
+    readonly: bool,
     group_id: Option<String>,
     ssh_config: Option<String>,
     ssl_config: Option<String>,
@@ -228,6 +233,7 @@ impl ConnectionConfig {
             user: row.user,
             password,
             database: row.database_name,
+            readonly: row.readonly,
             group_id: row.group_id,
             ssh,
             ssl,

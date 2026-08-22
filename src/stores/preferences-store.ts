@@ -17,6 +17,7 @@ export interface Preferences {
   pageSize: 50 | 100 | 200 | 500;
   saveQueryHistory: boolean;
   confirmDml: boolean;         // require confirmation before DML
+  queryMaxRows: number;        // SQL 查询结果行数上限；0 = 不限制
 }
 
 const DEFAULTS: Preferences = {
@@ -26,6 +27,7 @@ const DEFAULTS: Preferences = {
   pageSize: 200,
   saveQueryHistory: true,
   confirmDml: false,
+  queryMaxRows: 1000,
 };
 
 function load(): Preferences {

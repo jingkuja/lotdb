@@ -64,7 +64,9 @@ pub async fn list_schemas(
         return Ok(vec![]);
     }
 
-    let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
+    let pool = pools
+        .pg_pool_for_database(&connection_id, &database)
+        .await?;
     let rows: Vec<(String,)> = sqlx::query_as(
         "SELECT nspname FROM pg_namespace \
          WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema' \
@@ -130,7 +132,9 @@ pub async fn list_objects(
         DbPool::Postgres(_) => {
             // Drop the entry lock before awaiting
             drop(entry);
-            let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
+            let pool = pools
+                .pg_pool_for_database(&connection_id, &database)
+                .await?;
             let schema_name = schema.as_deref().unwrap_or("public");
 
             let tables: Vec<(String,)> = sqlx::query_as(
@@ -283,7 +287,9 @@ pub async fn get_table_columns(
         }
         DbPool::Postgres(_) => {
             drop(entry);
-            let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
+            let pool = pools
+                .pg_pool_for_database(&connection_id, &database)
+                .await?;
             let schema_name = schema.as_deref().unwrap_or("public");
 
             #[derive(sqlx::FromRow)]
@@ -397,7 +403,9 @@ pub async fn get_table_indexes(
         }
         DbPool::Postgres(_) => {
             drop(entry);
-            let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
+            let pool = pools
+                .pg_pool_for_database(&connection_id, &database)
+                .await?;
             let schema_name = schema.as_deref().unwrap_or("public");
 
             #[derive(sqlx::FromRow)]
@@ -511,14 +519,16 @@ pub async fn get_table_foreign_keys(
 
             let mut map: BTreeMap<String, ForeignKeyDef> = BTreeMap::new();
             for r in rows {
-                let entry = map.entry(r.constraint_name.clone()).or_insert(ForeignKeyDef {
-                    name: r.constraint_name,
-                    columns: vec![],
-                    ref_table: r.ref_table.clone(),
-                    ref_columns: vec![],
-                    on_update: r.update_rule,
-                    on_delete: r.delete_rule,
-                });
+                let entry = map
+                    .entry(r.constraint_name.clone())
+                    .or_insert(ForeignKeyDef {
+                        name: r.constraint_name,
+                        columns: vec![],
+                        ref_table: r.ref_table.clone(),
+                        ref_columns: vec![],
+                        on_update: r.update_rule,
+                        on_delete: r.delete_rule,
+                    });
                 entry.columns.push(r.column_name);
                 entry.ref_columns.push(r.ref_column);
             }
@@ -526,7 +536,9 @@ pub async fn get_table_foreign_keys(
         }
         DbPool::Postgres(_) => {
             drop(entry);
-            let pool = pools.pg_pool_for_database(&connection_id, &database).await?;
+            let pool = pools
+                .pg_pool_for_database(&connection_id, &database)
+                .await?;
             let schema_name = schema.as_deref().unwrap_or("public");
 
             #[derive(sqlx::FromRow)]
@@ -566,14 +578,16 @@ pub async fn get_table_foreign_keys(
 
             let mut map: BTreeMap<String, ForeignKeyDef> = BTreeMap::new();
             for r in rows {
-                let entry = map.entry(r.constraint_name.clone()).or_insert(ForeignKeyDef {
-                    name: r.constraint_name,
-                    columns: vec![],
-                    ref_table: r.ref_table.clone(),
-                    ref_columns: vec![],
-                    on_update: pg_action_code(&r.on_update).to_string(),
-                    on_delete: pg_action_code(&r.on_delete).to_string(),
-                });
+                let entry = map
+                    .entry(r.constraint_name.clone())
+                    .or_insert(ForeignKeyDef {
+                        name: r.constraint_name,
+                        columns: vec![],
+                        ref_table: r.ref_table.clone(),
+                        ref_columns: vec![],
+                        on_update: pg_action_code(&r.on_update).to_string(),
+                        on_delete: pg_action_code(&r.on_delete).to_string(),
+                    });
                 entry.columns.push(r.column_name);
                 entry.ref_columns.push(r.ref_column);
             }
@@ -710,11 +724,10 @@ pub async fn search_objects(
             results.sort_by(|a, b| a.name.cmp(&b.name));
             results.truncate(max as usize);
 
-            let (current_db,): (String,) =
-                sqlx::query_as("SELECT current_database()::text")
-                    .fetch_one(pool)
-                    .await
-                    .map_err(|e| format!("查询当前数据库失败: {e}"))?;
+            let (current_db,): (String,) = sqlx::query_as("SELECT current_database()::text")
+                .fetch_one(pool)
+                .await
+                .map_err(|e| format!("查询当前数据库失败: {e}"))?;
 
             Ok(results
                 .into_iter()
@@ -813,11 +826,10 @@ pub async fn get_completion_schema(
             .await
             .map_err(|e| format!("获取补全数据失败: {e}"))?;
 
-            let (current_db,): (String,) =
-                sqlx::query_as("SELECT current_database()::text")
-                    .fetch_one(pool)
-                    .await
-                    .map_err(|e| format!("查询当前数据库失败: {e}"))?;
+            let (current_db,): (String,) = sqlx::query_as("SELECT current_database()::text")
+                .fetch_one(pool)
+                .await
+                .map_err(|e| format!("查询当前数据库失败: {e}"))?;
 
             let mut map: BTreeMap<(String, String), CompletionTable> = BTreeMap::new();
             for r in rows {
@@ -833,5 +845,20 @@ pub async fn get_completion_schema(
             }
             Ok(map.into_values().collect())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pg_action_code_maps_all_actions() {
+        assert_eq!(pg_action_code("a"), "NO ACTION");
+        assert_eq!(pg_action_code("r"), "RESTRICT");
+        assert_eq!(pg_action_code("c"), "CASCADE");
+        assert_eq!(pg_action_code("n"), "SET NULL");
+        assert_eq!(pg_action_code("d"), "SET DEFAULT");
+        assert_eq!(pg_action_code("?"), "NO ACTION");
     }
 }

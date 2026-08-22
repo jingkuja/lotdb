@@ -29,6 +29,14 @@ const FONT_FAMILIES: EditorFontFamily[] = [
 
 const PAGE_SIZES: Preferences["pageSize"][] = [50, 100, 200, 500];
 
+const MAX_ROWS_OPTIONS: { value: number; label: string }[] = [
+  { value: 100, label: "100" },
+  { value: 500, label: "500" },
+  { value: 1000, label: "1000" },
+  { value: 5000, label: "5000" },
+  { value: 0, label: "无限制" },
+];
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-3">
@@ -132,6 +140,19 @@ export function PreferencesDialog({ open, onOpenChange }: PreferencesDialogProps
 
           {/* Behavior */}
           <Section title="行为">
+            <Row label="查询结果行数上限">
+              <select
+                value={prefs.queryMaxRows}
+                onChange={(e) => setPref("queryMaxRows", Number(e.target.value))}
+                className="rounded border border-border bg-background px-2 py-1 text-xs"
+              >
+                {MAX_ROWS_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </Row>
             <Row label="保存查询历史">
               <input
                 type="checkbox"

@@ -24,7 +24,8 @@
       "Bash(pnpm build:*)",
       "Bash(cargo search:*)",
       "Bash(npm run:*)",
-      "Bash(npx vitest:*)"
+      "Bash(npx vitest:*)",
+      "Bash(python3 *)"
     ]
   }
 }

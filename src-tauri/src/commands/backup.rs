@@ -32,9 +32,9 @@ fn find_tool(name: &str) -> Result<std::path::PathBuf, String> {
     }
     // macOS Homebrew locations
     let candidates = [
-        format!("/opt/homebrew/bin/{name}"),        // Apple Silicon
-        format!("/usr/local/bin/{name}"),            // Intel Homebrew
-        format!("/usr/local/mysql/bin/{name}"),      // MySQL installer
+        format!("/opt/homebrew/bin/{name}"),    // Apple Silicon
+        format!("/usr/local/bin/{name}"),       // Intel Homebrew
+        format!("/usr/local/mysql/bin/{name}"), // MySQL installer
         format!("/opt/homebrew/opt/mysql-client/bin/{name}"),
         format!("/opt/homebrew/opt/postgresql@16/bin/{name}"),
         format!("/opt/homebrew/opt/postgresql@15/bin/{name}"),
@@ -70,17 +70,12 @@ struct ConnRow {
     user: String,
 }
 
-async fn get_conn_row(
-    sqlite: &SqlitePool,
-    connection_id: &str,
-) -> Result<ConnRow, String> {
-    sqlx::query_as::<_, ConnRow>(
-        "SELECT user FROM connections WHERE id = ?",
-    )
-    .bind(connection_id)
-    .fetch_one(sqlite)
-    .await
-    .map_err(|e| format!("查询连接配置失败: {e}"))
+async fn get_conn_row(sqlite: &SqlitePool, connection_id: &str) -> Result<ConnRow, String> {
+    sqlx::query_as::<_, ConnRow>("SELECT user FROM connections WHERE id = ?")
+        .bind(connection_id)
+        .fetch_one(sqlite)
+        .await
+        .map_err(|e| format!("查询连接配置失败: {e}"))
 }
 
 // ─── Backup command ───────────────────────────────────────────────
@@ -122,24 +117,21 @@ pub async fn backup_database(
 
     // Ensure parent directory exists
     if let Some(parent) = std::path::Path::new(&file_path).parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建目录失败: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
     }
 
     let output = match db_kind.as_str() {
         "mysql" => run_mysqldump(
-            &eff_host, eff_port, &row.user, &password, &database,
-            &file_path, no_data, no_schema, &tables,
+            &eff_host, eff_port, &row.user, &password, &database, &file_path, no_data, no_schema,
+            &tables,
         )?,
         _ => run_pg_dump(
-            &eff_host, eff_port, &row.user, &password, &database,
-            &file_path, no_data, no_schema, &tables,
+            &eff_host, eff_port, &row.user, &password, &database, &file_path, no_data, no_schema,
+            &tables,
         )?,
     };
 
-    let size_bytes = std::fs::metadata(&file_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size_bytes = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(BackupResult {
         file_path,
@@ -148,6 +140,7 @@ pub async fn backup_database(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_mysqldump(
     host: &str,
     port: u16,
@@ -190,8 +183,7 @@ fn run_mysqldump(
     }
 
     // Redirect stdout to file
-    let file = std::fs::File::create(file_path)
-        .map_err(|e| format!("创建备份文件失败: {e}"))?;
+    let file = std::fs::File::create(file_path).map_err(|e| format!("创建备份文件失败: {e}"))?;
     cmd.stdout(file);
 
     let out = cmd
@@ -211,6 +203,7 @@ fn run_mysqldump(
     Ok(stderr)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_pg_dump(
     host: &str,
     port: u16,
@@ -225,11 +218,16 @@ fn run_pg_dump(
     let tool = find_tool("pg_dump")?;
     let mut cmd = Command::new(&tool);
 
-    cmd.arg("-h").arg(host)
-        .arg("-p").arg(port.to_string())
-        .arg("-U").arg(user)
-        .arg("-d").arg(database)
-        .arg("-f").arg(file_path)
+    cmd.arg("-h")
+        .arg(host)
+        .arg("-p")
+        .arg(port.to_string())
+        .arg("-U")
+        .arg(user)
+        .arg("-d")
+        .arg(database)
+        .arg("-f")
+        .arg(file_path)
         .arg("--no-password"); // password via env var PGPASSWORD
 
     if no_data {
@@ -302,12 +300,10 @@ pub async fn restore_database(
 
     let stderr = match db_kind.as_str() {
         "mysql" => run_mysql_restore(
-            &eff_host, eff_port, &row.user, &password, &database,
-            &file_path, create_db,
+            &eff_host, eff_port, &row.user, &password, &database, &file_path, create_db,
         )?,
         _ => run_psql_restore(
-            &eff_host, eff_port, &row.user, &password, &database,
-            &file_path,
+            &eff_host, eff_port, &row.user, &password, &database, &file_path,
         )?,
     };
 
@@ -356,13 +352,10 @@ fn run_mysql_restore(
     cmd.arg(database);
 
     // Feed file via stdin
-    let file = std::fs::File::open(file_path)
-        .map_err(|e| format!("打开备份文件失败: {e}"))?;
+    let file = std::fs::File::open(file_path).map_err(|e| format!("打开备份文件失败: {e}"))?;
     cmd.stdin(file);
 
-    let out = cmd
-        .output()
-        .map_err(|e| format!("启动 mysql 失败: {e}"))?;
+    let out = cmd.output().map_err(|e| format!("启动 mysql 失败: {e}"))?;
 
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
@@ -388,20 +381,23 @@ fn run_psql_restore(
     let tool = find_tool("psql")?;
     let mut cmd = Command::new(&tool);
 
-    cmd.arg("-h").arg(host)
-        .arg("-p").arg(port.to_string())
-        .arg("-U").arg(user)
-        .arg("-d").arg(database)
-        .arg("-f").arg(file_path)
+    cmd.arg("-h")
+        .arg(host)
+        .arg("-p")
+        .arg(port.to_string())
+        .arg("-U")
+        .arg(user)
+        .arg("-d")
+        .arg(database)
+        .arg("-f")
+        .arg(file_path)
         .arg("--no-password");
 
     if !password.is_empty() {
         cmd.env("PGPASSWORD", password);
     }
 
-    let out = cmd
-        .output()
-        .map_err(|e| format!("启动 psql 失败: {e}"))?;
+    let out = cmd.output().map_err(|e| format!("启动 psql 失败: {e}"))?;
 
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 

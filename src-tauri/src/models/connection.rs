@@ -66,6 +66,9 @@ pub struct ConnectionConfig {
     pub password: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
+    /// 只读模式：拦截 DML/DDL，保护生产库
+    #[serde(default)]
+    pub readonly: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +80,7 @@ pub struct ConnectionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionGroup {
     pub id: String,
     pub name: String,

@@ -34,11 +34,9 @@ pub async fn get_snippets(
         .fetch_all(db.inner())
         .await
     } else {
-        sqlx::query_as::<_, SnippetEntry>(
-            "SELECT * FROM snippets ORDER BY updated_at DESC",
-        )
-        .fetch_all(db.inner())
-        .await
+        sqlx::query_as::<_, SnippetEntry>("SELECT * FROM snippets ORDER BY updated_at DESC")
+            .fetch_all(db.inner())
+            .await
     }
     .map_err(|e| format!("查询片段失败: {e}"))?;
 
@@ -53,15 +51,13 @@ pub async fn create_snippet(
     sql: String,
     description: Option<String>,
 ) -> Result<SnippetEntry, String> {
-    let result = sqlx::query(
-        "INSERT INTO snippets (name, sql, description) VALUES (?, ?, ?)",
-    )
-    .bind(&name)
-    .bind(&sql)
-    .bind(&description)
-    .execute(db.inner())
-    .await
-    .map_err(|e| format!("创建片段失败: {e}"))?;
+    let result = sqlx::query("INSERT INTO snippets (name, sql, description) VALUES (?, ?, ?)")
+        .bind(&name)
+        .bind(&sql)
+        .bind(&description)
+        .execute(db.inner())
+        .await
+        .map_err(|e| format!("创建片段失败: {e}"))?;
 
     let id = result.last_insert_rowid();
     sqlx::query_as::<_, SnippetEntry>("SELECT * FROM snippets WHERE id = ?")

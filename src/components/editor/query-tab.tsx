@@ -2,19 +2,29 @@ import { useRef, useState, useCallback } from "react";
 import { Play, Square, Database, WandSparkles, History, Bookmark, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SqlEditor, type SqlEditorHandle } from "./sql-editor";
-import { ResultPanel, type ResultState } from "./result-panel";
+import { ResultPanel, type ResultState, type MultiStmtOutcome } from "./result-panel";
 import { ExplainPanel } from "./explain-panel";
 import { HistoryDialog } from "./history-dialog";
 import { SnippetsDialog } from "./snippets-dialog";
 import { ParamInputDialog } from "./param-input-dialog";
 import { useEditorStore } from "@/stores/editor-store";
-import { executeQuery, executeQueryWithParams, explainQuery, type ExplainResult } from "@/services/tauri-commands";
+import { useConnectionStore } from "@/stores/connection-store";
+import {
+  executeQuery,
+  executeQueryWithParams,
+  cancelQuery,
+  explainQuery,
+  openConnection,
+  type ExplainResult,
+} from "@/services/tauri-commands";
 import { useConnections } from "@/hooks/use-connections";
 import { useCompletionSchema } from "@/hooks/use-completion-schema";
 import { useSaveHistory } from "@/hooks/use-history";
 import { usePreferencesStore } from "@/stores/preferences-store";
 import { format as formatSql } from "sql-formatter";
 import { detectParams, type SqlParam } from "@/lib/sql-params";
+import { splitStatements } from "@/lib/split-statements";
+import { formatDbError, isConnectionError } from "@/lib/error";
 import type { DatabaseType } from "@/types/database";
 
 interface QueryTabProps {
@@ -48,7 +58,7 @@ function SplitHandle({ onDrag }: { onDrag: (dy: number) => void }) {
 
 export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const editorRef = useRef<SqlEditorHandle>(null);
-  const { editorFontSize, editorFontFamily, saveQueryHistory } = usePreferencesStore((s) => s.prefs);
+  const { editorFontSize, editorFontFamily, saveQueryHistory, queryMaxRows } = usePreferencesStore((s) => s.prefs);
   const [resultState, setResultState] = useState<ResultState>({ status: "idle" });
   const [running, setRunning] = useState(false);
   const [explainResult, setExplainResult] = useState<ExplainResult | null>(null);
@@ -62,6 +72,9 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const [paramDialogOpen, setParamDialogOpen] = useState(false);
   const [pendingParams, setPendingParams] = useState<SqlParam[]>([]);
   const pendingSqlRef = useRef<string>("");
+  // In-flight execution tracking for the stop button
+  const currentExecutionRef = useRef<string | null>(null);
+  const cancelRequestedRef = useRef(false);
   // Split: editorHeight in px (null = use flex default)
   const [editorHeight, setEditorHeight] = useState<number | null>(null);
 
@@ -75,15 +88,34 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const completionSchema = useCompletionSchema(connectionId);
   const saveHistoryMutation = useSaveHistory();
 
+  const newExecutionId = () =>
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  const markPoolOpen = useConnectionStore((s) => s.markPoolOpen);
+
+  // One-click reconnect: PoolManager::open closes the old pool and rebuilds
+  // everything (including the SSH tunnel), so this covers tunnel drops too.
+  const handleReconnect = useCallback(async () => {
+    if (!conn) return;
+    await openConnection(conn);
+    markPoolOpen(conn.id);
+  }, [conn, markPoolOpen]);
+
   const doExecute = useCallback(
     async (trimmed: string, params?: (string | null)[]) => {
       setRunning(true);
       setResultState({ status: "loading" });
+      const executionId = newExecutionId();
+      currentExecutionRef.current = executionId;
+      cancelRequestedRef.current = false;
+      const opts = { maxRows: queryMaxRows, executionId };
       try {
         const result =
           params && params.length > 0
-            ? await executeQueryWithParams(connectionId, trimmed, params)
-            : await executeQuery(connectionId, trimmed);
+            ? await executeQueryWithParams(connectionId, trimmed, params, opts)
+            : await executeQuery(connectionId, trimmed, opts);
         setResultState({ status: "success", result });
         if (saveQueryHistory) {
           saveHistoryMutation.mutate({
@@ -96,8 +128,11 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           });
         }
       } catch (e) {
-        const errMsg = String(e);
-        setResultState({ status: "error", message: errMsg });
+        const cancelled = cancelRequestedRef.current;
+        const errMsg = cancelled ? "查询已取消" : formatDbError(e);
+        const onReconnect =
+          !cancelled && isConnectionError(e) ? handleReconnect : undefined;
+        setResultState({ status: "error", message: errMsg, onReconnect });
         if (saveQueryHistory) {
           saveHistoryMutation.mutate({
             connectionId,
@@ -108,27 +143,117 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           });
         }
       } finally {
+        currentExecutionRef.current = null;
+        cancelRequestedRef.current = false;
         setRunning(false);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [connectionId, conn?.name, saveQueryHistory],
+    [connectionId, conn?.name, saveQueryHistory, queryMaxRows, handleReconnect],
+  );
+
+  // Sequential multi-statement execution: split by the frontend splitter,
+  // run one statement at a time (each cancellable), stop on first error,
+  // remaining statements are marked skipped. Results get one tab each.
+  const doExecuteMulti = useCallback(
+    async (stmts: string[], wholeSql: string) => {
+      setRunning(true);
+      const runId = newExecutionId();
+      const rootExecId = newExecutionId();
+      const outcomes: MultiStmtOutcome[] = stmts.map((sql) => ({
+        sql,
+        status: "pending",
+      }));
+      cancelRequestedRef.current = false;
+      setResultState({ status: "multi", runId, outcomes: [...outcomes] });
+
+      const update = (i: number, patch: Partial<MultiStmtOutcome>) => {
+        outcomes[i] = { ...outcomes[i]!, ...patch };
+        setResultState({ status: "multi", runId, outcomes: [...outcomes] });
+      };
+
+      let failMessage: string | null = null;
+      let totalMs = 0;
+
+      for (let i = 0; i < stmts.length; i++) {
+        if (cancelRequestedRef.current) {
+          update(i, { status: "skipped" });
+          continue;
+        }
+        const execId = `${rootExecId}:${i}`;
+        currentExecutionRef.current = execId;
+        update(i, { status: "running" });
+        try {
+          const r = await executeQuery(connectionId, stmts[i]!, {
+            maxRows: queryMaxRows,
+            executionId: execId,
+          });
+          totalMs += r.executionMs ?? 0;
+          update(i, { status: "success", result: r });
+        } catch (e) {
+          const cancelled = cancelRequestedRef.current;
+          failMessage = cancelled ? "查询已取消" : formatDbError(e);
+          update(i, {
+            status: "error",
+            message: failMessage,
+            onReconnect: !cancelled && isConnectionError(e) ? handleReconnect : undefined,
+          });
+          for (let j = i + 1; j < stmts.length; j++) {
+            update(j, { status: "skipped" });
+          }
+          break;
+        }
+      }
+
+      currentExecutionRef.current = null;
+      cancelRequestedRef.current = false;
+      setRunning(false);
+
+      if (saveQueryHistory) {
+        const totalAffected = outcomes.reduce(
+          (sum, o) => sum + (o.result?.affectedRows ?? 0),
+          0,
+        );
+        saveHistoryMutation.mutate({
+          connectionId,
+          connectionName: conn?.name ?? connectionId,
+          sql: wholeSql,
+          status: failMessage ? "error" : "success",
+          rowsAffected: failMessage ? null : totalAffected,
+          executionMs: totalMs,
+          errorMessage: failMessage ?? undefined,
+        });
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [connectionId, conn?.name, saveQueryHistory, queryMaxRows, handleReconnect],
   );
 
   const runQuery = useCallback(
     (sqlToRun: string) => {
       const trimmed = sqlToRun.trim();
       if (!trimmed) return;
-      const { params } = detectParams(trimmed);
+      const stmts = splitStatements(trimmed);
+      if (stmts.length === 0) return;
+
+      // Multi-statement scripts run sequentially with one result tab each.
+      // Parameter binding is only supported for single-statement runs.
+      if (stmts.length > 1) {
+        void doExecuteMulti(stmts, trimmed);
+        return;
+      }
+
+      const single = stmts[0]!;
+      const { params } = detectParams(single);
       if (params.length > 0) {
-        pendingSqlRef.current = trimmed;
+        pendingSqlRef.current = single;
         setPendingParams(params);
         setParamDialogOpen(true);
       } else {
-        void doExecute(trimmed);
+        void doExecute(single);
       }
     },
-    [doExecute],
+    [doExecute, doExecuteMulti],
   );
 
   const handleParamExecute = useCallback(
@@ -157,17 +282,30 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       } catch (e) {
         setExplainResult(null);
         setResultMode("query");
-        setResultState({ status: "error", message: `EXPLAIN 失败: ${String(e)}` });
+        setResultState({
+          status: "error",
+          message: `EXPLAIN 失败: ${formatDbError(e)}`,
+          onReconnect: isConnectionError(e) ? handleReconnect : undefined,
+        });
       } finally {
         setExplaining(false);
       }
     },
-    [connectionId],
+    [connectionId, handleReconnect],
   );
 
-  const handleStop = () => {
-    setRunning(false);
-    setResultState({ status: "idle" });
+  // Stop: cancel the in-flight query on the server (KILL QUERY /
+  // pg_cancel_backend via a second connection). The running executeQuery
+  // promise then rejects and doExecute's catch renders the result.
+  const handleStop = async () => {
+    const id = currentExecutionRef.current;
+    if (!id) return;
+    cancelRequestedRef.current = true;
+    try {
+      await cancelQuery(id);
+    } catch {
+      // 查询可能刚好结束；在途 promise 会自行返回，无需处理
+    }
   };
 
   // sql-formatter — passed to SqlEditor so Shift+Alt+F works inside CM too

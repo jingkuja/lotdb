@@ -18,6 +18,7 @@ import {
   Monitor,
   Keyboard,
   Settings,
+  Lock,
   ArrowLeftRight,
 } from "lucide-react";
 import { useThemeStore, type ThemeMode } from "@/stores/theme-store";
@@ -39,6 +40,10 @@ import {
   useCreateConnection,
   useUpdateConnection,
   useDeleteConnection,
+  useConnectionGroups,
+  useCreateGroup,
+  useRenameGroup,
+  useDeleteGroup,
 } from "@/hooks/use-connections";
 import { useConnectionStore } from "@/stores/connection-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
@@ -84,11 +89,17 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
   );
   // Which connections have their tree expanded
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  // Which connection groups are expanded
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
   const { data: connections = [], isLoading } = useConnections();
   const createMutation = useCreateConnection();
   const updateMutation = useUpdateConnection();
   const deleteMutation = useDeleteConnection();
+  const { data: groups = [] } = useConnectionGroups();
+  const createGroupMutation = useCreateGroup();
+  const renameGroupMutation = useRenameGroup();
+  const deleteGroupMutation = useDeleteGroup();
   const {
     activeConnectionId,
     openPoolIds,
@@ -129,6 +140,47 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
       }
       return next;
     });
+  };
+
+  const toggleGroup = (id: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const handleNewGroup = async () => {
+    const name = window.prompt("新建分组，输入分组名称：");
+    if (!name?.trim()) return;
+    try {
+      await createGroupMutation.mutateAsync(name.trim());
+    } catch (e) {
+      alert(String(e));
+    }
+  };
+
+  const handleRenameGroup = async (id: string, current: string) => {
+    const name = window.prompt("重命名分组：", current);
+    if (!name?.trim() || name.trim() === current) return;
+    try {
+      await renameGroupMutation.mutateAsync({ id, name: name.trim() });
+    } catch (e) {
+      alert(String(e));
+    }
+  };
+
+  const handleDeleteGroup = async (id: string, name: string) => {
+    if (!confirm(`删除分组 "${name}"？组内连接将变为未分组。`)) return;
+    try {
+      await deleteGroupMutation.mutateAsync(id);
+    } catch (e) {
+      alert(String(e));
+    }
   };
 
   const handleConnect = async (conn: ConnectionConfig) => {
@@ -204,7 +256,11 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="ghost" size="icon-xs">
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => void handleNewGroup()}
+            >
               <FolderOpen className="size-4" />
             </Button>
           </TooltipTrigger>
@@ -320,7 +376,8 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
             </div>
           )}
 
-          {connections.map((conn) => {
+          {(() => {
+            const renderConnection = (conn: ConnectionConfig) => {
             const isOpen = openPoolIds.has(conn.id);
             const isActive = activeConnectionId === conn.id;
             const isExpanded = expandedIds.has(conn.id);
@@ -369,6 +426,12 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
                   <span className="min-w-0 flex-1 truncate text-sm">
                     {conn.name}
                   </span>
+                  {conn.readonly && (
+                    <Lock
+                      className="size-3 shrink-0 text-amber-500"
+                      aria-label="只读模式"
+                    />
+                  )}
 
                   {/* Action buttons — visible on hover */}
                   <div className="flex shrink-0 gap-0.5 opacity-0 group-hover:opacity-100">
@@ -439,7 +502,68 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
                 )}
               </div>
             );
-          })}
+            };
+
+            const ungrouped = connections.filter((c) => !c.groupId);
+            return (
+              <>
+                {ungrouped.map((conn) => renderConnection(conn))}
+                {groups.map((g) => {
+                  const groupConns = connections.filter((c) => c.groupId === g.id);
+                  const gExpanded = expandedGroups.has(g.id);
+                  return (
+                    <div key={g.id}>
+                      {/* Group folder row */}
+                      <div
+                        className="group flex items-center gap-1.5 rounded-md px-1 py-1 text-sm cursor-pointer hover:bg-sidebar-accent/50"
+                        onClick={() => toggleGroup(g.id)}
+                      >
+                        <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
+                          {groupConns.length > 0 ? (
+                            gExpanded ? (
+                              <ChevronDown className="size-3.5" />
+                            ) : (
+                              <ChevronRight className="size-3.5" />
+                            )
+                          ) : null}
+                        </span>
+                        <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+                        <span className="min-w-0 flex-1 truncate font-medium">
+                          {g.name}
+                        </span>
+                        <span className="shrink-0 text-[10px] text-muted-foreground">
+                          {groupConns.length}
+                        </span>
+                        <div className="flex shrink-0 gap-0.5 opacity-0 group-hover:opacity-100">
+                          <button
+                            className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border"
+                            title="重命名分组"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleRenameGroup(g.id, g.name);
+                            }}
+                          >
+                            <Pencil className="size-3" />
+                          </button>
+                          <button
+                            className="rounded p-0.5 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
+                            title="删除分组"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleDeleteGroup(g.id, g.name);
+                            }}
+                          >
+                            <Trash2 className="size-3" />
+                          </button>
+                        </div>
+                      </div>
+                      {gExpanded && groupConns.map((conn) => renderConnection(conn))}
+                    </div>
+                  );
+                })}
+              </>
+            );
+          })()}
         </div>
       </ScrollArea>
 
@@ -455,8 +579,9 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
         }
       />
 
-      {/* Connection Dialog */}
+      {/* Connection Dialog — keyed by edit target so form state resets */}
       <ConnectionDialog
+        key={editingConn?.id ?? "new"}
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         initial={editingConn}
