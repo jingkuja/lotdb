@@ -10,7 +10,14 @@ import {
   type ColumnOrderState,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowUp, ArrowDown, ArrowUpDown, Trash2 } from "lucide-react";
+import {
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
+  Trash2,
+  Eye,
+  Pencil,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ColumnFilter } from "@/services/tauri-commands";
 
@@ -31,7 +38,7 @@ export interface PendingEdit {
 }
 
 /** New row values: colName → value (null = NULL, "" = empty string) */
-export type NewRow = Record<string, string | null>;
+export type NewRow = Record<string, string | null | undefined>;
 
 export function editKey(rowIndex: number, colName: string) {
   return `${rowIndex}:${colName}`;
@@ -40,11 +47,25 @@ export function editKey(rowIndex: number, colName: string) {
 // ─── Filter cell ──────────────────────────────────────────────────
 
 type FilterOp = ColumnFilter["op"];
-const OPS: FilterOp[] = ["=", "!=", "LIKE", "NOT LIKE", ">", "<", ">=", "<=", "IS NULL", "IS NOT NULL"];
+const OPS: FilterOp[] = [
+  "=",
+  "!=",
+  "LIKE",
+  "NOT LIKE",
+  ">",
+  "<",
+  ">=",
+  "<=",
+  "IS NULL",
+  "IS NOT NULL",
+];
 const NO_VALUE_OPS: FilterOp[] = ["IS NULL", "IS NOT NULL"];
 
 function FilterCell({
-  colName, colWidth, filter, onChange,
+  colName,
+  colWidth,
+  filter,
+  onChange,
 }: {
   colName: string;
   colWidth: number;
@@ -61,7 +82,11 @@ function FilterCell({
   // Propagate debounced value upstream
   useEffect(() => {
     if (noValue) return;
-    onChange(debouncedValue === "" ? null : { column: colName, op, value: debouncedValue });
+    onChange(
+      debouncedValue === ""
+        ? null
+        : { column: colName, op, value: debouncedValue },
+    );
     // Only trigger when debounced value or op changes; onChange identity is stable
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedValue, op, noValue, colName]);
@@ -93,7 +118,11 @@ function FilterCell({
           }
         }}
       >
-        {OPS.map((o) => <option key={o} value={o}>{o}</option>)}
+        {OPS.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
       </select>
       {!noValue && (
         <input
@@ -144,18 +173,6 @@ function CellEditor({
     }
   };
 
-  const toggleNull = () => {
-    setIsNull((v) => {
-      if (!v) {
-        // switching to NULL — commit immediately when toggle is clicked
-        return true;
-      }
-      // switching back to value
-      setTimeout(() => { inputRef.current?.focus(); inputRef.current?.select(); }, 0);
-      return false;
-    });
-  };
-
   return (
     <div className="flex h-full w-full items-center ring-2 ring-primary ring-inset">
       {isNull ? (
@@ -165,7 +182,8 @@ function CellEditor({
       ) : (
         <input
           ref={inputRef}
-          className="h-full flex-1 bg-background px-2 text-xs outline-none"
+          aria-label="编辑单元格"
+          className="h-full min-w-0 flex-1 bg-background px-2 text-xs outline-none"
           value={val}
           onChange={(e) => setVal(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -181,7 +199,13 @@ function CellEditor({
             : "text-muted-foreground/50 hover:text-muted-foreground",
         )}
         title={isNull ? "取消 NULL，改为字符串" : "设为 NULL"}
-        onMouseDown={(e) => { e.preventDefault(); toggleNull(); }}
+        onMouseDown={(e) => {
+          e.preventDefault();
+        }}
+        onClick={() => {
+          if (!isNull) onCommit(null);
+          else setIsNull(false);
+        }}
       >
         N
       </button>
@@ -197,10 +221,14 @@ interface CellDisplayInfo {
 }
 
 function cellDisplay(value: unknown): CellDisplayInfo {
-  if (value === null || value === undefined) return { text: "NULL", kind: "null" };
-  if (typeof value === "string" && value === "") return { text: "", kind: "empty" };
-  if (typeof value === "boolean") return { text: value ? "true" : "false", kind: "normal" };
-  if (typeof value === "object") return { text: JSON.stringify(value), kind: "normal" };
+  if (value === null || value === undefined)
+    return { text: "NULL", kind: "null" };
+  if (typeof value === "string" && value === "")
+    return { text: "", kind: "empty" };
+  if (typeof value === "boolean")
+    return { text: value ? "true" : "false", kind: "normal" };
+  if (typeof value === "object")
+    return { text: JSON.stringify(value), kind: "normal" };
   return { text: String(value), kind: "normal" };
 }
 
@@ -219,7 +247,7 @@ function GridCell({
   isEditing: boolean;
   isEdited: boolean;
   isDeleted: boolean;
-  onStartEdit: () => void;
+  onStartEdit?: () => void;
   onCommit: (v: string | null) => void;
   onCancel: () => void;
   onMoveNext: () => void;
@@ -241,24 +269,68 @@ function GridCell({
   return (
     <div
       className={cn(
-        "flex h-full w-full cursor-pointer items-center overflow-hidden px-2 py-1 text-xs",
+        "group/cell flex h-full w-full cursor-pointer items-center overflow-hidden px-2 py-1 text-xs",
         kind === "null" && !isEdited && "italic text-muted-foreground/50",
         kind === "empty" && !isEdited && "text-muted-foreground/40",
         isEdited && "bg-amber-500/15",
         isDeleted && "line-through opacity-40",
         !isEdited && !isDeleted && "hover:bg-primary/10",
       )}
-      title={kind === "null" ? "NULL" : kind === "empty" ? "(empty string)" : text}
-      onClick={!isDeleted ? onView : undefined}
+      title={
+        kind === "null" ? "NULL" : kind === "empty" ? "(empty string)" : text
+      }
+      tabIndex={!isDeleted && onStartEdit ? 0 : undefined}
+      onKeyDown={(e) => {
+        if (
+          !isDeleted &&
+          onStartEdit &&
+          (e.key === "Enter" || e.key === "F2")
+        ) {
+          e.preventDefault();
+          onStartEdit();
+        }
+      }}
+      onClick={!isDeleted && !onStartEdit ? onView : undefined}
       onDoubleClick={!isDeleted ? onStartEdit : undefined}
     >
-      {isEdited && <span className="mr-1 size-1.5 shrink-0 rounded-full bg-amber-500" />}
+      {isEdited && (
+        <span className="mr-1 size-1.5 shrink-0 rounded-full bg-amber-500" />
+      )}
       {kind === "null" ? (
         <span className="truncate">NULL</span>
       ) : kind === "empty" ? (
         <span className="truncate font-mono text-[10px]">(empty)</span>
       ) : (
         <span className="truncate">{text}</span>
+      )}
+      {!isDeleted && (onStartEdit || onView) && (
+        <span className="ml-auto flex shrink-0 opacity-0 group-hover/cell:opacity-100 group-focus-within/cell:opacity-100">
+          {onStartEdit && (
+            <button
+              title="编辑单元格"
+              className="p-0.5"
+              onClick={(e) => {
+                e.stopPropagation();
+                onStartEdit();
+              }}
+            >
+              <Pencil className="size-3" />
+            </button>
+          )}
+          {onView && (
+            <button
+              title="查看单元格"
+              className="p-0.5"
+              onDoubleClick={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onView();
+              }}
+            >
+              <Eye className="size-3" />
+            </button>
+          )}
+        </span>
       )}
     </div>
   );
@@ -267,39 +339,45 @@ function GridCell({
 // ─── New row cell ─────────────────────────────────────────────────
 
 function NewRowCell({
+  column,
   value,
   onChange,
 }: {
-  value: string | null;
-  onChange: (v: string | null) => void;
+  column: string;
+  value: string | null | undefined;
+  onChange: (v: string | null | undefined) => void;
 }) {
-  const isNull = value === null;
-
   return (
     <div className="flex h-full w-full items-center bg-emerald-500/5">
-      {isNull ? (
-        <span className="flex-1 px-2 font-mono text-[11px] italic text-muted-foreground/50">
-          NULL
-        </span>
-      ) : (
-        <input
-          className="h-full flex-1 bg-transparent px-2 text-xs outline-none placeholder:text-muted-foreground/30 focus:ring-1 focus:ring-emerald-500 focus:ring-inset"
-          value={value}
-          placeholder="(empty)"
-          onChange={(e) => onChange(e.target.value)}
-        />
-      )}
+      <input
+        className="h-full min-w-0 flex-1 bg-transparent px-2 text-xs outline-none"
+        aria-label={column}
+        value={value ?? ""}
+        placeholder={
+          value === undefined ? "DEFAULT" : value === null ? "NULL" : "(empty)"
+        }
+        onChange={(e) => onChange(e.target.value)}
+      />
       <button
-        className={cn(
-          "shrink-0 px-1.5 text-[10px] font-medium transition-colors",
-          isNull
-            ? "text-emerald-600 dark:text-emerald-400"
-            : "text-muted-foreground/40 hover:text-muted-foreground",
-        )}
-        title={isNull ? "取消 NULL" : "设为 NULL"}
-        onMouseDown={(e) => { e.preventDefault(); onChange(isNull ? "" : null); }}
+        className="px-1 text-[10px]"
+        title="设为 NULL"
+        onClick={() => onChange(null)}
       >
         N
+      </button>
+      <button
+        className="px-1 text-[10px]"
+        title="使用默认值"
+        onClick={() => onChange(undefined)}
+      >
+        D
+      </button>
+      <button
+        className="px-1 text-[10px]"
+        title="设为空字符串"
+        onClick={() => onChange("")}
+      >
+        E
       </button>
     </div>
   );
@@ -334,7 +412,11 @@ interface DataGridProps {
   pendingDeletes?: Set<number>;
   onDeleteToggle?: (rowIndex: number) => void;
   newRows?: NewRow[];
-  onNewRowChange?: (newRowIndex: number, col: string, value: string | null) => void;
+  onNewRowChange?: (
+    newRowIndex: number,
+    col: string,
+    value: string | null | undefined,
+  ) => void;
   onCellView?: (target: CellViewTarget) => void;
 }
 
@@ -359,14 +441,21 @@ export function DataGrid({
 }: DataGridProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
-  const [activeEdit, setActiveEdit] = useState<{ rowIndex: number; colIndex: number } | null>(null);
+  const [activeEdit, setActiveEdit] = useState<{
+    rowIndex: number;
+    colIndex: number;
+  } | null>(null);
   const [columnOrder, setColumnOrder] = useState<ColumnOrderState>([]);
   const [draggingColId, setDraggingColId] = useState<string | null>(null);
   const [dragOverColId, setDragOverColId] = useState<string | null>(null);
 
   // Reset edit + column order when columns list changes (different table)
-  useEffect(() => { setActiveEdit(null); }, [rows]);
-  useEffect(() => { setColumnOrder([]); }, [columns]);
+  useEffect(() => {
+    setActiveEdit(null);
+  }, [rows]);
+  useEffect(() => {
+    setColumnOrder([]);
+  }, [columns]);
 
   const colDefs = useMemo<ColumnDef<GridRow>[]>(
     () =>
@@ -380,7 +469,9 @@ export function DataGrid({
     [columns],
   );
 
-  const sortingState: SortingState = sort ? [{ id: sort.column, desc: sort.dir === "DESC" }] : [];
+  const sortingState: SortingState = sort
+    ? [{ id: sort.column, desc: sort.dir === "DESC" }]
+    : [];
 
   const table: Table<GridRow> = useReactTable({
     data: rows,
@@ -405,7 +496,8 @@ export function DataGrid({
   const virtualItems = virtualizer.getVirtualItems();
   const totalHeight = virtualizer.getTotalSize();
   const paddingTop = virtualItems[0]?.start ?? 0;
-  const paddingBottom = totalHeight - (virtualItems[virtualItems.length - 1]?.end ?? 0);
+  const paddingBottom =
+    totalHeight - (virtualItems[virtualItems.length - 1]?.end ?? 0);
 
   const headerGroups = table.getHeaderGroups();
 
@@ -427,20 +519,23 @@ export function DataGrid({
     setDragOverColId(colId);
   }, []);
 
-  const handleDrop = useCallback((toColId: string) => {
-    if (!draggingColId || draggingColId === toColId) return;
-    const allIds = table.getAllLeafColumns().map((c) => c.id);
-    const current = columnOrder.length > 0 ? columnOrder : allIds;
-    const fromIdx = current.indexOf(draggingColId);
-    const toIdx = current.indexOf(toColId);
-    if (fromIdx < 0 || toIdx < 0) return;
-    const next = [...current];
-    next.splice(fromIdx, 1);
-    next.splice(toIdx, 0, draggingColId);
-    setColumnOrder(next);
-    setDraggingColId(null);
-    setDragOverColId(null);
-  }, [draggingColId, columnOrder, table]);
+  const handleDrop = useCallback(
+    (toColId: string) => {
+      if (!draggingColId || draggingColId === toColId) return;
+      const allIds = table.getAllLeafColumns().map((c) => c.id);
+      const current = columnOrder.length > 0 ? columnOrder : allIds;
+      const fromIdx = current.indexOf(draggingColId);
+      const toIdx = current.indexOf(toColId);
+      if (fromIdx < 0 || toIdx < 0) return;
+      const next = [...current];
+      next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, draggingColId);
+      setColumnOrder(next);
+      setDraggingColId(null);
+      setDragOverColId(null);
+    },
+    [draggingColId, columnOrder, table],
+  );
 
   const handleDragEnd = useCallback(() => {
     setDraggingColId(null);
@@ -454,15 +549,19 @@ export function DataGrid({
       // Detect no-change: null→null or string→same string
       const origIsNull = originalValue === null || originalValue === undefined;
       const newIsNull = newValue === null;
-      const origStr = origIsNull ? null : String(originalValue);
-      if (newIsNull === origIsNull && newValue === origStr) {
+      const origStr = origIsNull ? null : cellDisplay(originalValue).text;
+      if (
+        !pendingEdits[editKey(rowIndex, colName)] &&
+        newIsNull === origIsNull &&
+        newValue === origStr
+      ) {
         setActiveEdit(null);
         return;
       }
       onEditCommit?.({ rowIndex, column: colName, originalValue, newValue });
       setActiveEdit(null);
     },
-    [columns, rows, onEditCommit],
+    [columns, rows, onEditCommit, pendingEdits],
   );
 
   const moveNext = useCallback(
@@ -480,7 +579,9 @@ export function DataGrid({
     [columns.length, rows.length, virtualizer],
   );
 
-  const headerHeight = showFilterRow ? HEADER_HEIGHT + FILTER_ROW_HEIGHT : HEADER_HEIGHT;
+  const headerHeight = showFilterRow
+    ? HEADER_HEIGHT + FILTER_ROW_HEIGHT
+    : HEADER_HEIGHT;
 
   return (
     <div
@@ -502,7 +603,9 @@ export function DataGrid({
                 className="size-3 cursor-pointer accent-primary"
                 checked={rows.length > 0 && selectedRows.size === rows.length}
                 ref={(el) => {
-                  if (el) el.indeterminate = selectedRows.size > 0 && selectedRows.size < rows.length;
+                  if (el)
+                    el.indeterminate =
+                      selectedRows.size > 0 && selectedRows.size < rows.length;
                 }}
                 onChange={(e) => onSelectAll?.(e.target.checked)}
               />
@@ -516,7 +619,8 @@ export function DataGrid({
             const isSorted = sort?.column === colId;
             const sortDir = isSorted ? sort?.dir : null;
             const isDragging = draggingColId === colId;
-            const isDragOver = dragOverColId === colId && draggingColId !== colId;
+            const isDragOver =
+              dragOverColId === colId && draggingColId !== colId;
 
             return (
               <div
@@ -540,7 +644,10 @@ export function DataGrid({
                 onDragEnd={handleDragEnd}
               >
                 <span className="truncate text-xs font-medium">
-                  {flexRender(header.column.columnDef.header, header.getContext())}
+                  {flexRender(
+                    header.column.columnDef.header,
+                    header.getContext(),
+                  )}
                 </span>
                 {onSort && (
                   <span className="ml-auto shrink-0 text-muted-foreground/60">
@@ -560,8 +667,14 @@ export function DataGrid({
                     header.column.getIsResizing() && "bg-primary opacity-100",
                   )}
                   draggable={false}
-                  onMouseDown={(e) => { e.stopPropagation(); header.getResizeHandler()(e); }}
-                  onTouchStart={(e) => { e.stopPropagation(); header.getResizeHandler()(e); }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    header.getResizeHandler()(e);
+                  }}
+                  onTouchStart={(e) => {
+                    e.stopPropagation();
+                    header.getResizeHandler()(e);
+                  }}
                 />
               </div>
             );
@@ -569,8 +682,13 @@ export function DataGrid({
         </div>
 
         {showFilterRow && (
-          <div className="flex border-t border-border/50" style={{ height: FILTER_ROW_HEIGHT }}>
-            {onRowSelectToggle && <div className="w-8 shrink-0 border-r border-border/50" />}
+          <div
+            className="flex border-t border-border/50"
+            style={{ height: FILTER_ROW_HEIGHT }}
+          >
+            {onRowSelectToggle && (
+              <div className="w-8 shrink-0 border-r border-border/50" />
+            )}
             <div className="w-10 shrink-0 border-r border-border/50" />
             {headerGroups[0]?.headers.map((header) => (
               <FilterCell
@@ -609,7 +727,11 @@ export function DataGrid({
                 key={row.id}
                 className={cn(
                   "group flex border-b border-border/50",
-                  isDeleted ? "bg-destructive/10" : isEven ? "bg-background" : "bg-muted/20",
+                  isDeleted
+                    ? "bg-destructive/10"
+                    : isEven
+                      ? "bg-background"
+                      : "bg-muted/20",
                   !isDeleted && "hover:bg-primary/5",
                 )}
                 style={{ height: ROW_HEIGHT }}
@@ -632,15 +754,26 @@ export function DataGrid({
                   title={isDeleted ? "取消删除" : "标记删除"}
                 >
                   <span className="group-hover:hidden">{rowIdx + 1}</span>
-                  <Trash2 className={cn("hidden size-3 group-hover:block", isDeleted ? "text-destructive" : "text-muted-foreground/60")} />
+                  <Trash2
+                    className={cn(
+                      "hidden size-3 group-hover:block",
+                      isDeleted
+                        ? "text-destructive"
+                        : "text-muted-foreground/60",
+                    )}
+                  />
                 </div>
 
-                {row.getVisibleCells().map((cell, colIdx) => {
-                  const colName = columns[colIdx] ?? "";
+                {row.getVisibleCells().map((cell) => {
+                  const colName = cell.column.id;
+                  const originalColIdx = columns.indexOf(colName);
                   const key = editKey(rowIdx, colName);
-                  const isEditing = activeEdit?.rowIndex === rowIdx && activeEdit?.colIndex === colIdx;
+                  const isEditing =
+                    activeEdit?.rowIndex === rowIdx &&
+                    activeEdit?.colIndex === originalColIdx;
                   const pending = pendingEdits[key];
-                  const displayValue = pending !== undefined ? pending.newValue : cell.getValue();
+                  const displayValue =
+                    pending !== undefined ? pending.newValue : cell.getValue();
 
                   return (
                     <div
@@ -653,11 +786,30 @@ export function DataGrid({
                         isEditing={isEditing}
                         isEdited={!!pending}
                         isDeleted={isDeleted}
-                        onStartEdit={() => setActiveEdit({ rowIndex: rowIdx, colIndex: colIdx })}
-                        onCommit={(v) => handleCommit(rowIdx, colIdx, v)}
+                        onStartEdit={
+                          onEditCommit
+                            ? () => {
+                                setActiveEdit({
+                                  rowIndex: rowIdx,
+                                  colIndex: originalColIdx,
+                                });
+                              }
+                            : undefined
+                        }
+                        onCommit={(v) =>
+                          handleCommit(rowIdx, originalColIdx, v)
+                        }
                         onCancel={() => setActiveEdit(null)}
-                        onMoveNext={() => moveNext(rowIdx, colIdx)}
-                        onView={onCellView ? () => onCellView({ columnName: colName, value: displayValue }) : undefined}
+                        onMoveNext={() => moveNext(rowIdx, originalColIdx)}
+                        onView={
+                          onCellView
+                            ? () =>
+                                onCellView({
+                                  columnName: colName,
+                                  value: displayValue,
+                                })
+                            : undefined
+                        }
                       />
                     </div>
                   );
@@ -676,16 +828,24 @@ export function DataGrid({
             className="flex border-b border-emerald-500/30 bg-emerald-500/10"
             style={{ height: ROW_HEIGHT }}
           >
+            {onRowSelectToggle && (
+              <div className="w-8 shrink-0 border-r border-emerald-500/20" />
+            )}
             <div className="flex w-10 shrink-0 items-center justify-center border-r border-emerald-500/20 text-[10px] text-emerald-600 select-none dark:text-emerald-400">
               +{newRowIdx + 1}
             </div>
-            {columns.map((col, colIdx) => {
-              const header = headerGroups[0]?.headers[colIdx];
-              const width = header?.getSize() ?? 140;
+            {headerGroups[0]?.headers.map((header) => {
+              const col = header.column.id;
+              const width = header.getSize();
               return (
-                <div key={col} className="shrink-0 border-r border-emerald-500/20" style={{ width }}>
+                <div
+                  key={col}
+                  className="shrink-0 border-r border-emerald-500/20"
+                  style={{ width }}
+                >
                   <NewRowCell
-                    value={newRow[col] ?? null}
+                    column={col}
+                    value={newRow[col]}
                     onChange={(v) => onNewRowChange?.(newRowIdx, col, v)}
                   />
                 </div>

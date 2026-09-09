@@ -415,6 +415,7 @@ pub async fn drop_trigger(
     table: String,
     name: String,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -545,6 +546,7 @@ pub async fn create_sequence(
     name: String,
     options: SequenceOptions,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -591,6 +593,7 @@ pub async fn restart_sequence(
     name: String,
     value: Option<i64>,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -628,6 +631,7 @@ pub async fn drop_sequence(
     schema: Option<String>,
     name: String,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -720,6 +724,7 @@ pub async fn create_enum_type(
     name: String,
     labels: Vec<String>,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     if labels.is_empty() {
         return Err("枚举至少需要一个值".into());
     }
@@ -763,6 +768,7 @@ pub async fn add_enum_value(
     name: String,
     label: String,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -799,6 +805,7 @@ pub async fn drop_enum_type(
     name: String,
     cascade: bool,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)

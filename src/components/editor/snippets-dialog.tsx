@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -57,7 +57,6 @@ function SnippetForm({
 }) {
   const [form, setForm] = useState(initial);
 
-  useEffect(() => setForm(initial), [initial]);
 
   const set = (key: keyof FormState) => (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
@@ -196,7 +195,11 @@ interface Props {
   createMode?: boolean;
 }
 
-export function SnippetsDialog({
+export function SnippetsDialog(props: Props) {
+  return props.open ? <SnippetsDialogBody key={String(props.createMode)} {...props} /> : null;
+}
+
+function SnippetsDialogBody({
   open,
   onOpenChange,
   onInsert,
@@ -215,17 +218,6 @@ export function SnippetsDialog({
   const createMutation = useCreateSnippet();
   const updateMutation = useUpdateSnippet();
   const deleteMutation = useDeleteSnippet();
-
-  // Reset to list mode when dialog closes
-  useEffect(() => {
-    if (!open) {
-      setMode("list");
-      setEditingEntry(null);
-      setSearchInput("");
-    } else if (createMode) {
-      setMode("create");
-    }
-  }, [open, createMode]);
 
   const handleSave = (form: FormState) => {
     if (mode === "create") {
@@ -367,6 +359,7 @@ export function SnippetsDialog({
         {(mode === "create" || mode === "edit") && (
           <ScrollArea className="flex-1">
             <SnippetForm
+              key={editingEntry?.id ?? mode}
               initial={formInitial}
               onSave={handleSave}
               onCancel={() => { setMode("list"); setEditingEntry(null); }}

@@ -22,14 +22,33 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { copyAsInsert, copyAsCsv, copyAsJson, copyAsMarkdown } from "@/lib/copy-as";
+import {
+  copyAsInsert,
+  copyAsCsv,
+  copyAsJson,
+  copyAsMarkdown,
+} from "@/lib/copy-as";
 import { Button } from "@/components/ui/button";
-import { DataGrid, type SortState, type SortDir, type PendingEdit, type NewRow, type CellViewTarget, editKey } from "./data-grid";
+import {
+  DataGrid,
+  type SortState,
+  type SortDir,
+  type PendingEdit,
+  type NewRow,
+  type CellViewTarget,
+  editKey,
+} from "./data-grid";
 import { ChangePreviewDialog } from "./change-preview-dialog";
 import { CellViewerDialog } from "./cell-viewer-dialog";
 import { ExportDialog } from "@/components/transfer/export-dialog";
 import { ImportDialog } from "@/components/transfer/import-dialog";
-import { getTableData, getTableColumns, executeStatements, type ColumnFilter } from "@/services/tauri-commands";
+import {
+  getTableData,
+  getTableColumns,
+  executeStatements,
+  type ColumnFilter,
+  type TableDataResult,
+} from "@/services/tauri-commands";
 import { generateChangeSql } from "@/lib/generate-change-sql";
 import { useConnections } from "@/hooks/use-connections";
 import { useConnectionStore } from "@/stores/connection-store";
@@ -45,13 +64,23 @@ interface TableDataTabProps {
   table: string;
 }
 
-export function TableDataTab({ connectionId, database, schema, table }: TableDataTabProps) {
+export function TableDataTab({
+  connectionId,
+  database,
+  schema,
+  table,
+}: TableDataTabProps) {
   const qc = useQueryClient();
+  const [draftData, setDraftData] = useState<TableDataResult | null>(null);
+  const [committing, setCommitting] = useState(false);
+  const [commitError, setCommitError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [sort, setSort] = useState<SortState | undefined>(undefined);
   const [showFilterRow, setShowFilterRow] = useState(false);
   const [filterMap, setFilterMap] = useState<Record<string, ColumnFilter>>({});
-  const [pendingEdits, setPendingEdits] = useState<Record<string, PendingEdit>>({});
+  const [pendingEdits, setPendingEdits] = useState<Record<string, PendingEdit>>(
+    {},
+  );
   const [pendingDeletes, setPendingDeletes] = useState<Set<number>>(new Set());
   const [newRows, setNewRows] = useState<NewRow[]>([]);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -72,22 +101,55 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
     markPoolOpen(conn.id);
     await refetch();
   };
-  const { pageSize: PAGE_SIZE, gridFontSize, confirmDml } = usePreferencesStore((s) => s.prefs);
+  const {
+    pageSize: PAGE_SIZE,
+    gridFontSize,
+    confirmDml,
+  } = usePreferencesStore((s) => s.prefs);
 
   const activeFilters = Object.values(filterMap);
   const offset = page * PAGE_SIZE;
 
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["table-data", connectionId, database, schema, table, page, sort, activeFilters],
+  const {
+    data: fetchedData,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+  } = useQuery({
+    queryKey: [
+      "table-data",
+      connectionId,
+      database,
+      schema,
+      table,
+      page,
+      PAGE_SIZE,
+      sort,
+      activeFilters,
+    ],
     queryFn: () =>
       getTableData(
-        connectionId, database, schema, table,
-        PAGE_SIZE, offset, sort?.column, sort?.dir,
+        connectionId,
+        database,
+        schema,
+        table,
+        PAGE_SIZE,
+        offset,
+        sort?.column,
+        sort?.dir,
         activeFilters.length > 0 ? activeFilters : undefined,
       ),
     staleTime: 30_000,
-    placeholderData: (prev) => prev,
+    refetchOnWindowFocus: false,
   });
+
+  const hasPending =
+    Object.keys(pendingEdits).length > 0 ||
+    pendingDeletes.size > 0 ||
+    newRows.length > 0;
+  const data = hasPending ? (draftData ?? fetchedData) : fetchedData;
 
   // Fetch PK info (stale is fine — schema rarely changes)
   const { data: columnDefs = [] } = useQuery({
@@ -100,92 +162,170 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
     [columnDefs],
   );
 
+  const binaryColumns = useMemo(
+    () =>
+      columnDefs
+        .filter((c) =>
+          /^(bytea|(?:tiny|medium|long)?blob|(?:var)?binary)(?:\(|$)/i.test(
+            c.dataType,
+          ),
+        )
+        .map((c) => c.name),
+    [columnDefs],
+  );
+
   const totalPages = data ? Math.ceil(data.totalCount / PAGE_SIZE) : 0;
   const rowStart = offset + 1;
-  const rowEnd = data ? Math.min(offset + data.rows.length, data.totalCount) : 0;
+  const rowEnd = data
+    ? Math.min(offset + data.rows.length, data.totalCount)
+    : 0;
 
   // ── Change helpers ────────────────────────────────────────────────
 
-  const handleSort = useCallback((col: string, dir: SortDir | null) => {
-    setPage(0);
-    setSelectedRows(new Set());
-    setSort(dir ? { column: col, dir } : undefined);
-  }, []);
+  const handleSort = useCallback(
+    (col: string, dir: SortDir | null) => {
+      if (hasPending || committing) return;
+      setPage(0);
+      setSelectedRows(new Set());
+      setSort(dir ? { column: col, dir } : undefined);
+    },
+    [hasPending, committing],
+  );
 
   const handleRowSelectToggle = useCallback((rowIndex: number) => {
     setSelectedRows((prev) => {
       const next = new Set(prev);
-      if (next.has(rowIndex)) next.delete(rowIndex); else next.add(rowIndex);
+      if (next.has(rowIndex)) next.delete(rowIndex);
+      else next.add(rowIndex);
       return next;
     });
   }, []);
 
-  const handleSelectAll = useCallback((selectAll: boolean) => {
-    if (!data) return;
-    setSelectedRows(selectAll ? new Set(data.rows.map((_, i) => i)) : new Set());
-  }, [data]);
+  const handleSelectAll = useCallback(
+    (selectAll: boolean) => {
+      if (!data) return;
+      setSelectedRows(
+        selectAll ? new Set(data.rows.map((_, i) => i)) : new Set(),
+      );
+    },
+    [data],
+  );
 
-  const handleCopyAs = useCallback((format: "insert" | "csv" | "json" | "markdown") => {
-    if (!data) return;
-    const targetRows = selectedRows.size > 0
-      ? data.rows.filter((_, i) => selectedRows.has(i))
-      : data.rows;
+  const handleCopyAs = useCallback(
+    (format: "insert" | "csv" | "json" | "markdown") => {
+      if (!data) return;
+      const targetRows =
+        selectedRows.size > 0
+          ? data.rows.filter((_, i) => selectedRows.has(i))
+          : data.rows;
 
-    let text = "";
-    if (format === "insert") {
-      text = copyAsInsert(database, schema, table, data.columns, targetRows, dbType);
-    } else if (format === "csv") {
-      text = copyAsCsv(data.columns, targetRows);
-    } else if (format === "json") {
-      text = copyAsJson(data.columns, targetRows);
-    } else {
-      text = copyAsMarkdown(data.columns, targetRows);
-    }
-    void navigator.clipboard.writeText(text);
-    setCopyHint(format);
-    setTimeout(() => setCopyHint(null), 1800);
-  }, [data, selectedRows, database, schema, table, dbType]);
+      let text: string;
+      if (format === "insert") {
+        text = copyAsInsert(
+          database,
+          schema,
+          table,
+          data.columns,
+          targetRows,
+          dbType,
+        );
+      } else if (format === "csv") {
+        text = copyAsCsv(data.columns, targetRows);
+      } else if (format === "json") {
+        text = copyAsJson(data.columns, targetRows);
+      } else {
+        text = copyAsMarkdown(data.columns, targetRows);
+      }
+      void navigator.clipboard.writeText(text);
+      setCopyHint(format);
+      setTimeout(() => setCopyHint(null), 1800);
+    },
+    [data, selectedRows, database, schema, table, dbType],
+  );
 
-  const handleFilterChange = useCallback((col: string, filter: ColumnFilter | null) => {
+  const handleFilterChange = useCallback(
+    (col: string, filter: ColumnFilter | null) => {
+      if (hasPending || committing) return;
+      setPage(0);
+      setSelectedRows(new Set());
+      setFilterMap((prev) => {
+        const next = { ...prev };
+        if (filter) next[col] = filter;
+        else delete next[col];
+        return next;
+      });
+    },
+    [hasPending, committing],
+  );
+
+  const clearFilters = useCallback(() => {
+    if (hasPending || committing) return;
+    setFilterMap({});
     setPage(0);
-    setFilterMap((prev) => {
-      const next = { ...prev };
-      if (filter) next[col] = filter; else delete next[col];
-      return next;
-    });
-  }, []);
+    setSelectedRows(new Set());
+  }, [hasPending, committing]);
 
-  const clearFilters = useCallback(() => { setFilterMap({}); setPage(0); }, []);
+  const handleEditCommit = useCallback(
+    (edit: PendingEdit) => {
+      if (!data || pkColumns.length === 0 || committing) return;
+      setDraftData((prev) => (hasPending ? (prev ?? data) : data));
+      setPendingEdits((prev) => {
+        const next = { ...prev };
+        const original =
+          edit.originalValue == null
+            ? null
+            : typeof edit.originalValue === "object"
+              ? JSON.stringify(edit.originalValue)
+              : String(edit.originalValue);
+        const key = editKey(edit.rowIndex, edit.column);
+        if (edit.newValue === original) delete next[key];
+        else next[key] = edit;
+        return next;
+      });
+    },
+    [data, pkColumns.length, committing, hasPending],
+  );
 
-  const handleEditCommit = useCallback((edit: PendingEdit) => {
-    setPendingEdits((prev) => ({ ...prev, [editKey(edit.rowIndex, edit.column)]: edit }));
-  }, []);
-
-  const handleDeleteToggle = useCallback((rowIndex: number) => {
-    setPendingDeletes((prev) => {
-      const next = new Set(prev);
-      if (next.has(rowIndex)) next.delete(rowIndex); else next.add(rowIndex);
-      return next;
-    });
-  }, []);
+  const handleDeleteToggle = useCallback(
+    (rowIndex: number) => {
+      if (!data || pkColumns.length === 0 || committing) return;
+      setDraftData((prev) => (hasPending ? (prev ?? data) : data));
+      setPendingDeletes((prev) => {
+        const next = new Set(prev);
+        if (next.has(rowIndex)) next.delete(rowIndex);
+        else next.add(rowIndex);
+        return next;
+      });
+    },
+    [data, pkColumns.length, committing, hasPending],
+  );
 
   const handleAddRow = useCallback(() => {
-    if (!data) return;
-    // New rows default all columns to null
-    setNewRows((prev) => [...prev, Object.fromEntries(data.columns.map((c) => [c, null]))]);
-  }, [data]);
+    if (!data || committing) return;
+    setDraftData((prev) => (hasPending ? (prev ?? data) : data));
+    setNewRows((prev) => [...prev, {}]);
+  }, [data, committing, hasPending]);
 
-  const handleNewRowChange = useCallback((idx: number, col: string, value: string | null) => {
-    setNewRows((prev) => prev.map((row, i) => (i === idx ? { ...row, [col]: value } : row)));
-  }, []);
+  const handleNewRowChange = useCallback(
+    (idx: number, col: string, value: string | null | undefined) => {
+      if (committing) return;
+      setNewRows((prev) =>
+        prev.map((row, i) => (i === idx ? { ...row, [col]: value } : row)),
+      );
+    },
+    [committing],
+  );
 
   // ── Rollback ──────────────────────────────────────────────────────
 
   const handleRollback = useCallback(() => {
+    if (committing) return;
+    setDraftData(null);
+    setCommitError(null);
     setPendingEdits({});
     setPendingDeletes(new Set());
     setNewRows([]);
-  }, []);
+  }, [committing]);
 
   // ── SQL generation ─────────────────────────────────────────────
 
@@ -197,26 +337,53 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
       schema,
       table,
       columns: data.columns,
+      binaryColumns,
       pkColumns,
       rows: data.rows,
       pendingEdits,
       pendingDeletes,
       newRows,
     });
-  }, [data, dbType, database, schema, table, pkColumns, pendingEdits, pendingDeletes, newRows]);
+  }, [
+    data,
+    dbType,
+    database,
+    schema,
+    table,
+    pkColumns,
+    binaryColumns,
+    pendingEdits,
+    pendingDeletes,
+    newRows,
+  ]);
 
   // ── Commit ────────────────────────────────────────────────────────
 
   const handleCommit = useCallback(async () => {
-    await executeStatements(connectionId, changeSqls, database);
-    // Reset pending state and refresh data
-    setPendingEdits({});
-    setPendingDeletes(new Set());
-    setNewRows([]);
-    await qc.invalidateQueries({ queryKey: ["table-data", connectionId, database, schema, table] });
-  }, [connectionId, changeSqls, qc, database, schema, table]);
+    if (committing || changeSqls.length === 0) return;
+    setCommitting(true);
+    setCommitError(null);
+    try {
+      await executeStatements(connectionId, changeSqls, database);
+      // Reset pending state and refresh data
+      setPendingEdits({});
+      setPendingDeletes(new Set());
+      setNewRows([]);
+      setDraftData(null);
+      setSelectedRows(new Set());
+      await qc.invalidateQueries({
+        queryKey: ["table-data", connectionId, database, schema, table],
+      });
+    } catch (e) {
+      setCommitError(formatDbError(e));
+      throw e;
+    } finally {
+      setCommitting(false);
+    }
+  }, [connectionId, changeSqls, qc, database, schema, table, committing]);
 
-  const pendingCount = Object.keys(pendingEdits).length + pendingDeletes.size + newRows.length;
+  const pendingCount =
+    Object.keys(pendingEdits).length + pendingDeletes.size + newRows.length;
 
   return (
     <div
@@ -226,24 +393,44 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
       {/* Toolbar */}
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
         <Button
-          variant="ghost" size="sm" className="h-7 w-7 p-0"
-          title="刷新" onClick={() => refetch()} disabled={isFetching}
+          variant="ghost"
+          size="sm"
+          className="h-7 w-7 p-0"
+          title="刷新"
+          onClick={() => refetch()}
+          disabled={isFetching || hasPending || committing}
         >
-          <RefreshCw className={`size-3.5 ${isFetching ? "animate-spin" : ""}`} />
+          <RefreshCw
+            className={`size-3.5 ${isFetching ? "animate-spin" : ""}`}
+          />
         </Button>
 
         <Button
-          variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs"
-          onClick={handleAddRow} disabled={!data} title="新增行"
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 px-2 text-xs"
+          onClick={handleAddRow}
+          disabled={!data || committing || conn?.readonly}
+          title="新增行"
         >
-          <Plus className="size-3" />新增行
+          <Plus className="size-3" />
+          新增行
         </Button>
 
         {/* Copy-as dropdown */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" disabled={!data}>
-              {copyHint ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              disabled={!data}
+            >
+              {copyHint ? (
+                <Check className="size-3 text-emerald-500" />
+              ) : (
+                <Copy className="size-3" />
+              )}
               复制为
               {selectedRows.size > 0 && (
                 <span className="ml-0.5 rounded-full bg-primary px-1.5 text-[10px] text-primary-foreground">
@@ -253,29 +440,47 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="text-xs">
-            <DropdownMenuItem onClick={() => handleCopyAs("insert")}>INSERT SQL</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => handleCopyAs("csv")}>CSV</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => handleCopyAs("json")}>JSON</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => handleCopyAs("markdown")}>Markdown</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => handleCopyAs("insert")}>
+              INSERT SQL
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => handleCopyAs("csv")}>
+              CSV
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => handleCopyAs("json")}>
+              JSON
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => handleCopyAs("markdown")}>
+              Markdown
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
         <Button
-          variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs"
-          onClick={() => setExportOpen(true)} title="导出数据"
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 px-2 text-xs"
+          onClick={() => setExportOpen(true)}
+          title="导出数据"
         >
-          <Download className="size-3" />导出
+          <Download className="size-3" />
+          导出
         </Button>
         <Button
-          variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs"
-          onClick={() => setImportOpen(true)} title="导入数据"
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 px-2 text-xs"
+          onClick={() => setImportOpen(true)}
+          title="导入数据"
         >
-          <Upload className="size-3" />导入
+          <Upload className="size-3" />
+          导入
         </Button>
 
         <Button
-          variant={showFilterRow ? "secondary" : "ghost"} size="sm"
-          className="h-7 gap-1 px-2 text-xs" onClick={() => setShowFilterRow((v) => !v)}
+          variant={showFilterRow ? "secondary" : "ghost"}
+          size="sm"
+          className="h-7 gap-1 px-2 text-xs"
+          onClick={() => setShowFilterRow((v) => !v)}
         >
           <Filter className="size-3" />
           筛选
@@ -287,8 +492,14 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
         </Button>
 
         {activeFilters.length > 0 && (
-          <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-muted-foreground" onClick={clearFilters}>
-            <X className="size-3" />清除筛选
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 px-2 text-xs text-muted-foreground"
+            onClick={clearFilters}
+          >
+            <X className="size-3" />
+            清除筛选
           </Button>
         )}
 
@@ -299,24 +510,36 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
               {pendingCount} 处变更
             </span>
             <Button
-              variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs"
-              onClick={() => setPreviewOpen(true)} title="预览 SQL"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={() => setPreviewOpen(true)}
+              title="预览 SQL"
             >
-              <Eye className="size-3" />预览
+              <Eye className="size-3" />
+              预览
             </Button>
             {!confirmDml && (
               <Button
-                variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-emerald-600 dark:text-emerald-400"
-                onClick={() => void handleCommit()} title="直接提交（已关闭 DML 确认）"
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs text-emerald-600 dark:text-emerald-400"
+                disabled={committing}
+                onClick={() => void handleCommit().catch(() => {})}
+                title="直接提交（已关闭 DML 确认）"
               >
                 提交
               </Button>
             )}
             <Button
-              variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-muted-foreground"
-              onClick={handleRollback} title="回滚所有变更"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs text-muted-foreground"
+              onClick={handleRollback}
+              title="回滚所有变更"
             >
-              <RotateCcw className="size-3" />回滚
+              <RotateCcw className="size-3" />
+              回滚
             </Button>
           </>
         )}
@@ -335,24 +558,56 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
           </span>
         )}
 
-        <Button variant="ghost" size="sm" className="h-7 w-7 p-0"
-          disabled={page === 0 || isFetching} onClick={() => setPage((p) => p - 1)}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 w-7 p-0"
+          disabled={page === 0 || isFetching || hasPending || committing}
+          onClick={() => setPage((p) => p - 1)}
+        >
           <ChevronLeft className="size-4" />
         </Button>
         <span className="min-w-[3rem] text-center text-xs text-muted-foreground">
           {totalPages > 0 ? `${page + 1} / ${totalPages}` : "—"}
         </span>
-        <Button variant="ghost" size="sm" className="h-7 w-7 p-0"
-          disabled={page >= totalPages - 1 || isFetching} onClick={() => setPage((p) => p + 1)}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 w-7 p-0"
+          disabled={
+            page >= totalPages - 1 || isFetching || hasPending || committing
+          }
+          onClick={() => setPage((p) => p + 1)}
+        >
           <ChevronRight className="size-4" />
         </Button>
       </div>
 
+      {data && (
+        <p className="px-3 py-1 text-xs text-muted-foreground">
+          {conn?.readonly
+            ? "只读连接，无法编辑数据。"
+            : pkColumns.length === 0
+              ? "此表无主键，无法编辑已有行。"
+              : "双击单元格或点击铅笔编辑；Enter / Tab 暂存并移到下一格，Esc 取消。修改后预览并提交。"}
+        </p>
+      )}
+      {hasPending && (
+        <p className="px-3 py-1 text-xs text-amber-600">
+          请提交或回滚变更后再翻页、排序或筛选。
+        </p>
+      )}
+      {commitError && (
+        <p role="alert" className="px-3 py-1 text-xs text-destructive">
+          {commitError}
+        </p>
+      )}
       {/* Content */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {isLoading && (
           <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" />加载中…
+            <Loader2 className="size-4 animate-spin" />
+            加载中…
           </div>
         )}
         {isError && (
@@ -361,19 +616,29 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
               <AlertCircle className="size-4" />
               {isConnectionError(error) ? "连接已断开" : "加载失败"}
             </div>
-            <div className="text-xs text-muted-foreground">{formatDbError(error)}</div>
+            <div className="text-xs text-muted-foreground">
+              {formatDbError(error)}
+            </div>
             {isConnectionError(error) && (
-              <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => void handleReconnect()}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={() => void handleReconnect()}
+              >
                 重新连接
               </Button>
             )}
           </div>
         )}
-        {data && data.rows.length === 0 && !isLoading && (
-          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            {activeFilters.length > 0 ? "筛选条件下无匹配数据" : "表中无数据"}
-          </div>
-        )}
+        {data &&
+          data.rows.length === 0 &&
+          newRows.length === 0 &&
+          !isLoading && (
+            <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+              {activeFilters.length > 0 ? "筛选条件下无匹配数据" : "表中无数据"}
+            </div>
+          )}
         {data && (data.rows.length > 0 || newRows.length > 0) && (
           <DataGrid
             columns={data.columns}
@@ -384,9 +649,17 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
             onFilterChange={handleFilterChange}
             showFilterRow={showFilterRow}
             pendingEdits={pendingEdits}
-            onEditCommit={handleEditCommit}
+            onEditCommit={
+              pkColumns.length > 0 && !conn?.readonly && !committing
+                ? handleEditCommit
+                : undefined
+            }
             pendingDeletes={pendingDeletes}
-            onDeleteToggle={handleDeleteToggle}
+            onDeleteToggle={
+              pkColumns.length > 0 && !conn?.readonly && !committing
+                ? handleDeleteToggle
+                : undefined
+            }
             newRows={newRows}
             onNewRowChange={handleNewRowChange}
             onCellView={setCellView}
@@ -406,7 +679,9 @@ export function TableDataTab({ connectionId, database, schema, table }: TableDat
 
       <CellViewerDialog
         open={cellView !== null}
-        onOpenChange={(open) => { if (!open) setCellView(null); }}
+        onOpenChange={(open) => {
+          if (!open) setCellView(null);
+        }}
         columnName={cellView?.columnName ?? ""}
         value={cellView?.value}
       />

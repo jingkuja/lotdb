@@ -1,8 +1,20 @@
-import { useRef, useState, useCallback } from "react";
-import { Play, Square, Database, WandSparkles, History, Bookmark, Search } from "lucide-react";
+import { useRef, useState, useEffect, useCallback } from "react";
+import {
+  Play,
+  Square,
+  Database,
+  WandSparkles,
+  History,
+  Bookmark,
+  Search,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SqlEditor, type SqlEditorHandle } from "./sql-editor";
-import { ResultPanel, type ResultState, type MultiStmtOutcome } from "./result-panel";
+import {
+  ResultPanel,
+  type ResultState,
+  type MultiStmtOutcome,
+} from "./result-panel";
 import { ExplainPanel } from "./explain-panel";
 import { HistoryDialog } from "./history-dialog";
 import { SnippetsDialog } from "./snippets-dialog";
@@ -13,6 +25,7 @@ import {
   executeQuery,
   executeQueryWithParams,
   cancelQuery,
+  closeQuerySession,
   explainQuery,
   openConnection,
   type ExplainResult,
@@ -58,10 +71,15 @@ function SplitHandle({ onDrag }: { onDrag: (dy: number) => void }) {
 
 export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const editorRef = useRef<SqlEditorHandle>(null);
-  const { editorFontSize, editorFontFamily, saveQueryHistory, queryMaxRows } = usePreferencesStore((s) => s.prefs);
-  const [resultState, setResultState] = useState<ResultState>({ status: "idle" });
+  const { editorFontSize, editorFontFamily, saveQueryHistory, queryMaxRows } =
+    usePreferencesStore((s) => s.prefs);
+  const [resultState, setResultState] = useState<ResultState>({
+    status: "idle",
+  });
   const [running, setRunning] = useState(false);
-  const [explainResult, setExplainResult] = useState<ExplainResult | null>(null);
+  const [explainResult, setExplainResult] = useState<ExplainResult | null>(
+    null,
+  );
   const [explainAnalyzed, setExplainAnalyzed] = useState(false);
   const [explaining, setExplaining] = useState(false);
   // "query" | "explain"
@@ -110,7 +128,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       const executionId = newExecutionId();
       currentExecutionRef.current = executionId;
       cancelRequestedRef.current = false;
-      const opts = { maxRows: queryMaxRows, executionId };
+      const opts = { maxRows: queryMaxRows, executionId, sessionId: tabId };
       try {
         const result =
           params && params.length > 0
@@ -149,7 +167,14 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [connectionId, conn?.name, saveQueryHistory, queryMaxRows, handleReconnect],
+    [
+      connectionId,
+      tabId,
+      conn?.name,
+      saveQueryHistory,
+      queryMaxRows,
+      handleReconnect,
+    ],
   );
 
   // Sequential multi-statement execution: split by the frontend splitter,
@@ -187,6 +212,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           const r = await executeQuery(connectionId, stmts[i]!, {
             maxRows: queryMaxRows,
             executionId: execId,
+            sessionId: tabId,
           });
           totalMs += r.executionMs ?? 0;
           update(i, { status: "success", result: r });
@@ -196,7 +222,8 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           update(i, {
             status: "error",
             message: failMessage,
-            onReconnect: !cancelled && isConnectionError(e) ? handleReconnect : undefined,
+            onReconnect:
+              !cancelled && isConnectionError(e) ? handleReconnect : undefined,
           });
           for (let j = i + 1; j < stmts.length; j++) {
             update(j, { status: "skipped" });
@@ -226,14 +253,33 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [connectionId, conn?.name, saveQueryHistory, queryMaxRows, handleReconnect],
+    [
+      connectionId,
+      tabId,
+      conn?.name,
+      saveQueryHistory,
+      queryMaxRows,
+      handleReconnect,
+    ],
+  );
+
+  useEffect(
+    () => () => {
+      const executionId = currentExecutionRef.current;
+      void (async () => {
+        if (executionId) await cancelQuery(executionId).catch(() => {});
+        await closeQuerySession(connectionId, tabId);
+      })().catch(() => {});
+    },
+    [connectionId, tabId],
   );
 
   const runQuery = useCallback(
     (sqlToRun: string) => {
+      if (currentExecutionRef.current) return;
       const trimmed = sqlToRun.trim();
       if (!trimmed) return;
-      const stmts = splitStatements(trimmed);
+      const stmts = splitStatements(trimmed, dbType);
       if (stmts.length === 0) return;
 
       // Multi-statement scripts run sequentially with one result tab each.
@@ -253,7 +299,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         void doExecute(single);
       }
     },
-    [doExecute, doExecuteMulti],
+    [doExecute, doExecuteMulti, dbType],
   );
 
   const handleParamExecute = useCallback(
@@ -271,12 +317,19 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
 
   const handleExplain = useCallback(
     async (analyze: boolean) => {
+      if (currentExecutionRef.current) return;
       const sql = (editorRef.current?.getSelection() ?? "").trim();
       if (!sql) return;
+      const executionId = newExecutionId();
+      currentExecutionRef.current = executionId;
+      cancelRequestedRef.current = false;
       setExplaining(true);
       setResultMode("explain");
       try {
-        const result = await explainQuery(connectionId, sql, analyze);
+        const result = await explainQuery(connectionId, sql, analyze, {
+          sessionId: tabId,
+          executionId,
+        });
         setExplainResult(result);
         setExplainAnalyzed(analyze);
       } catch (e) {
@@ -288,10 +341,12 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           onReconnect: isConnectionError(e) ? handleReconnect : undefined,
         });
       } finally {
+        currentExecutionRef.current = null;
+        cancelRequestedRef.current = false;
         setExplaining(false);
       }
     },
-    [connectionId, handleReconnect],
+    [connectionId, tabId, handleReconnect],
   );
 
   // Stop: cancel the in-flight query on the server (KILL QUERY /
@@ -381,7 +436,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
     <div className="flex h-full flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
-        {running ? (
+        {running || explaining ? (
           <Button
             variant="destructive"
             size="sm"
@@ -532,7 +587,9 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         onOpenChange={setSnippetsOpen}
         onInsert={handleSnippetInsert}
         onExecute={handleSnippetExecute}
-        initialSql={snippetCreateMode ? (editorRef.current?.getValue() ?? "") : ""}
+        initialSql={
+          snippetCreateMode ? (editorRef.current?.getValue() ?? "") : ""
+        }
         createMode={snippetCreateMode}
       />
 

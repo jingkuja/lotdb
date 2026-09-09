@@ -6,14 +6,11 @@
 //!
 //! Conversion rules:
 //! - uuid / json / jsonb / arrays → JSON string
-//! - bytea / BLOB → `\x`-prefixed hex (small) or a size placeholder (large)
-//! - DECIMAL / NUMERIC / BIGINT UNSIGNED → string, to survive JS number precision
+//! - bytea / BLOB → complete `\x`-prefixed hex; exports use a binary type tag
+//! - DECIMAL / NUMERIC / BIGINT → string, to survive JS number precision
 //! - undecodable types → "(不支持的类型: NAME)" instead of NULL
 
-use sqlx::{Row, TypeInfo, ValueRef};
-
-/// Placeholder prefix used for binary values too large to inline as hex.
-const BLOB_HEX_LIMIT: usize = 2048;
+use sqlx::{Column, Row, TypeInfo, ValueRef};
 
 const UNSUPPORTED: &str = "(不支持的类型";
 
@@ -22,9 +19,6 @@ fn unsupported(type_name: &str) -> serde_json::Value {
 }
 
 fn bytes_to_json(b: &[u8]) -> serde_json::Value {
-    if b.len() > BLOB_HEX_LIMIT {
-        return serde_json::json!(format!("(BLOB, {} 字节)", b.len()));
-    }
     let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
     serde_json::json!(format!("\\x{hex}"))
 }
@@ -49,14 +43,18 @@ pub fn mysql_value_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json:
         }
     } else if t.contains("int") {
         if let Ok(n) = row.try_get::<i64, _>(i) {
-            return serde_json::json!(n);
+            return if t.contains("bigint") {
+                serde_json::json!(n.to_string())
+            } else {
+                serde_json::json!(n)
+            };
         }
         if let Ok(n) = row.try_get::<u64, _>(i) {
-            return serde_json::json!(n);
+            return serde_json::json!(n.to_string());
         }
     }
 
-    if t == "bit" {
+    if t == "boolean" || t == "bool" || t == "bit" {
         if let Ok(b) = row.try_get::<bool, _>(i) {
             return serde_json::json!(b);
         }
@@ -73,6 +71,9 @@ pub fn mysql_value_to_json(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json:
 
     // DECIMAL — exact text, no f64 rounding.
     if t.contains("decimal") || t == "newdecimal" {
+        if let Ok(n) = row.try_get::<sqlx::types::BigDecimal, _>(i) {
+            return serde_json::json!(n.to_string());
+        }
         if let Ok(s) = row.try_get::<String, _>(i) {
             return serde_json::json!(s);
         }
@@ -135,16 +136,33 @@ pub fn pg_value_to_json(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Va
     }
     let t = raw.type_info().name().to_ascii_lowercase();
 
-    if ["int2", "int4", "int8", "oid", "xid", "cid"].contains(&t.as_str()) {
-        if let Ok(n) = row.try_get::<i64, _>(i) {
-            return serde_json::json!(n);
+    match t.as_str() {
+        "int2" => {
+            if let Ok(n) = row.try_get::<i16, _>(i) {
+                return serde_json::json!(n);
+            }
         }
-    }
-
-    if t == "float4" || t == "float8" {
-        if let Ok(n) = row.try_get::<f64, _>(i) {
-            return serde_json::json!(n);
+        "int4" => {
+            if let Ok(n) = row.try_get::<i32, _>(i) {
+                return serde_json::json!(n);
+            }
         }
+        "int8" => {
+            if let Ok(n) = row.try_get::<i64, _>(i) {
+                return serde_json::json!(n.to_string());
+            }
+        }
+        "float4" => {
+            if let Ok(n) = row.try_get::<f32, _>(i) {
+                return serde_json::json!(n);
+            }
+        }
+        "float8" => {
+            if let Ok(n) = row.try_get::<f64, _>(i) {
+                return serde_json::json!(n);
+            }
+        }
+        _ => {}
     }
 
     // NUMERIC — exact text, no f64 rounding.
@@ -271,13 +289,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blob_placeholder_for_large_binary() {
+    fn binary_values_are_never_truncated() {
         let small_out = bytes_to_json(&[0u8; 16]);
         assert!(small_out.as_str().unwrap().starts_with("\\x"));
-        let big_out = bytes_to_json(&vec![0u8; BLOB_HEX_LIMIT + 1]);
+        let big_out = bytes_to_json(&vec![0u8; 2049]);
         let s = big_out.as_str().unwrap();
-        assert!(s.starts_with("(BLOB,"));
-        assert!(s.contains("字节"));
+        assert!(s.starts_with("\\x"));
+        assert_eq!(s.len(), 2 + 2049 * 2);
     }
 
     #[test]
@@ -298,4 +316,31 @@ mod tests {
         assert_eq!(pg_array_elem("q\"x"), "\"q\\\"x\"");
         assert_eq!(pg_array_elem("back\\slash"), "\"back\\\\slash\"");
     }
+}
+
+/// Binary values carry a type tag in exports; text beginning with \x stays text.
+pub fn mysql_export_value(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
+    let value = mysql_value_to_json(row, i);
+    let t = row.column(i).type_info().name().to_ascii_lowercase();
+    if t.contains("blob") || t.contains("binary") || t == "geometry" || t == "point" {
+        if let Some(s) = value.as_str().and_then(|s| s.strip_prefix("\\x")) {
+            return serde_json::json!({"$lotdbBinary": s});
+        }
+    }
+    value
+}
+
+pub fn pg_export_value(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
+    let value = pg_value_to_json(row, i);
+    if row
+        .column(i)
+        .type_info()
+        .name()
+        .eq_ignore_ascii_case("bytea")
+    {
+        if let Some(s) = value.as_str().and_then(|s| s.strip_prefix("\\x")) {
+            return serde_json::json!({"$lotdbBinary": s});
+        }
+    }
+    value
 }

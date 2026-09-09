@@ -21,19 +21,36 @@ describe("generateChangeSql — UPDATE", () => {
     const sqls = generateChangeSql({
       ...base,
       pendingEdits: {
-        "0:name": { rowIndex: 0, column: "name", originalValue: "Alice", newValue: "Alicia" },
+        "0:name": {
+          rowIndex: 0,
+          column: "name",
+          originalValue: "Alice",
+          newValue: "Alicia",
+        },
       },
     });
     expect(sqls).toHaveLength(1);
-    expect(sqls[0]).toMatch(/UPDATE `mydb`\.`users` SET `name` = 'Alicia' WHERE `id` = 1/);
+    expect(sqls[0]).toMatch(
+      /UPDATE `mydb`\.`users` SET `name` = 'Alicia' WHERE `id` = 1/,
+    );
   });
 
   it("groups multiple edits on the same row into one UPDATE", () => {
     const sqls = generateChangeSql({
       ...base,
       pendingEdits: {
-        "0:name": { rowIndex: 0, column: "name", originalValue: "Alice", newValue: "Alicia" },
-        "0:age": { rowIndex: 0, column: "age", originalValue: 30, newValue: "31" },
+        "0:name": {
+          rowIndex: 0,
+          column: "name",
+          originalValue: "Alice",
+          newValue: "Alicia",
+        },
+        "0:age": {
+          rowIndex: 0,
+          column: "age",
+          originalValue: 30,
+          newValue: "31",
+        },
       },
     });
     expect(sqls).toHaveLength(1);
@@ -45,7 +62,12 @@ describe("generateChangeSql — UPDATE", () => {
     const sqls = generateChangeSql({
       ...base,
       pendingEdits: {
-        "1:age": { rowIndex: 1, column: "age", originalValue: 25, newValue: null },
+        "1:age": {
+          rowIndex: 1,
+          column: "age",
+          originalValue: 25,
+          newValue: null,
+        },
       },
     });
     expect(sqls[0]).toContain("`age` = NULL");
@@ -55,7 +77,12 @@ describe("generateChangeSql — UPDATE", () => {
     const sqls = generateChangeSql({
       ...base,
       pendingEdits: {
-        "0:name": { rowIndex: 0, column: "name", originalValue: "Alice", newValue: "X" },
+        "0:name": {
+          rowIndex: 0,
+          column: "name",
+          originalValue: "Alice",
+          newValue: "X",
+        },
       },
       pendingDeletes: new Set([0]),
     });
@@ -68,7 +95,12 @@ describe("generateChangeSql — UPDATE", () => {
       ...base,
       pkColumns: [],
       pendingEdits: {
-        "0:name": { rowIndex: 0, column: "name", originalValue: "Alice", newValue: "X" },
+        "0:name": {
+          rowIndex: 0,
+          column: "name",
+          originalValue: "Alice",
+          newValue: "X",
+        },
       },
     });
     expect(sqls).toHaveLength(0);
@@ -113,10 +145,79 @@ describe("generateChangeSql — PG quoting", () => {
       ...base,
       dbType: "postgres",
       pendingEdits: {
-        "0:name": { rowIndex: 0, column: "name", originalValue: "Alice", newValue: "X" },
+        "0:name": {
+          rowIndex: 0,
+          column: "name",
+          originalValue: "Alice",
+          newValue: "X",
+        },
       },
     });
     expect(sqls[0]).toContain('"name"');
     expect(sqls[0]).toContain('"id"');
   });
+});
+
+describe("data integrity regressions", () => {
+  it("omits untouched columns and preserves explicit NULL and empty string", () => {
+    const sqls = generateChangeSql({
+      ...base,
+      dbType: "postgres",
+      newRows: [{ name: "", age: null }],
+    });
+    expect(sqls).toEqual([
+      'INSERT INTO "public"."users" ("name", "age") VALUES (\'\', NULL);',
+    ]);
+  });
+  it("can insert a default row into an empty table", () => {
+    expect(
+      generateChangeSql({
+        ...base,
+        dbType: "postgres",
+        rows: [],
+        newRows: [{}],
+      }),
+    ).toEqual(['INSERT INTO "public"."users" DEFAULT VALUES;']);
+    expect(generateChangeSql({ ...base, rows: [], newRows: [{}] })).toEqual([
+      "INSERT INTO `mydb`.`users` () VALUES ();",
+    ]);
+  });
+  it("preserves 64-bit keys as exact strings", () => {
+    expect(
+      generateChangeSql({
+        ...base,
+        rows: [["9007199254740993", "Alice", 30]],
+        pendingDeletes: new Set([0]),
+      })[0],
+    ).toContain("= '9007199254740993'");
+  });
+  it("uses explicit PG escape strings for backslashes", () => {
+    expect(
+      generateChangeSql({
+        ...base,
+        dbType: "postgres",
+        newRows: [{ name: "C:\\temp's" }],
+      })[0],
+    ).toContain("E'C:\\\\temp''s'");
+  });
+  it("escapes identifier quote characters", () => {
+    expect(
+      generateChangeSql({
+        ...base,
+        dbType: "postgres",
+        table: 'a"b',
+        newRows: [{}],
+      })[0],
+    ).toContain('"a""b"');
+  });
+});
+
+it("preserves binary primary keys when editing a MySQL table", () => {
+  const sqls = generateChangeSql({
+    ...base,
+    binaryColumns: ["id"],
+    rows: [["\\x00ff", "Alice", 30]],
+    pendingDeletes: new Set([0]),
+  });
+  expect(sqls[0]).toContain("WHERE `id` = X'00ff'");
 });

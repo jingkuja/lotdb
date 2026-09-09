@@ -1,3 +1,4 @@
+import { quoteIdent, sqlLiteral, binaryLiteral } from "./sql-literal";
 import type { PendingEdit, NewRow, GridRow } from "@/components/grid/data-grid";
 import type { DatabaseType } from "@/types/database";
 
@@ -9,42 +10,16 @@ interface GenerateOptions {
   schema?: string;
   table: string;
   columns: string[];
-  pkColumns: string[];   // column names that form the PK
-  rows: GridRow[];       // current page data (original values)
+  binaryColumns?: string[];
+  pkColumns: string[]; // column names that form the PK
+  rows: GridRow[]; // current page data (original values)
   pendingEdits: Record<string, PendingEdit>;
   pendingDeletes: Set<number>;
   newRows: NewRow[];
 }
 
-function quoteIdent(name: string, dbType: DatabaseType): string {
-  return dbType === "postgres" ? `"${name}"` : `\`${name}\``;
-}
-
 function quoteTable(opts: GenerateOptions): string {
-  const { dbType, database, schema, table } = opts;
-  if (dbType === "postgres") {
-    const s = schema ?? "public";
-    return `"${s}"."${table}"`;
-  }
-  return `\`${database}\`.\`${table}\``;
-}
-
-function escapeValue(v: string): string {
-  return v.replace(/\\/g, "\\\\").replace(/'/g, "''");
-}
-
-/** Render a value for use in SQL. null → NULL, string → quoted. */
-function sqlValue(v: string | null): string {
-  if (v === null) return "NULL";
-  return `'${escapeValue(v)}'`;
-}
-
-/** Render an original (unknown) cell value for use in a WHERE clause. */
-function sqlOrigValue(v: unknown): string {
-  if (v === null || v === undefined) return "NULL";
-  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
-  if (typeof v === "number") return String(v);
-  return `'${escapeValue(String(v))}'`;
+  return `${quoteIdent(opts.dbType === "postgres" ? (opts.schema ?? "public") : opts.database, opts.dbType)}.${quoteIdent(opts.table, opts.dbType)}`;
 }
 
 function buildWhere(
@@ -53,6 +28,7 @@ function buildWhere(
   rows: GridRow[],
   pkColumns: string[],
   dbType: DatabaseType,
+  binaryColumns: string[],
 ): string | null {
   if (pkColumns.length === 0) return null; // cannot safely UPDATE/DELETE without PK
   const row = rows[rowIndex];
@@ -61,13 +37,22 @@ function buildWhere(
   const conditions = pkColumns.map((pk) => {
     const colIdx = columns.indexOf(pk);
     const val = colIdx >= 0 ? row[colIdx] : null;
-    return `${quoteIdent(pk, dbType)} = ${sqlOrigValue(val)}`;
+    return `${quoteIdent(pk, dbType)} = ${(binaryColumns.includes(pk) ? binaryLiteral : sqlLiteral)(val, dbType)}`;
   });
   return conditions.join(" AND ");
 }
 
 export function generateChangeSql(opts: GenerateOptions): string[] {
-  const { dbType, columns, pkColumns, rows, pendingEdits, pendingDeletes, newRows } = opts;
+  const {
+    dbType,
+    columns,
+    pkColumns,
+    rows,
+    pendingEdits,
+    pendingDeletes,
+    newRows,
+    binaryColumns = [],
+  } = opts;
   const tbl = quoteTable(opts);
   const sqls: string[] = [];
 
@@ -80,17 +65,32 @@ export function generateChangeSql(opts: GenerateOptions): string[] {
 
   for (const [rowIndex, edits] of editsByRow) {
     if (pendingDeletes.has(rowIndex)) continue; // row will be deleted, skip update
-    const where = buildWhere(rowIndex, columns, rows, pkColumns, dbType);
+    const where = buildWhere(
+      rowIndex,
+      columns,
+      rows,
+      pkColumns,
+      dbType,
+      binaryColumns,
+    );
     if (!where) continue;
     const setClauses = edits.map(
-      (e) => `${quoteIdent(e.column, dbType)} = ${sqlValue(e.newValue ?? null)}`,
+      (e) =>
+        `${quoteIdent(e.column, dbType)} = ${(binaryColumns.includes(e.column) ? binaryLiteral : sqlLiteral)(e.newValue ?? null, dbType)}`,
     );
     sqls.push(`UPDATE ${tbl} SET ${setClauses.join(", ")} WHERE ${where};`);
   }
 
   // ── DELETEs ───────────────────────────────────────────────────
   for (const rowIndex of pendingDeletes) {
-    const where = buildWhere(rowIndex, columns, rows, pkColumns, dbType);
+    const where = buildWhere(
+      rowIndex,
+      columns,
+      rows,
+      pkColumns,
+      dbType,
+      binaryColumns,
+    );
     if (!where) continue;
     sqls.push(`DELETE FROM ${tbl} WHERE ${where};`);
   }
@@ -98,9 +98,23 @@ export function generateChangeSql(opts: GenerateOptions): string[] {
   // ── INSERTs ───────────────────────────────────────────────────
   for (const newRow of newRows) {
     const cols = columns.filter((c) => newRow[c] !== undefined);
-    if (cols.length === 0) continue;
+    if (cols.length === 0) {
+      sqls.push(
+        dbType === "postgres"
+          ? `INSERT INTO ${tbl} DEFAULT VALUES;`
+          : `INSERT INTO ${tbl} () VALUES ();`,
+      );
+      continue;
+    }
     const colList = cols.map((c) => quoteIdent(c, dbType)).join(", ");
-    const valList = cols.map((c) => sqlValue(newRow[c] ?? null)).join(", ");
+    const valList = cols
+      .map((c) =>
+        (binaryColumns.includes(c) ? binaryLiteral : sqlLiteral)(
+          newRow[c] ?? null,
+          dbType,
+        ),
+      )
+      .join(", ");
     sqls.push(`INSERT INTO ${tbl} (${colList}) VALUES (${valList});`);
   }
 

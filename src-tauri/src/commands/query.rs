@@ -7,8 +7,13 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{Arguments, Column, Row};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 use tauri::State;
+use tokio::sync::Mutex;
 
 /// Default cap on how many rows a single query may return to the UI.
 const DEFAULT_MAX_ROWS: u64 = 1000;
@@ -30,12 +35,34 @@ pub struct RunningQuery {
     pub connection_id: String,
     /// MySQL CONNECTION_ID() / PG pg_backend_pid() of the pinned connection.
     pub session_id: u64,
+    cancelled: Arc<AtomicBool>,
 }
 
 /// Registry of in-flight executions, keyed by the frontend-generated execution ID.
 #[derive(Default)]
 pub struct QueryRegistry {
     pub running: DashMap<String, RunningQuery>,
+    sessions: DashMap<(String, String), Arc<Mutex<Option<QuerySession>>>>,
+}
+
+enum QuerySession {
+    MySQL(sqlx::MySqlConnection),
+    Postgres(sqlx::PgConnection),
+}
+
+impl QueryRegistry {
+    pub fn close_sessions(&self, connection_id: &str) {
+        self.sessions.retain(|(id, _), _| id != connection_id);
+    }
+}
+
+#[tauri::command]
+pub fn close_query_session(
+    registry: State<'_, QueryRegistry>,
+    connection_id: String,
+    session_id: String,
+) {
+    registry.sessions.remove(&(connection_id, session_id));
 }
 
 /// How to execute a statement: fetch rows, or execute and take rows_affected.
@@ -174,18 +201,28 @@ fn with_clause_kind(sql: &str) -> StmtKind {
 #[tauri::command]
 pub async fn open_connection(
     pools: State<'_, PoolManager>,
+    registry: State<'_, QueryRegistry>,
     mut config: ConnectionConfig,
 ) -> Result<(), AppError> {
-    // Load password from Keychain if not provided
+    // Load password from Keychain if not provided (off the async runtime —
+    // a sync SecItem call can deadlock the IPC loop inside a packaged .app).
     if config.password.is_empty() {
-        config.password = keychain::load_password(&config.id).unwrap_or_default();
+        config.password = keychain::load_password_async(config.id.clone())
+            .await
+            .unwrap_or_default();
     }
+    registry.close_sessions(&config.id);
     pools.open(&config).await.map_err(AppError::connection)
 }
 
 /// Close an active connection pool.
 #[tauri::command]
-pub async fn close_connection(pools: State<'_, PoolManager>, id: String) -> Result<(), AppError> {
+pub async fn close_connection(
+    pools: State<'_, PoolManager>,
+    registry: State<'_, QueryRegistry>,
+    id: String,
+) -> Result<(), AppError> {
+    registry.close_sessions(&id);
     pools.close(&id).await;
     Ok(())
 }
@@ -222,35 +259,49 @@ pub async fn cancel_query_impl(
         .map(|e| e.value().clone())
         .ok_or_else(|| AppError::sql("查询已结束，无法取消"))?;
 
-    let entry = pools
-        .pools
-        .get(&rq.connection_id)
-        .ok_or_else(|| AppError::connection(format!("连接 {} 未打开", rq.connection_id)))?;
+    let pool = {
+        let entry = pools
+            .pools
+            .get(&rq.connection_id)
+            .ok_or_else(|| AppError::connection(format!("连接 {} 未打开", rq.connection_id)))?;
+        match &entry.pool {
+            crate::db::pool::DbPool::MySQL(p) => crate::db::pool::DbPool::MySQL(p.clone()),
+            crate::db::pool::DbPool::Postgres(p) => crate::db::pool::DbPool::Postgres(p.clone()),
+        }
+    };
 
-    match &entry.pool {
-        crate::db::pool::DbPool::MySQL(pool) => {
-            let mut conn = pool
-                .acquire()
-                .await
-                .map_err(|e| AppError::from_sqlx("获取连接失败", e))?;
-            sqlx::query(&format!("KILL QUERY {}", rq.session_id))
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| AppError::from_sqlx("取消查询失败", e))?;
+    rq.cancelled.store(true, Ordering::Release);
+    let result: Result<(), AppError> = async {
+        match &pool {
+            crate::db::pool::DbPool::MySQL(pool) => {
+                let mut conn = pool
+                    .acquire()
+                    .await
+                    .map_err(|e| AppError::from_sqlx("获取连接失败", e))?;
+                sqlx::query(&format!("KILL QUERY {}", rq.session_id))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| AppError::from_sqlx("取消查询失败", e))?;
+            }
+            crate::db::pool::DbPool::Postgres(pool) => {
+                let mut conn = pool
+                    .acquire()
+                    .await
+                    .map_err(|e| AppError::from_sqlx("获取连接失败", e))?;
+                sqlx::query(&format!("SELECT pg_cancel_backend({})", rq.session_id))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| AppError::from_sqlx("取消查询失败", e))?;
+            }
         }
-        crate::db::pool::DbPool::Postgres(pool) => {
-            let mut conn = pool
-                .acquire()
-                .await
-                .map_err(|e| AppError::from_sqlx("获取连接失败", e))?;
-            sqlx::query(&format!("SELECT pg_cancel_backend({})", rq.session_id))
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| AppError::from_sqlx("取消查询失败", e))?;
-        }
+
+        Ok(())
     }
-
-    Ok(())
+    .await;
+    if result.is_err() {
+        rq.cancelled.store(false, Ordering::Release);
+    }
+    result
 }
 
 /// Execute a SQL query and return results.
@@ -266,19 +317,21 @@ pub async fn execute_query(
     sql: String,
     max_rows: Option<u64>,
     execution_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<QueryResult, AppError> {
-    run_query(
+    run_session_query(
         &pools,
         &registry,
         &connection_id,
         &sql,
+        &[],
         max_rows,
         execution_id.as_deref(),
+        session_id.as_deref(),
     )
     .await
 }
 
-/// Execute a parameterized SQL query with named/positional params.
 #[tauri::command]
 pub async fn execute_query_with_params(
     pools: State<'_, PoolManager>,
@@ -288,8 +341,9 @@ pub async fn execute_query_with_params(
     params: Vec<serde_json::Value>,
     max_rows: Option<u64>,
     execution_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<QueryResult, AppError> {
-    run_query_with_params(
+    run_session_query(
         &pools,
         &registry,
         &connection_id,
@@ -297,6 +351,7 @@ pub async fn execute_query_with_params(
         &params,
         max_rows,
         execution_id.as_deref(),
+        session_id.as_deref(),
     )
     .await
 }
@@ -311,50 +366,19 @@ pub async fn run_query(
     max_rows: Option<u64>,
     execution_id: Option<&str>,
 ) -> Result<QueryResult, AppError> {
-    let entry = pools
-        .pools
-        .get(connection_id)
-        .ok_or_else(|| AppError::connection(format!("连接 {connection_id} 未打开")))?;
-
-    ensure_writable(pools, connection_id, classify_statement(sql))?;
-
-    let max_rows = normalize_max_rows(max_rows);
-    let start = Instant::now();
-
-    let kind = classify_statement(sql);
-    let raw = match &entry.value().pool {
-        crate::db::pool::DbPool::MySQL(pool) => {
-            let mut conn = pool
-                .acquire()
-                .await
-                .map_err(|e| AppError::from_sqlx("获取连接失败", e))?;
-            let session_id = mysql_session_id(&mut conn).await?;
-            let _guard =
-                CancellationGuard::register(registry, execution_id, connection_id, session_id);
-            run_mysql(&mut conn, sql, kind, max_rows, MySqlArgs::None).await
-        }
-        crate::db::pool::DbPool::Postgres(pool) => {
-            let mut conn = pool
-                .acquire()
-                .await
-                .map_err(|e| AppError::from_sqlx("获取连接失败", e))?;
-            let session_id = pg_session_id(&mut conn).await?;
-            let _guard =
-                CancellationGuard::register(registry, execution_id, connection_id, session_id);
-            run_postgres(&mut conn, sql, kind, max_rows, PgArgs::None).await
-        }
-    };
-
-    raw.map(|(columns, rows, affected_rows, truncated)| QueryResult {
-        columns,
-        rows,
-        affected_rows,
-        truncated,
-        execution_ms: start.elapsed().as_millis(),
-    })
+    run_session_query(
+        pools,
+        registry,
+        connection_id,
+        sql,
+        &[],
+        max_rows,
+        execution_id,
+        None,
+    )
+    .await
 }
 
-/// State-free parameterized execution — see `run_query`.
 pub async fn run_query_with_params(
     pools: &PoolManager,
     registry: &QueryRegistry,
@@ -364,49 +388,145 @@ pub async fn run_query_with_params(
     max_rows: Option<u64>,
     execution_id: Option<&str>,
 ) -> Result<QueryResult, AppError> {
-    let entry = pools
-        .pools
-        .get(connection_id)
-        .ok_or_else(|| AppError::connection(format!("连接 {connection_id} 未打开")))?;
+    run_session_query(
+        pools,
+        registry,
+        connection_id,
+        sql,
+        params,
+        max_rows,
+        execution_id,
+        None,
+    )
+    .await
+}
 
-    ensure_writable(pools, connection_id, classify_statement(sql))?;
-
-    let max_rows = normalize_max_rows(max_rows);
-    let start = Instant::now();
-
-    let kind = classify_statement(sql);
-    let raw = match &entry.value().pool {
-        crate::db::pool::DbPool::MySQL(pool) => {
-            let mut conn = pool
-                .acquire()
-                .await
-                .map_err(|e| AppError::from_sqlx("获取连接失败", e))?;
-            let session_id = mysql_session_id(&mut conn).await?;
-            let _guard =
-                CancellationGuard::register(registry, execution_id, connection_id, session_id);
-            let mut args = sqlx::mysql::MySqlArguments::default();
-            for p in params {
-                bind_mysql_arg(&mut args, p)?;
-            }
-            run_mysql(&mut conn, sql, kind, max_rows, MySqlArgs::Some(args)).await
-        }
-        crate::db::pool::DbPool::Postgres(pool) => {
-            let mut conn = pool
-                .acquire()
-                .await
-                .map_err(|e| AppError::from_sqlx("获取连接失败", e))?;
-            let session_id = pg_session_id(&mut conn).await?;
-            let _guard =
-                CancellationGuard::register(registry, execution_id, connection_id, session_id);
-            let mut args = sqlx::postgres::PgArguments::default();
-            for p in params {
-                bind_pg_arg(&mut args, p)?;
-            }
-            run_postgres(&mut conn, sql, kind, max_rows, PgArgs::Some(args)).await
+/// A tab owns its physical connection until it closes. Detached connections do
+/// not occupy the shared metadata/cancellation pool; dropping closes the socket,
+/// so open transactions and session variables never leak to another tab.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session_query(
+    pools: &PoolManager,
+    registry: &QueryRegistry,
+    connection_id: &str,
+    sql: &str,
+    params: &[serde_json::Value],
+    max_rows: Option<u64>,
+    execution_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<QueryResult, AppError> {
+    let pool = {
+        let entry = pools
+            .pools
+            .get(connection_id)
+            .ok_or_else(|| AppError::connection(format!("连接 {connection_id} 未打开")))?;
+        match &entry.pool {
+            crate::db::pool::DbPool::MySQL(p) => crate::db::pool::DbPool::MySQL(p.clone()),
+            crate::db::pool::DbPool::Postgres(p) => crate::db::pool::DbPool::Postgres(p.clone()),
         }
     };
-
-    raw.map(|(columns, rows, affected_rows, truncated)| QueryResult {
+    let mysql = matches!(pool, crate::db::pool::DbPool::MySQL(_));
+    let readonly = pools.is_readonly(connection_id);
+    if readonly {
+        crate::utils::sql::readonly_sql(sql, mysql).map_err(AppError::sql)?;
+    }
+    // Exactly one statement per invocation; frontend scripts reuse session_id.
+    if crate::utils::sql::split_sql(sql, mysql)
+        .map_err(AppError::sql)?
+        .len()
+        != 1
+    {
+        return Err(AppError::sql("请逐条执行 SQL，并保持相同查询会话"));
+    }
+    let slot = if let Some(id) = session_id {
+        registry
+            .sessions
+            .entry((connection_id.to_string(), id.to_string()))
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone()
+    } else {
+        Arc::new(Mutex::new(None))
+    };
+    let mut session = slot.lock().await;
+    if session.is_none() {
+        *session = Some(match pool {
+            crate::db::pool::DbPool::MySQL(p) => QuerySession::MySQL(
+                p.acquire()
+                    .await
+                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?
+                    .detach(),
+            ),
+            crate::db::pool::DbPool::Postgres(p) => QuerySession::Postgres(
+                p.acquire()
+                    .await
+                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?
+                    .detach(),
+            ),
+        });
+    }
+    let kind = classify_statement(sql);
+    let max_rows = normalize_max_rows(max_rows);
+    let start = Instant::now();
+    let result = match session.as_mut().unwrap() {
+        QuerySession::MySQL(conn) => {
+            let pid = mysql_session_id(conn).await?;
+            let _guard = CancellationGuard::register(registry, execution_id, connection_id, pid);
+            let args = if params.is_empty() {
+                MySqlArgs::None
+            } else {
+                let mut args = sqlx::mysql::MySqlArguments::default();
+                for p in params {
+                    bind_mysql_arg(&mut args, p)?;
+                }
+                MySqlArgs::Some(args)
+            };
+            if readonly {
+                sqlx::Executor::execute(&mut *conn, "START TRANSACTION READ ONLY")
+                    .await
+                    .map_err(|e| AppError::from_sqlx("开启只读事务失败", e))?;
+            }
+            let result = run_mysql(conn, sql, kind, max_rows, args).await;
+            if readonly {
+                sqlx::Executor::execute(&mut *conn, "ROLLBACK")
+                    .await
+                    .map_err(|e| AppError::from_sqlx("结束只读事务失败", e))?;
+            }
+            if _guard.cancelled.load(Ordering::Acquire) {
+                return Err(AppError::sql("查询已取消"));
+            }
+            result
+        }
+        QuerySession::Postgres(conn) => {
+            let pid = pg_session_id(conn).await?;
+            let _guard = CancellationGuard::register(registry, execution_id, connection_id, pid);
+            let args = if params.is_empty() {
+                PgArgs::None
+            } else {
+                let mut args = sqlx::postgres::PgArguments::default();
+                for p in params {
+                    bind_pg_arg(&mut args, p)?;
+                }
+                PgArgs::Some(args)
+            };
+            if readonly {
+                sqlx::Executor::execute(&mut *conn, "START TRANSACTION READ ONLY")
+                    .await
+                    .map_err(|e| AppError::from_sqlx("开启只读事务失败", e))?;
+            }
+            let result = run_postgres(conn, sql, kind, max_rows, args).await;
+            if readonly {
+                sqlx::Executor::execute(&mut *conn, "ROLLBACK")
+                    .await
+                    .map_err(|e| AppError::from_sqlx("结束只读事务失败", e))?;
+            }
+            if _guard.cancelled.load(Ordering::Acquire) {
+                return Err(AppError::sql("查询已取消"));
+            }
+            result
+        }
+    };
+    // Do not reconnect automatically after a broken transaction/session.
+    result.map(|(columns, rows, affected_rows, truncated)| QueryResult {
         columns,
         rows,
         affected_rows,
@@ -442,6 +562,7 @@ fn normalize_max_rows(max_rows: Option<u64>) -> Option<u64> {
 struct CancellationGuard<'a> {
     registry: &'a QueryRegistry,
     execution_id: Option<String>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl<'a> CancellationGuard<'a> {
@@ -451,18 +572,21 @@ impl<'a> CancellationGuard<'a> {
         connection_id: &str,
         session_id: u64,
     ) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
         if let Some(id) = execution_id {
             registry.running.insert(
                 id.to_string(),
                 RunningQuery {
                     connection_id: connection_id.to_string(),
                     session_id,
+                    cancelled: cancelled.clone(),
                 },
             );
         }
         Self {
             registry,
             execution_id: execution_id.map(|s| s.to_string()),
+            cancelled,
         }
     }
 }
@@ -513,7 +637,7 @@ async fn run_mysql(
     match kind {
         StmtKind::Rows => {
             let mut stream = match args {
-                MySqlArgs::None => sqlx::query(sql).fetch(&mut *conn),
+                MySqlArgs::None => sqlx::Executor::fetch(&mut *conn, sql),
                 MySqlArgs::Some(a) => sqlx::query_with(sql, a).fetch(&mut *conn),
             };
             let out = collect_rows(&mut stream, max_rows, mysql_value_to_json).await?;
@@ -522,7 +646,7 @@ async fn run_mysql(
         }
         StmtKind::Execute => {
             let res = match args {
-                MySqlArgs::None => sqlx::query(sql).execute(&mut *conn).await,
+                MySqlArgs::None => sqlx::Executor::execute(&mut *conn, sql).await,
                 MySqlArgs::Some(a) => sqlx::query_with(sql, a).execute(&mut *conn).await,
             }
             .map_err(|e| AppError::from_sqlx("执行失败", e))?;
@@ -541,7 +665,7 @@ async fn run_postgres(
     match kind {
         StmtKind::Rows => {
             let mut stream = match args {
-                PgArgs::None => sqlx::query(sql).fetch(&mut *conn),
+                PgArgs::None => sqlx::Executor::fetch(&mut *conn, sql),
                 PgArgs::Some(a) => sqlx::query_with(sql, a).fetch(&mut *conn),
             };
             let out = collect_rows(&mut stream, max_rows, pg_value_to_json).await?;
@@ -550,7 +674,7 @@ async fn run_postgres(
         }
         StmtKind::Execute => {
             let res = match args {
-                PgArgs::None => sqlx::query(sql).execute(&mut *conn).await,
+                PgArgs::None => sqlx::Executor::execute(&mut *conn, sql).await,
                 PgArgs::Some(a) => sqlx::query_with(sql, a).execute(&mut *conn).await,
             }
             .map_err(|e| AppError::from_sqlx("执行失败", e))?;

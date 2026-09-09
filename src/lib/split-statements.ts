@@ -11,7 +11,7 @@
  * Trailing semicolon is stripped per statement; whitespace-only results are
  * dropped (including statements that were only comments).
  */
-export function splitStatements(sql: string): string[] {
+export function splitStatements(sql: string, dialect: "mysql" | "postgres" = "mysql"): string[] {
   const out: string[] = [];
   let current = "";
   let i = 0;
@@ -28,7 +28,7 @@ export function splitStatements(sql: string): string[] {
       i = stop;
       continue;
     }
-    if (c === "#") {
+    if (c === "#" && dialect === "mysql") {
       const end = sql.indexOf("\n", i);
       const stop = end === -1 ? n : end;
       current += sql.slice(i, stop);
@@ -50,7 +50,7 @@ export function splitStatements(sql: string): string[] {
       const quote = c;
       let j = i + 1;
       while (j < n) {
-        if (sql[j] === "\\" && quote !== "`" && quote !== '"') {
+        if (sql[j] === "\\" && quote === "'" && (dialect === "mysql" || (i > 0 && /[eE]/.test(sql[i - 1]!)))) {
           j += 2; // backslash escape inside '...'
           continue;
         }
@@ -84,7 +84,7 @@ export function splitStatements(sql: string): string[] {
     // Statement separator
     if (c === ";") {
       const trimmed = current.trim();
-      if (trimmed && !isCommentOnly(trimmed)) out.push(trimmed);
+      if (trimmed && !isCommentOnly(trimmed, dialect)) out.push(trimmed);
       current = "";
       i += 1;
       continue;
@@ -95,16 +95,16 @@ export function splitStatements(sql: string): string[] {
   }
 
   const tail = current.trim();
-  if (tail && !isCommentOnly(tail)) out.push(tail);
+  if (tail && !isCommentOnly(tail, dialect)) out.push(tail);
   return out;
 }
 
 /** True when the fragment contains nothing but comments and whitespace. */
-function isCommentOnly(fragment: string): boolean {
+function isCommentOnly(fragment: string, dialect: "mysql" | "postgres"): boolean {
   const stripped = fragment
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/--[^\n]*/g, "")
-    .replace(/#[^\n]*/g, "")
+    .replace(dialect === "mysql" ? /#[^\n]*/g : /$^/g, "")
     .trim();
   return stripped === "";
 }

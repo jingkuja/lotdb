@@ -78,33 +78,122 @@ fn csv_cell(v: &serde_json::Value) -> String {
 }
 
 /// Format a JSON value for SQL INSERT: NULL, numbers raw, everything else quoted.
-fn sql_val(v: &serde_json::Value) -> String {
+fn sql_val(v: &serde_json::Value, mysql: bool) -> String {
+    if let Some(hex) = v.get("$lotdbBinary").and_then(|v| v.as_str()) {
+        // Type tags only come from our row converter, or validated imports.
+        if hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return if mysql {
+                format!("X'{hex}'")
+            } else {
+                format!("decode('{hex}', 'hex')")
+            };
+        }
+    }
     match v {
-        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Null => "NULL".into(),
         serde_json::Value::Bool(b) => {
             if *b {
-                "1".to_string()
+                "TRUE".into()
             } else {
-                "0".to_string()
+                "FALSE".into()
             }
         }
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
-            format!("'{escaped}'")
+        serde_json::Value::String(s) => crate::utils::sql::string_literal(s, mysql),
+        other => crate::utils::sql::string_literal(&other.to_string(), mysql),
+    }
+}
+
+fn import_literal(value: Option<&str>, binary: bool, boolean: bool, mysql: bool) -> String {
+    let Some(s) = value else {
+        return "NULL".into();
+    };
+    if boolean {
+        if s.eq_ignore_ascii_case("true") {
+            return "TRUE".into();
         }
-        other => {
-            let s = other.to_string();
-            let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
-            format!("'{escaped}'")
+        if s.eq_ignore_ascii_case("false") {
+            return "FALSE".into();
         }
     }
+    if binary {
+        if let Some(hex) = s.strip_prefix("\\x") {
+            return sql_val(&serde_json::json!({"$lotdbBinary": hex}), mysql);
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+            if v.get("$lotdbBinary").is_some() {
+                return sql_val(&v, mysql);
+            }
+        }
+    }
+    crate::utils::sql::string_literal(s, mysql)
+}
+
+struct ImportColumnKinds {
+    binary: std::collections::HashSet<String>,
+    boolean: std::collections::HashSet<String>,
+}
+
+async fn import_column_kinds(
+    pool: &DbPool,
+    database: &str,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<ImportColumnKinds, String> {
+    let columns: Vec<(String, String)> = match pool {
+        DbPool::MySQL(p) => sqlx::query_as("SELECT COLUMN_NAME, CAST(COLUMN_TYPE AS CHAR) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?")
+            .bind(database).bind(table).fetch_all(p).await,
+        DbPool::Postgres(p) => sqlx::query_as("SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2")
+            .bind(schema.unwrap_or("public")).bind(table).fetch_all(p).await,
+    }.map_err(|e| format!("获取导入列类型失败: {e}"))?;
+    let mut kinds = ImportColumnKinds {
+        binary: Default::default(),
+        boolean: Default::default(),
+    };
+    for (name, kind) in columns {
+        let kind = kind.to_ascii_lowercase();
+        if kind.contains("blob")
+            || kind.starts_with("binary")
+            || kind.starts_with("varbinary")
+            || kind == "bytea"
+        {
+            kinds.binary.insert(name.clone());
+        }
+        if kind == "bool" || kind.starts_with("tinyint(1)") {
+            kinds.boolean.insert(name);
+        }
+    }
+    Ok(kinds)
 }
 
 // ─── Value extractors ─────────────────────────────────────────────
 // Shared with query.rs / data.rs — see db::value.
 
-use crate::db::value::{mysql_value_to_json as mysql_val, pg_value_to_json as pg_val};
+use crate::db::value::{mysql_export_value as mysql_val, pg_export_value as pg_val};
+
+/// Resolve the pool a data command must query through.
+/// MySQL: the main pool (the database is qualified inside the SQL).
+/// PostgreSQL: routed through `pg_pool_for_database` so the command runs in
+/// the database the user selected, not the connection's default database.
+async fn resolve_pool(
+    pools: &PoolManager,
+    connection_id: &str,
+    database: &str,
+) -> Result<DbPool, String> {
+    let entry = pools
+        .pools
+        .get(connection_id)
+        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+    match &entry.pool {
+        DbPool::MySQL(p) => Ok(DbPool::MySQL(p.clone())),
+        DbPool::Postgres(_) => {
+            drop(entry);
+            Ok(DbPool::Postgres(
+                pools.pg_pool_for_database(connection_id, database).await?,
+            ))
+        }
+    }
+}
 
 // ─── File writers ─────────────────────────────────────────────────
 
@@ -151,6 +240,7 @@ fn write_sql_insert(
     columns: &[String],
     rows: &[Vec<serde_json::Value>],
     db_quote: fn(&str) -> String,
+    mysql: bool,
 ) -> std::io::Result<()> {
     if rows.is_empty() {
         return Ok(());
@@ -162,7 +252,11 @@ fn write_sql_insert(
         .join(", ");
     writeln!(writer, "-- Generated by LotDB")?;
     for row in rows {
-        let vals = row.iter().map(sql_val).collect::<Vec<_>>().join(", ");
+        let vals = row
+            .iter()
+            .map(|v| sql_val(v, mysql))
+            .collect::<Vec<_>>()
+            .join(", ");
         writeln!(
             writer,
             "INSERT INTO {table_ref} ({col_list}) VALUES ({vals});"
@@ -287,16 +381,44 @@ pub async fn export_table_data(
     limit: u64,
     file_path: String,
 ) -> Result<ExportResult, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+    export_table_data_impl(
+        Some(&app),
+        &pools,
+        connection_id,
+        database,
+        schema,
+        table,
+        format,
+        columns,
+        where_clause,
+        limit,
+        file_path,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn export_table_data_impl(
+    app: Option<&tauri::AppHandle>,
+    pools: &PoolManager,
+    connection_id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+    format: String,
+    columns: Vec<String>,
+    where_clause: Option<String>,
+    limit: u64,
+    file_path: String,
+) -> Result<ExportResult, String> {
+    // Route PG queries to the selected database (not the connection default).
+    let pool = resolve_pool(&pools, &connection_id, &database).await?;
 
     // Excel needs all rows in memory (rust_xlsxwriter builds the file in-memory)
     // Use fetch_all for excel; stream for everything else.
     if format == "excel" {
         let (col_names, rows) = fetch_all_as_json(
-            &entry.pool,
+            &pool,
             &database,
             schema.as_deref(),
             &table,
@@ -313,34 +435,33 @@ pub async fn export_table_data(
     }
 
     // Build SQL and open output file
-    let (table_ref, col_select, db_quote): (String, String, fn(&str) -> String) = match &entry.pool
-    {
+    let (table_ref, col_select, db_quote): (String, String, fn(&str) -> String) = match &pool {
         DbPool::MySQL(_) => {
-            let tr = format!("`{database}`.`{table}`");
+            let tr = crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref());
             let cs = if columns.is_empty() {
                 "*".to_string()
             } else {
                 columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| crate::utils::sql::quote_ident_mysql(c))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            (tr, cs, |c| format!("`{c}`"))
+            (tr, cs, |c| crate::utils::sql::quote_ident_mysql(c))
         }
         DbPool::Postgres(_) => {
             let sn = schema.as_deref().unwrap_or("public");
-            let tr = format!("\"{sn}\".\"{table}\"");
+            let tr = crate::utils::sql::qualified_pg(sn, &table);
             let cs = if columns.is_empty() {
                 "*".to_string()
             } else {
                 columns
                     .iter()
-                    .map(|c| format!("\"{c}\""))
+                    .map(|c| crate::utils::sql::quote_ident_pg(c))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            (tr, cs, |c| format!("\"{c}\""))
+            (tr, cs, |c| crate::utils::sql::quote_ident_pg(c))
         }
     };
 
@@ -357,14 +478,16 @@ pub async fn export_table_data(
         () => {
             if rows_exported % 500 == 0 {
                 let elapsed = start.elapsed().as_secs_f64().max(0.001);
-                app.emit(
-                    "export-progress",
-                    ExportProgress {
-                        current: rows_exported,
-                        rows_per_sec: rows_exported as f64 / elapsed,
-                    },
-                )
-                .ok();
+                if let Some(app) = app {
+                    app.emit(
+                        "export-progress",
+                        ExportProgress {
+                            current: rows_exported,
+                            rows_per_sec: rows_exported as f64 / elapsed,
+                        },
+                    )
+                    .ok();
+                }
             }
         };
     }
@@ -372,7 +495,7 @@ pub async fn export_table_data(
     match format.as_str() {
         "json" => {
             write!(writer, "[").map_err(|e| format!("写入失败: {e}"))?;
-            match &entry.pool {
+            match &pool {
                 DbPool::MySQL(pool) => {
                     let mut stream = sqlx::query(&sql).fetch(pool);
                     while let Some(row) = stream.next().await {
@@ -423,7 +546,7 @@ pub async fn export_table_data(
         }
         "sql_insert" => {
             writeln!(writer, "-- Generated by LotDB").map_err(|e| format!("写入失败: {e}"))?;
-            match &entry.pool {
+            match &pool {
                 DbPool::MySQL(pool) => {
                     let mut stream = sqlx::query(&sql).fetch(pool);
                     while let Some(row) = stream.next().await {
@@ -440,7 +563,11 @@ pub async fn export_table_data(
                             .map(|c| db_quote(c))
                             .collect::<Vec<_>>()
                             .join(", ");
-                        let val_list = vals.iter().map(sql_val).collect::<Vec<_>>().join(", ");
+                        let val_list = vals
+                            .iter()
+                            .map(|v| sql_val(v, true))
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         writeln!(
                             writer,
                             "INSERT INTO {table_ref} ({col_list}) VALUES ({val_list});"
@@ -465,7 +592,11 @@ pub async fn export_table_data(
                             .map(|c| db_quote(c))
                             .collect::<Vec<_>>()
                             .join(", ");
-                        let val_list = vals.iter().map(sql_val).collect::<Vec<_>>().join(", ");
+                        let val_list = vals
+                            .iter()
+                            .map(|v| sql_val(v, false))
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         writeln!(
                             writer,
                             "INSERT INTO {table_ref} ({col_list}) VALUES ({val_list});"
@@ -479,7 +610,7 @@ pub async fn export_table_data(
         }
         _ => {
             // CSV (default)
-            match &entry.pool {
+            match &pool {
                 DbPool::MySQL(pool) => {
                     let mut stream = sqlx::query(&sql).fetch(pool);
                     while let Some(row) = stream.next().await {
@@ -525,14 +656,16 @@ pub async fn export_table_data(
     writer.flush().map_err(|e| format!("刷新缓冲区失败: {e}"))?;
 
     // Final progress event
-    app.emit(
-        "export-progress",
-        ExportProgress {
-            current: rows_exported,
-            rows_per_sec: rows_exported as f64 / start.elapsed().as_secs_f64().max(0.001),
-        },
-    )
-    .ok();
+    if let Some(app) = app {
+        app.emit(
+            "export-progress",
+            ExportProgress {
+                current: rows_exported,
+                rows_per_sec: rows_exported as f64 / start.elapsed().as_secs_f64().max(0.001),
+            },
+        )
+        .ok();
+    }
 
     Ok(ExportResult {
         rows_exported,
@@ -552,13 +685,13 @@ async fn fetch_all_as_json(
 ) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), String> {
     let (q_table, col_select) = match pool {
         DbPool::MySQL(_) => {
-            let tr = format!("`{database}`.`{table}`");
+            let tr = crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref());
             let cs = if columns.is_empty() {
                 "*".to_string()
             } else {
                 columns
                     .iter()
-                    .map(|c| format!("`{c}`"))
+                    .map(|c| crate::utils::sql::quote_ident_mysql(c))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
@@ -566,13 +699,13 @@ async fn fetch_all_as_json(
         }
         DbPool::Postgres(_) => {
             let sn = schema.unwrap_or("public");
-            let tr = format!("\"{sn}\".\"{table}\"");
+            let tr = crate::utils::sql::qualified_pg(sn, &table);
             let cs = if columns.is_empty() {
                 "*".to_string()
             } else {
                 columns
                     .iter()
-                    .map(|c| format!("\"{c}\""))
+                    .map(|c| crate::utils::sql::quote_ident_pg(c))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
@@ -653,10 +786,8 @@ pub async fn batch_export_tables(
     limit: u64,
     output_dir: String,
 ) -> Result<Vec<TableExportStatus>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+    // Route PG queries to the selected database (not the connection default).
+    let pool = resolve_pool(&pools, &connection_id, &database).await?;
 
     let ext = ext_for_format(&format);
     let limit_part = if limit > 0 {
@@ -682,9 +813,9 @@ pub async fn batch_export_tables(
         let file_name = format!("{table}.{ext}");
         let file_path = format!("{output_dir}/{file_name}");
 
-        let fetch_result = match &entry.pool {
+        let fetch_result = match &pool {
             DbPool::MySQL(pool) => {
-                let q_table = format!("`{database}`.`{table}`");
+                let q_table = crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref());
                 let sql = format!("SELECT * FROM {q_table}{limit_part}");
                 sqlx::query(&sql)
                     .fetch_all(pool)
@@ -704,7 +835,7 @@ pub async fn batch_export_tables(
             }
             DbPool::Postgres(pool) => {
                 let schema_name = schema.as_deref().unwrap_or("public");
-                let q_table = format!("\"{schema_name}\".\"{table}\"");
+                let q_table = crate::utils::sql::qualified_pg(schema_name, &table);
                 let sql = format!("SELECT * FROM {q_table}{limit_part}");
                 sqlx::query(&sql)
                     .fetch_all(pool)
@@ -749,18 +880,30 @@ pub async fn batch_export_tables(
                     "json" => write_json(&mut writer, &col_names, &rows)
                         .map_err(|e| format!("写入 JSON 失败: {e}"))?,
                     "sql_insert" => {
-                        let (table_ref, db_quote): (String, fn(&str) -> String) = match &entry.pool
-                        {
-                            DbPool::MySQL(_) => {
-                                (format!("`{database}`.`{table}`"), |c| format!("`{c}`"))
-                            }
+                        let (table_ref, db_quote): (String, fn(&str) -> String) = match &pool {
+                            DbPool::MySQL(_) => (
+                                crate::utils::sql::qualified_mysql(
+                                    database.as_ref(),
+                                    table.as_ref(),
+                                ),
+                                |c| crate::utils::sql::quote_ident_mysql(c),
+                            ),
                             DbPool::Postgres(_) => {
                                 let s = schema.as_deref().unwrap_or("public");
-                                (format!("\"{s}\".\"{table}\""), |c| format!("\"{c}\""))
+                                (crate::utils::sql::qualified_pg(s, &table), |c| {
+                                    crate::utils::sql::quote_ident_pg(c)
+                                })
                             }
                         };
-                        write_sql_insert(&mut writer, &table_ref, &col_names, &rows, db_quote)
-                            .map_err(|e| format!("写入 SQL 失败: {e}"))?;
+                        write_sql_insert(
+                            &mut writer,
+                            &table_ref,
+                            &col_names,
+                            &rows,
+                            db_quote,
+                            matches!(&pool, DbPool::MySQL(_)),
+                        )
+                        .map_err(|e| format!("写入 SQL 失败: {e}"))?;
                     }
                     _ => write_csv(&mut writer, &col_names, &rows)
                         .map_err(|e| format!("写入 CSV 失败: {e}"))?,
@@ -824,25 +967,66 @@ pub async fn import_table_data(
     truncate_first: bool,
     column_mapping: Vec<Option<String>>,
 ) -> Result<ImportResult, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+    import_table_data_impl(
+        Some(&app),
+        &pools,
+        connection_id,
+        database,
+        schema,
+        table,
+        file_path,
+        format,
+        has_header,
+        truncate_first,
+        column_mapping,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn import_table_data_impl(
+    app: Option<&tauri::AppHandle>,
+    pools: &PoolManager,
+    connection_id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+    file_path: String,
+    format: String,
+    has_header: bool,
+    truncate_first: bool,
+    column_mapping: Vec<Option<String>>,
+) -> Result<ImportResult, String> {
+    pools.ensure_writable(&connection_id)?;
+    // Route PG queries to the selected database (not the connection default).
+    let pool = resolve_pool(&pools, &connection_id, &database).await?;
 
     // ── SQL: execute statements directly ──────────────────────────
     if format == "sql" {
         let content =
             std::fs::read_to_string(&file_path).map_err(|e| format!("读取文件失败: {e}"))?;
 
+        let stmts = crate::utils::sql::split_sql(&content, matches!(&pool, DbPool::MySQL(_)))?;
+        let mut mysql_conn = if let DbPool::MySQL(p) = &pool {
+            let mut conn = p.acquire().await.map_err(|e| e.to_string())?.detach();
+            sqlx::Executor::execute(
+                &mut conn,
+                format!("USE {}", crate::utils::sql::quote_ident_mysql(&database)).as_str(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Some(conn)
+        } else {
+            None
+        };
+        let mut pg_conn = if let DbPool::Postgres(p) = &pool {
+            Some(p.acquire().await.map_err(|e| e.to_string())?.detach())
+        } else {
+            None
+        };
         if truncate_first {
-            run_truncate(&entry.pool, &database, schema.as_deref(), &table).await?;
+            run_truncate(&pool, &database, schema.as_deref(), &table).await?;
         }
-
-        let stmts: Vec<&str> = content
-            .split(';')
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-            .collect();
 
         let total = stmts.len() as u64;
         let mut rows_imported: u64 = 0;
@@ -851,15 +1035,14 @@ pub async fn import_table_data(
         let start = Instant::now();
 
         for (idx, stmt) in stmts.iter().enumerate() {
-            let res = match &entry.pool {
-                DbPool::MySQL(p) => sqlx::query(stmt)
-                    .execute(p)
+            let res = if let Some(conn) = &mut mysql_conn {
+                sqlx::Executor::execute(&mut *conn, stmt.as_str())
                     .await
-                    .map(|r| r.rows_affected()),
-                DbPool::Postgres(p) => sqlx::query(stmt)
-                    .execute(p)
+                    .map(|r| r.rows_affected())
+            } else {
+                sqlx::Executor::execute(pg_conn.as_mut().unwrap(), stmt.as_str())
                     .await
-                    .map(|r| r.rows_affected()),
+                    .map(|r| r.rows_affected())
             };
             match res {
                 Ok(n) => rows_imported += n,
@@ -879,16 +1062,18 @@ pub async fn import_table_data(
                 } else {
                     0.0
                 };
-                app.emit(
-                    "import-progress",
-                    ImportProgress {
-                        current,
-                        total,
-                        rows_per_sec: rps,
-                        eta_sec: eta,
-                    },
-                )
-                .ok();
+                if let Some(app) = app {
+                    app.emit(
+                        "import-progress",
+                        ImportProgress {
+                            current,
+                            total,
+                            rows_per_sec: rps,
+                            eta_sec: eta,
+                        },
+                    )
+                    .ok();
+                }
             }
         }
 
@@ -898,6 +1083,9 @@ pub async fn import_table_data(
             error_message: first_error.map(|e| format!("{rows_failed} 条语句失败: {e}")),
         });
     }
+
+    let column_kinds = import_column_kinds(&pool, &database, schema.as_deref(), &table).await?;
+    let mysql = matches!(&pool, DbPool::MySQL(_));
 
     if format == "json" {
         // JSON arrays aren't easily streamable; parse into memory then insert row by row
@@ -910,7 +1098,7 @@ pub async fn import_table_data(
             });
         }
         if truncate_first {
-            run_truncate(&entry.pool, &database, schema.as_deref(), &table).await?;
+            run_truncate(&pool, &database, schema.as_deref(), &table).await?;
         }
         let effective_mapping: Vec<Option<String>> = if column_mapping.is_empty() {
             col_names.iter().map(|n| Some(n.clone())).collect()
@@ -926,10 +1114,13 @@ pub async fn import_table_data(
             return Err("至少需要映射一列".to_string());
         }
         let schema_name = schema.as_deref().unwrap_or("public");
-        let (table_ref, col_quote): (String, fn(&str) -> String) = match &entry.pool {
-            DbPool::MySQL(_) => (format!("`{database}`.`{table}`"), |c| format!("`{c}`")),
-            DbPool::Postgres(_) => (format!("\"{schema_name}\".\"{table}\""), |c| {
-                format!("\"{c}\"")
+        let (table_ref, col_quote): (String, fn(&str) -> String) = match &pool {
+            DbPool::MySQL(_) => (
+                crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref()),
+                |c| crate::utils::sql::quote_ident_mysql(c),
+            ),
+            DbPool::Postgres(_) => (crate::utils::sql::qualified_pg(schema_name, &table), |c| {
+                crate::utils::sql::quote_ident_pg(c)
             }),
         };
         let col_list = mapped_indices
@@ -945,26 +1136,18 @@ pub async fn import_table_data(
         for (idx, row) in str_rows.iter().enumerate() {
             let val_list = mapped_indices
                 .iter()
-                .map(|(src_idx, _)| {
-                    let v = row.get(*src_idx).and_then(|o| o.as_deref());
-                    match v {
-                        None => "NULL".to_string(),
-                        Some(s) => match &entry.pool {
-                            DbPool::MySQL(_) => {
-                                let esc = s.replace('\\', "\\\\").replace('\'', "\\'");
-                                format!("'{esc}'")
-                            }
-                            DbPool::Postgres(_) => {
-                                let esc = s.replace('\'', "''");
-                                format!("'{esc}'")
-                            }
-                        },
-                    }
+                .map(|(src_idx, target)| {
+                    import_literal(
+                        row.get(*src_idx).and_then(|o| o.as_deref()),
+                        column_kinds.binary.contains(target),
+                        column_kinds.boolean.contains(target),
+                        mysql,
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
             let insert_sql = format!("INSERT INTO {table_ref} ({col_list}) VALUES ({val_list})");
-            let res = match &entry.pool {
+            let res = match &pool {
                 DbPool::MySQL(p) => sqlx::query(&insert_sql)
                     .execute(p)
                     .await
@@ -992,16 +1175,18 @@ pub async fn import_table_data(
                 } else {
                     0.0
                 };
-                app.emit(
-                    "import-progress",
-                    ImportProgress {
-                        current,
-                        total,
-                        rows_per_sec: rps,
-                        eta_sec: eta,
-                    },
-                )
-                .ok();
+                if let Some(app) = app {
+                    app.emit(
+                        "import-progress",
+                        ImportProgress {
+                            current,
+                            total,
+                            rows_per_sec: rps,
+                            eta_sec: eta,
+                        },
+                    )
+                    .ok();
+                }
             }
         }
         return Ok(ImportResult {
@@ -1059,7 +1244,7 @@ pub async fn import_table_data(
     };
 
     if truncate_first {
-        run_truncate(&entry.pool, &database, schema.as_deref(), &table).await?;
+        run_truncate(&pool, &database, schema.as_deref(), &table).await?;
     }
 
     // Resolve mapping
@@ -1078,10 +1263,13 @@ pub async fn import_table_data(
     }
 
     let schema_name = schema.as_deref().unwrap_or("public");
-    let (table_ref, col_quote): (String, fn(&str) -> String) = match &entry.pool {
-        DbPool::MySQL(_) => (format!("`{database}`.`{table}`"), |c| format!("`{c}`")),
-        DbPool::Postgres(_) => (format!("\"{schema_name}\".\"{table}\""), |c| {
-            format!("\"{c}\"")
+    let (table_ref, col_quote): (String, fn(&str) -> String) = match &pool {
+        DbPool::MySQL(_) => (
+            crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref()),
+            |c| crate::utils::sql::quote_ident_mysql(c),
+        ),
+        DbPool::Postgres(_) => (crate::utils::sql::qualified_pg(schema_name, &table), |c| {
+            crate::utils::sql::quote_ident_pg(c)
         }),
     };
     let col_list = mapped_indices
@@ -1127,27 +1315,19 @@ pub async fn import_table_data(
 
         let val_list = mapped_indices
             .iter()
-            .map(|(src_idx, _)| {
-                let v = row.get(*src_idx).and_then(|o| o.as_deref());
-                match v {
-                    None => "NULL".to_string(),
-                    Some(s) => match &entry.pool {
-                        DbPool::MySQL(_) => {
-                            let esc = s.replace('\\', "\\\\").replace('\'', "\\'");
-                            format!("'{esc}'")
-                        }
-                        DbPool::Postgres(_) => {
-                            let esc = s.replace('\'', "''");
-                            format!("'{esc}'")
-                        }
-                    },
-                }
+            .map(|(src_idx, target)| {
+                import_literal(
+                    row.get(*src_idx).and_then(|o| o.as_deref()),
+                    column_kinds.binary.contains(target),
+                    column_kinds.boolean.contains(target),
+                    mysql,
+                )
             })
             .collect::<Vec<_>>()
             .join(", ");
 
         let insert_sql = format!("INSERT INTO {table_ref} ({col_list}) VALUES ({val_list})");
-        let res = match &entry.pool {
+        let res = match &pool {
             DbPool::MySQL(p) => sqlx::query(&insert_sql)
                 .execute(p)
                 .await
@@ -1176,16 +1356,18 @@ pub async fn import_table_data(
             } else {
                 0.0
             };
-            app.emit(
-                "import-progress",
-                ImportProgress {
-                    current,
-                    total: total_rows,
-                    rows_per_sec: rps,
-                    eta_sec: eta,
-                },
-            )
-            .ok();
+            if let Some(app) = app {
+                app.emit(
+                    "import-progress",
+                    ImportProgress {
+                        current,
+                        total: total_rows,
+                        rows_per_sec: rps,
+                        eta_sec: eta,
+                    },
+                )
+                .ok();
+            }
         }
     }
 
@@ -1331,18 +1513,50 @@ pub async fn transfer_table_data(
     where_clause: Option<String>,
     limit: u64,
 ) -> Result<TransferResult, String> {
-    let src_entry = pools
-        .pools
-        .get(&src_connection_id)
-        .ok_or_else(|| format!("源连接 {src_connection_id} 未打开"))?;
-    let tgt_entry = pools
-        .pools
-        .get(&tgt_connection_id)
-        .ok_or_else(|| format!("目标连接 {tgt_connection_id} 未打开"))?;
+    transfer_table_data_impl(
+        Some(&app),
+        &pools,
+        src_connection_id,
+        src_database,
+        src_schema,
+        src_table,
+        tgt_connection_id,
+        tgt_database,
+        tgt_schema,
+        tgt_table,
+        column_mapping,
+        truncate_first,
+        where_clause,
+        limit,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn transfer_table_data_impl(
+    app: Option<&tauri::AppHandle>,
+    pools: &PoolManager,
+    src_connection_id: String,
+    src_database: String,
+    src_schema: Option<String>,
+    src_table: String,
+    tgt_connection_id: String,
+    tgt_database: String,
+    tgt_schema: Option<String>,
+    tgt_table: String,
+    column_mapping: Vec<ColumnMap>,
+    truncate_first: bool,
+    where_clause: Option<String>,
+    limit: u64,
+) -> Result<TransferResult, String> {
+    pools.ensure_writable(&tgt_connection_id)?;
+    // Route PG queries to the selected databases (not the connection defaults).
+    let src_pool = resolve_pool(&pools, &src_connection_id, &src_database).await?;
+    let tgt_pool = resolve_pool(&pools, &tgt_connection_id, &tgt_database).await?;
 
     // ── 1. Read all source rows into memory (batch) ────────────────
     let (src_col_names, src_rows) = fetch_all_as_json(
-        &src_entry.pool,
+        &src_pool,
         &src_database,
         src_schema.as_deref(),
         &src_table,
@@ -1386,23 +1600,20 @@ pub async fn transfer_table_data(
 
     // ── 3. Truncate target if requested ───────────────────────────
     if truncate_first {
-        run_truncate(
-            &tgt_entry.pool,
-            &tgt_database,
-            tgt_schema.as_deref(),
-            &tgt_table,
-        )
-        .await?;
+        run_truncate(&tgt_pool, &tgt_database, tgt_schema.as_deref(), &tgt_table).await?;
     }
 
     // ── 4. Build target table ref + quoting ───────────────────────
-    let (tgt_table_ref, tgt_col_quote): (String, fn(&str) -> String) = match &tgt_entry.pool {
-        DbPool::MySQL(_) => (format!("`{tgt_database}`.`{tgt_table}`"), |c| {
-            format!("`{c}`")
-        }),
+    let (tgt_table_ref, tgt_col_quote): (String, fn(&str) -> String) = match &tgt_pool {
+        DbPool::MySQL(_) => (
+            crate::utils::sql::qualified_mysql(&tgt_database, &tgt_table),
+            |c| crate::utils::sql::quote_ident_mysql(c),
+        ),
         DbPool::Postgres(_) => {
             let s = tgt_schema.as_deref().unwrap_or("public");
-            (format!("\"{s}\".\"{tgt_table}\""), |c| format!("\"{c}\""))
+            (crate::utils::sql::qualified_pg(s, &tgt_table), |c| {
+                crate::utils::sql::quote_ident_pg(c)
+            })
         }
     };
 
@@ -1422,12 +1633,17 @@ pub async fn transfer_table_data(
     for (idx, row) in src_rows.iter().enumerate() {
         let val_list = mapped
             .iter()
-            .map(|(src_idx, _)| sql_val(row.get(*src_idx).unwrap_or(&serde_json::Value::Null)))
+            .map(|(src_idx, _)| {
+                sql_val(
+                    row.get(*src_idx).unwrap_or(&serde_json::Value::Null),
+                    matches!(&tgt_pool, DbPool::MySQL(_)),
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
 
         let insert_sql = format!("INSERT INTO {tgt_table_ref} ({col_list}) VALUES ({val_list})");
-        let res = match &tgt_entry.pool {
+        let res = match &tgt_pool {
             DbPool::MySQL(p) => sqlx::query(&insert_sql)
                 .execute(p)
                 .await
@@ -1456,16 +1672,18 @@ pub async fn transfer_table_data(
             } else {
                 0.0
             };
-            app.emit(
-                "transfer-progress",
-                TransferProgress {
-                    current,
-                    total,
-                    rows_per_sec: rps,
-                    eta_sec: eta,
-                },
-            )
-            .ok();
+            if let Some(app) = app {
+                app.emit(
+                    "transfer-progress",
+                    TransferProgress {
+                        current,
+                        total,
+                        rows_per_sec: rps,
+                        eta_sec: eta,
+                    },
+                )
+                .ok();
+            }
         }
     }
 
@@ -1522,13 +1740,21 @@ mod tests {
 
     #[test]
     fn sql_val_escapes_strings() {
-        assert_eq!(sql_val(&serde_json::json!("plain")), "'plain'");
-        assert_eq!(sql_val(&serde_json::json!("it's")), "'it\\'s'");
-        assert_eq!(sql_val(&serde_json::json!("a\\b")), "'a\\\\b'");
-        assert_eq!(sql_val(&serde_json::json!(42)), "42");
-        assert_eq!(sql_val(&serde_json::Value::Null), "NULL");
-        assert_eq!(sql_val(&serde_json::json!(true)), "1");
-        assert_eq!(sql_val(&serde_json::json!(false)), "0");
+        assert_eq!(sql_val(&serde_json::json!("plain"), false), "'plain'");
+        assert_eq!(sql_val(&serde_json::json!("it's"), false), "'it''s'");
+        assert_eq!(sql_val(&serde_json::json!("a\\b"), false), "E'a\\\\b'");
+        assert_eq!(sql_val(&serde_json::json!(true), false), "TRUE");
+        let binary = serde_json::json!({"$lotdbBinary": "00ff"});
+        assert_eq!(sql_val(&binary, false), "decode('00ff', 'hex')");
+        assert_eq!(sql_val(&binary, true), "X'00ff'");
+        assert_eq!(
+            import_literal(Some("\\x00ff"), true, false, true),
+            "X'00ff'"
+        );
+        assert_eq!(
+            import_literal(Some("\\x00ff"), false, false, false),
+            "E'\\\\x00ff'"
+        );
     }
 
     #[test]

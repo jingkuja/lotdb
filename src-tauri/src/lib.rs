@@ -14,18 +14,17 @@ pub fn run() {
         .manage(PoolManager::new())
         .manage(QueryRegistry::default())
         .setup(|app| {
+            // Must finish before the webview mounts: the packaged app loads
+            // instantly and immediately invokes get_connections / list_groups.
+            // Spawning this work raced the first IPC calls and left the UI
+            // stuck on "加载中" (state not managed, or a hung sqlite connect).
             let app_data_dir = app
                 .path()
                 .app_data_dir()
-                .expect("failed to resolve app data dir");
-
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let pool = db::local_store::init_local_db(app_data_dir)
-                    .await
-                    .expect("failed to init local database");
-                handle.manage(pool);
-            });
+                .map_err(|e| format!("failed to resolve app data dir: {e}"))?;
+            let pool = tauri::async_runtime::block_on(db::local_store::init_local_db(app_data_dir))
+                .map_err(|e| format!("failed to init local database: {e}"))?;
+            app.manage(pool);
 
             #[cfg(debug_assertions)]
             {
@@ -49,6 +48,7 @@ pub fn run() {
             commands::query::execute_query,
             commands::query::execute_query_with_params,
             commands::query::cancel_query,
+            commands::query::close_query_session,
             // Schema / object browser
             commands::schema::list_databases,
             commands::schema::list_schemas,

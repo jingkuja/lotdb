@@ -130,7 +130,18 @@ impl PoolManager {
         .map_err(|e| format!("PG 连接配置错误: {e}"))?
         .database(database);
 
+        let readonly = config.readonly;
         let pool = PgPoolOptions::new()
+            .after_connect(move |conn, _| {
+                Box::pin(async move {
+                    if readonly {
+                        sqlx::query("SET default_transaction_read_only = on")
+                            .execute(conn)
+                            .await?;
+                    }
+                    Ok(())
+                })
+            })
             .max_connections(3)
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(opts)
@@ -149,6 +160,16 @@ impl PoolManager {
     /// Check if a connection is currently open.
     pub fn is_open(&self, id: &str) -> bool {
         self.pools.contains_key(id)
+    }
+
+    pub fn ensure_writable(&self, id: &str) -> Result<(), String> {
+        if !self.is_open(id) {
+            return Err(format!("连接 {id} 未打开"));
+        }
+        if self.is_readonly(id) {
+            return Err("该连接为只读模式，已拦截数据或结构变更".into());
+        }
+        Ok(())
     }
 
     /// Whether this connection blocks DML/DDL (readonly mode).
@@ -210,11 +231,22 @@ async fn build_connection(config: &ConnectionConfig) -> Result<ActiveConnection,
         (config.host.clone(), config.port, None)
     };
 
+    let readonly = config.readonly;
     let pool = match &config.db_type {
         DbType::MySQL => {
             let opts = build_mysql_opts(&config.user, &config.password, &host, port, config)
                 .map_err(|e| format!("MySQL 连接配置错误: {e}"))?;
             let p = MySqlPoolOptions::new()
+                .after_connect(move |conn, _| {
+                    Box::pin(async move {
+                        if readonly {
+                            sqlx::query("SET SESSION TRANSACTION READ ONLY")
+                                .execute(conn)
+                                .await?;
+                        }
+                        Ok(())
+                    })
+                })
                 .max_connections(5)
                 .acquire_timeout(timeout)
                 .connect_with(opts)
@@ -226,6 +258,16 @@ async fn build_connection(config: &ConnectionConfig) -> Result<ActiveConnection,
             let opts = build_pg_opts(&config.user, &config.password, &host, port, config)
                 .map_err(|e| format!("PostgreSQL 连接配置错误: {e}"))?;
             let p = PgPoolOptions::new()
+                .after_connect(move |conn, _| {
+                    Box::pin(async move {
+                        if readonly {
+                            sqlx::query("SET default_transaction_read_only = on")
+                                .execute(conn)
+                                .await?;
+                        }
+                        Ok(())
+                    })
+                })
                 .max_connections(5)
                 .acquire_timeout(timeout)
                 .connect_with(opts)

@@ -278,6 +278,7 @@ pub async fn restore_database(
     file_path: String,
     create_db: bool,
 ) -> Result<RestoreResult, String> {
+    pools.ensure_writable(&connection_id)?;
     let (eff_host, eff_port, db_kind) = {
         let entry = pools
             .pools

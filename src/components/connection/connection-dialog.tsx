@@ -230,7 +230,7 @@ export function ConnectionDialog({
                   onChange={(e) => setReadonly(e.target.checked)}
                 />
                 <span className="text-xs text-muted-foreground">
-                  拦截 DML/DDL（INSERT/UPDATE/DELETE/建表等），适合保护生产库
+                  拦截数据及结构变更；修改连接设置后需重新连接
                 </span>
               </div>
             </div>

@@ -312,14 +312,14 @@ export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps
   const [ddlOpen, setDdlOpen] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
 
-  const nextId = () => `${uid}-${Date.now()}-${Math.random()}`;
+  const nextId = useCallback(() => `${uid}-${Date.now()}-${Math.random()}`, [uid]);
 
   const addColumn = useCallback(() => {
     setState((prev) => ({
       ...prev,
       columns: [...prev.columns, emptyColumn(nextId())],
     }));
-  }, []);
+  }, [nextId]);
 
   const updateColumn = useCallback((index: number, col: DesignerColumn) => {
     setState((prev) => {

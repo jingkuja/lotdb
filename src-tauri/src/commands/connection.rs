@@ -12,7 +12,7 @@ pub async fn create_connection(
 ) -> Result<ConnectionConfig, String> {
     // Store password in Keychain; save empty string in SQLite
     if !config.password.is_empty() {
-        keychain::store_password(&config.id, &config.password)?;
+        keychain::store_password_async(config.id.clone(), config.password.clone()).await?;
     }
 
     let ssh_json = config
@@ -54,23 +54,26 @@ pub async fn get_connections(pool: State<'_, DbPool>) -> Result<Vec<ConnectionCo
         .await
         .map_err(|e| e.to_string())?;
 
+    // Do not touch Keychain here. The packaged .app is a different binary
+    // than `tauri dev`, so a sync SecItem read can block forever waiting
+    // for an authorization dialog and freeze the sidebar on "加载中".
+    // Passwords are loaded on demand in open_connection / test_connection.
     Ok(rows
         .into_iter()
-        .map(|r| {
-            let password = keychain::load_password(&r.id).unwrap_or_default();
-            ConnectionConfig::from_row(r, password)
-        })
+        .map(|r| ConnectionConfig::from_row(r, String::new()))
         .collect())
 }
 
 #[tauri::command]
 pub async fn update_connection(
     pool: State<'_, DbPool>,
+    pools: State<'_, crate::db::pool::PoolManager>,
+    registry: State<'_, crate::commands::query::QueryRegistry>,
     config: ConnectionConfig,
 ) -> Result<ConnectionConfig, String> {
     // Update Keychain (overwrite existing)
     if !config.password.is_empty() {
-        keychain::store_password(&config.id, &config.password)?;
+        keychain::store_password_async(config.id.clone(), config.password.clone()).await?;
     }
 
     let ssh_json = config
@@ -101,6 +104,10 @@ pub async fn update_connection(
     .execute(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
+
+    // Saved settings and active sessions must not disagree about readonly.
+    registry.close_sessions(&config.id);
+    pools.close(&config.id).await;
 
     Ok(config)
 }
@@ -147,7 +154,7 @@ pub async fn import_connections(
 
         // Store password in Keychain if provided
         if !config.password.is_empty() {
-            keychain::store_password(&config.id, &config.password)?;
+            keychain::store_password_async(config.id.clone(), config.password.clone()).await?;
         }
 
         let ssh_json = config
@@ -186,7 +193,12 @@ pub async fn import_connections(
 }
 
 #[tauri::command]
-pub async fn test_connection(config: ConnectionConfig) -> Result<String, String> {
+pub async fn test_connection(mut config: ConnectionConfig) -> Result<String, String> {
+    if config.password.is_empty() {
+        config.password = keychain::load_password_async(config.id.clone())
+            .await
+            .unwrap_or_default();
+    }
     // Re-use the same pool builder (includes SSH tunnel + SSL logic).
     let conn = crate::db::pool::build_connection_pub(&config).await?;
     conn.pool.close().await;

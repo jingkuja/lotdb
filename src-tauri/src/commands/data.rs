@@ -3,7 +3,7 @@ use crate::db::value::{mysql_value_to_json, pg_value_to_json};
 use crate::error::AppError;
 use crate::utils::sql::{quote_ident_mysql, quote_ident_pg};
 use serde::{Deserialize, Serialize};
-use sqlx::{Arguments, Column, Row};
+use sqlx::{Arguments, Column, Executor, Row};
 use tauri::State;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -251,10 +251,14 @@ async fn fetch_mysql(
         .await
         .map_err(|e| AppError::from_sqlx("查询失败", e))?;
 
-    let columns = rows
-        .first()
-        .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-        .unwrap_or_default();
+    let columns = pool
+        .describe(&data_sql)
+        .await
+        .map_err(|e| AppError::from_sqlx("获取结果列失败", e))?
+        .columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
 
     let result_rows = rows
         .iter()
@@ -306,10 +310,14 @@ async fn fetch_postgres(
         .await
         .map_err(|e| AppError::from_sqlx("查询失败", e))?;
 
-    let columns = rows
-        .first()
-        .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-        .unwrap_or_default();
+    let columns = pool
+        .describe(&data_sql)
+        .await
+        .map_err(|e| AppError::from_sqlx("获取结果列失败", e))?
+        .columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
 
     let result_rows = rows
         .iter()

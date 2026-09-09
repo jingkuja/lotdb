@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Download, Check, Loader2 } from "lucide-react";
 import {
   Dialog,
@@ -38,7 +38,16 @@ interface ExportDialogProps {
 
 type ExportStatus = "idle" | "exporting" | "done" | "error";
 
-export function ExportDialog({
+export function ExportDialog(props: ExportDialogProps) {
+  return props.open ? (
+    <ExportDialogBody
+      key={JSON.stringify(props.columnDefs.map((c) => c.name))}
+      {...props}
+    />
+  ) : null;
+}
+
+function ExportDialogBody({
   open,
   onOpenChange,
   connectionId,
@@ -48,40 +57,60 @@ export function ExportDialog({
   columnDefs,
 }: ExportDialogProps) {
   const [format, setFormat] = useState<ExportFormat>("csv");
-  const [selectedCols, setSelectedCols] = useState<Set<string>>(new Set());
+  const formatRef = useRef<ExportFormat>("csv");
+  const [selectedCols, setSelectedCols] = useState<Set<string>>(
+    () => new Set(columnDefs.map((c) => c.name)),
+  );
   const [whereClause, setWhereClause] = useState("");
   const [limit, setLimit] = useState("10000");
   const [filePath, setFilePath] = useState("");
   const [status, setStatus] = useState<ExportStatus>("idle");
-  const [result, setResult] = useState<{ rows: number; path: string } | null>(null);
+  const [result, setResult] = useState<{ rows: number; path: string } | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
 
   // Initialize: select all columns, build default file path
   useEffect(() => {
-    if (!open) return;
-    setSelectedCols(new Set(columnDefs.map((c) => c.name)));
-    setStatus("idle");
-    setResult(null);
-    setError(null);
-
+    let cancelled = false;
     // Build default path asynchronously
     const stamp = new Date()
       .toISOString()
       .replace(/[:\-T]/g, "")
       .slice(0, 14);
-    const ext = FORMATS.find((f) => f.value === format)?.ext ?? "csv";
+    const ext = "csv";
     downloadDir()
       .then((dir) => join(dir, `${table}_${stamp}.${ext}`))
-      .then(setFilePath)
-      .catch(() => setFilePath(`${table}_export.${ext}`));
-  }, [open, columnDefs, table, format]);
+      .then((path) => {
+        if (!cancelled)
+          setFilePath(
+            (previous) =>
+              previous ||
+              path.replace(
+                /\.[^.]+$/,
+                `.${FORMATS.find((f) => f.value === formatRef.current)?.ext ?? ext}`,
+              ),
+          );
+      })
+      .catch(() => {
+        if (!cancelled)
+          setFilePath(
+            (previous) =>
+              previous ||
+              `${table}_export.${FORMATS.find((f) => f.value === formatRef.current)?.ext ?? ext}`,
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [table]);
 
-  // Update file extension when format changes
-  useEffect(() => {
-    if (!filePath) return;
-    const ext = FORMATS.find((f) => f.value === format)?.ext ?? "csv";
-    setFilePath((p) => p.replace(/\.[^.]+$/, `.${ext}`));
-  }, [format]);
+  const changeFormat = (next: ExportFormat) => {
+    formatRef.current = next;
+    setFormat(next);
+    const ext = FORMATS.find((f) => f.value === next)?.ext ?? "csv";
+    setFilePath((path) => path.replace(/\.[^.]+$/, `.${ext}`));
+  };
 
   const toggleCol = (name: string) => {
     setSelectedCols((prev) => {
@@ -104,8 +133,7 @@ export function ExportDialog({
     try {
       const cols = [...selectedCols];
       // If all selected, pass empty (= SELECT *)
-      const colsArg =
-        cols.length === columnDefs.length ? [] : cols;
+      const colsArg = cols.length === columnDefs.length ? [] : cols;
       const limitNum = parseInt(limit, 10);
       const res = await exportTableData({
         connectionId,
@@ -127,9 +155,7 @@ export function ExportDialog({
   };
 
   const canExport =
-    status !== "exporting" &&
-    selectedCols.size > 0 &&
-    filePath.trim() !== "";
+    status !== "exporting" && selectedCols.size > 0 && filePath.trim() !== "";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -156,7 +182,7 @@ export function ExportDialog({
                       ? "border-primary bg-primary/10 text-primary font-medium"
                       : "border-border hover:border-primary/50 hover:bg-muted",
                   )}
-                  onClick={() => setFormat(f.value)}
+                  onClick={() => changeFormat(f.value)}
                 >
                   {f.label}
                 </button>

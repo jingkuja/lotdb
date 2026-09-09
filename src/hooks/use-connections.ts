@@ -1,3 +1,4 @@
+import { useConnectionStore } from "@/stores/connection-store";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   getConnections,
@@ -19,6 +20,8 @@ export function useConnections() {
   return useQuery({
     queryKey: QUERY_KEY,
     queryFn: getConnections,
+    retry: 4,
+    retryDelay: (n) => Math.min(1500, 250 * 2 ** n),
   });
 }
 
@@ -72,7 +75,10 @@ export function useUpdateConnection() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: updateConnection,
-    onSuccess: () => qc.invalidateQueries({ queryKey: QUERY_KEY }),
+    onSuccess: (config) => {
+      useConnectionStore.getState().markPoolClosed(config.id);
+      return qc.invalidateQueries({ queryKey: QUERY_KEY });
+    },
   });
 }
 

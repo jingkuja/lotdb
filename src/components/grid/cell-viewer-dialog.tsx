@@ -40,7 +40,7 @@ function renderValue(value: unknown): string {
 function JsonHighlight({ json }: { json: string }) {
   // Simple regex-based coloring
   const parts: { text: string; type: string }[] = [];
-  const regex = /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g;
+  const regex = /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 

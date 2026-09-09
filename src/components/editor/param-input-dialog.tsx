@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -19,13 +19,12 @@ interface Props {
   onExecute: (values: (string | null)[]) => void;
 }
 
-export function ParamInputDialog({ open, onOpenChange, params, onExecute }: Props) {
-  const [values, setValues] = useState<string[]>([]);
+export function ParamInputDialog(props: Props) {
+  return props.open ? <ParamInputBody key={JSON.stringify(props.params)} {...props} /> : null;
+}
 
-  // Reset when params change (new query)
-  useEffect(() => {
-    setValues(params.map(() => ""));
-  }, [params]);
+function ParamInputBody({ open, onOpenChange, params, onExecute }: Props) {
+  const [values, setValues] = useState<string[]>(() => params.map(() => ""));
 
   const handleExecute = () => {
     // Treat empty string as NULL

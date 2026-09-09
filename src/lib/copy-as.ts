@@ -1,3 +1,4 @@
+import { quoteIdent, sqlLiteral } from "./sql-literal";
 import type { GridRow } from "@/components/grid/data-grid";
 import type { DatabaseType } from "@/types/database";
 
@@ -7,23 +8,8 @@ function cellStr(value: unknown): string {
   return String(value);
 }
 
-function sqlLiteral(value: unknown): string {
-  if (value === null || value === undefined) return "NULL";
-  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-  if (typeof value === "number") return String(value);
-  return `'${String(value).replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
-}
-
-function quoteIdent(name: string, dbType: DatabaseType): string {
-  return dbType === "postgres" ? `"${name}"` : `\`${name}\``;
-}
-
 function quoteTable(database: string, schema: string | undefined, table: string, dbType: DatabaseType): string {
-  if (dbType === "postgres") {
-    const s = schema ?? "public";
-    return `"${s}"."${table}"`;
-  }
-  return `\`${database}\`.\`${table}\``;
+  return `${quoteIdent(dbType === "postgres" ? schema ?? "public" : database, dbType)}.${quoteIdent(table, dbType)}`;
 }
 
 // ─── INSERT ───────────────────────────────────────────────────────
@@ -40,7 +26,7 @@ export function copyAsInsert(
   const tbl = quoteTable(database, schema, table, dbType);
   const colList = columns.map((c) => quoteIdent(c, dbType)).join(", ");
   const valueRows = rows.map((row) => {
-    const vals = columns.map((_, i) => sqlLiteral(row[i]));
+    const vals = columns.map((_, i) => sqlLiteral(row[i], dbType));
     return `  (${vals.join(", ")})`;
   });
   return `INSERT INTO ${tbl} (${colList}) VALUES\n${valueRows.join(",\n")};`;

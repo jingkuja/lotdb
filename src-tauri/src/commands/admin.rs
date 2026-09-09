@@ -1,6 +1,5 @@
 use crate::db::pool::{DbPool, PoolManager};
 use serde::{Deserialize, Serialize};
-use sqlx::Column as _;
 use tauri::State;
 
 // ─── Create database ──────────────────────────────────────────────
@@ -13,6 +12,7 @@ pub async fn create_database(
     charset: Option<String>,
     collation: Option<String>,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -58,6 +58,7 @@ pub async fn drop_database(
     connection_id: String,
     db_name: String,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -262,6 +263,7 @@ pub async fn create_user(
     host: String,
     password: String,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -302,6 +304,7 @@ pub async fn drop_user(
     username: String,
     host: String,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -336,6 +339,7 @@ pub async fn grant_privilege(
     host: String,
     database: String,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -376,6 +380,7 @@ pub async fn revoke_privilege(
     host: String,
     database: String,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -530,6 +535,7 @@ pub async fn kill_process(
     process_id: i64,
     kill_type: String,
 ) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
     let entry = pools
         .pools
         .get(&connection_id)
@@ -725,87 +731,54 @@ pub struct ExplainResult {
 #[tauri::command]
 pub async fn explain_query(
     pools: State<'_, PoolManager>,
+    registry: State<'_, crate::commands::query::QueryRegistry>,
     connection_id: String,
     sql: String,
     analyze: bool,
+    session_id: Option<String>,
+    execution_id: Option<String>,
 ) -> Result<ExplainResult, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
-        DbPool::MySQL(pool) => {
-            if analyze {
-                // MySQL 8.0+ EXPLAIN ANALYZE returns a single text column
-                let explain_sql = format!("EXPLAIN ANALYZE {sql}");
-                let rows: Vec<(String,)> = sqlx::query_as(&explain_sql)
-                    .fetch_all(pool)
-                    .await
-                    .map_err(|e| format!("EXPLAIN ANALYZE 失败: {e}"))?;
-                Ok(ExplainResult {
-                    is_text: true,
-                    columns: vec!["EXPLAIN".to_string()],
-                    rows: rows.into_iter().map(|(line,)| vec![Some(line)]).collect(),
-                })
-            } else {
-                // MySQL EXPLAIN returns tabular rows
-                // Columns: id, select_type, table, partitions, type,
-                //          possible_keys, key, key_len, ref, rows, filtered, Extra
-                let explain_sql = format!("EXPLAIN {sql}");
-                let rows = sqlx::query(&explain_sql)
-                    .fetch_all(pool)
-                    .await
-                    .map_err(|e| format!("EXPLAIN 失败: {e}"))?;
-
-                if rows.is_empty() {
-                    return Ok(ExplainResult {
-                        is_text: false,
-                        columns: vec![],
-                        rows: vec![],
-                    });
-                }
-
-                use sqlx::Row;
-                let columns: Vec<String> = rows[0]
-                    .columns()
-                    .iter()
-                    .map(|c| c.name().to_string())
-                    .collect();
-
-                let data_rows = rows
-                    .iter()
-                    .map(|row| {
-                        columns
-                            .iter()
-                            .enumerate()
-                            .map(|(i, _)| row.try_get::<Option<String>, _>(i).ok().flatten())
-                            .collect()
+    let mysql = {
+        let entry = pools
+            .pools
+            .get(&connection_id)
+            .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+        matches!(&entry.pool, DbPool::MySQL(_))
+    };
+    let prefix = if !analyze {
+        "EXPLAIN"
+    } else if mysql {
+        "EXPLAIN ANALYZE"
+    } else {
+        "EXPLAIN (ANALYZE, BUFFERS)"
+    };
+    let result = crate::commands::query::run_session_query(
+        &pools,
+        &registry,
+        &connection_id,
+        &format!("{prefix} {sql}"),
+        &[],
+        Some(0),
+        execution_id.as_deref(),
+        session_id.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(ExplainResult {
+        is_text: !mysql || analyze,
+        columns: result.columns,
+        rows: result
+            .rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|v| match v {
+                        serde_json::Value::Null => None,
+                        serde_json::Value::String(s) => Some(s),
+                        other => Some(other.to_string()),
                     })
-                    .collect();
-
-                Ok(ExplainResult {
-                    is_text: false,
-                    columns,
-                    rows: data_rows,
-                })
-            }
-        }
-        DbPool::Postgres(pool) => {
-            let explain_sql = if analyze {
-                format!("EXPLAIN (ANALYZE, BUFFERS) {sql}")
-            } else {
-                format!("EXPLAIN {sql}")
-            };
-            let rows: Vec<(String,)> = sqlx::query_as(&explain_sql)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| format!("EXPLAIN 失败: {e}"))?;
-            Ok(ExplainResult {
-                is_text: true,
-                columns: vec!["QUERY PLAN".to_string()],
-                rows: rows.into_iter().map(|(line,)| vec![Some(line)]).collect(),
+                    .collect()
             })
-        }
-    }
+            .collect(),
+    })
 }

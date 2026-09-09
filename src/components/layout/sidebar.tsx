@@ -92,7 +92,13 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
   // Which connection groups are expanded
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
-  const { data: connections = [], isLoading } = useConnections();
+  const {
+    data: connections = [],
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useConnections();
   const createMutation = useCreateConnection();
   const updateMutation = useUpdateConnection();
   const deleteMutation = useDeleteConnection();
@@ -369,7 +375,20 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
             </div>
           )}
 
-          {!isLoading && connections.length === 0 && (
+          {isError && !isLoading && (
+            <div className="flex flex-col gap-1.5 px-2 py-3 text-xs text-destructive">
+              <span>加载连接失败：{String(error)}</span>
+              <button
+                type="button"
+                className="self-start text-foreground underline-offset-2 hover:underline"
+                onClick={() => void refetch()}
+              >
+                重试
+              </button>
+            </div>
+          )}
+
+          {!isLoading && !isError && connections.length === 0 && (
             <div className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground">
               <Database className="size-4" />
               <span>暂无连接，点击 + 新建</span>

@@ -1,4 +1,4 @@
-import { useWorkspaceStore } from "@/stores/workspace-store";
+import { useWorkspaceStore, type Tab } from "@/stores/workspace-store";
 import { TableStructurePanel } from "@/components/explorer/table-structure-panel";
 import { ObjectDdlTab } from "@/components/explorer/object-ddl-tab";
 import { SequenceManagerTab } from "@/components/explorer/sequence-manager-tab";
@@ -69,8 +69,6 @@ function DesignerLoader({
 
 export function MainContent() {
   const { tabs, activeTabId } = useWorkspaceStore();
-  const { data: connections = [] } = useConnections();
-
   if (!activeTabId) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -80,8 +78,24 @@ export function MainContent() {
     );
   }
 
-  const activeTab = tabs.find((t) => t.id === activeTabId);
-  if (!activeTab) return null;
+  return (
+    <>
+      {tabs.map((tab) => (
+        <div
+          key={tab.id}
+          className={
+            tab.id === activeTabId ? "flex min-h-0 flex-1 flex-col" : "hidden"
+          }
+        >
+          <TabContent activeTab={tab} />
+        </div>
+      ))}
+    </>
+  );
+}
+
+function TabContent({ activeTab }: { activeTab: Tab }) {
+  const { data: connections = [] } = useConnections();
 
   const meta = activeTab.metadata as
     | {
@@ -119,11 +133,7 @@ export function MainContent() {
     );
   }
 
-  if (
-    activeTab.type === "table-data" &&
-    meta?.database &&
-    meta?.objectName
-  ) {
+  if (activeTab.type === "table-data" && meta?.database && meta?.objectName) {
     return (
       <TableDataTab
         connectionId={activeTab.connectionId}
@@ -150,10 +160,7 @@ export function MainContent() {
       );
     }
     return (
-      <TableDesignerTab
-        connectionId={activeTab.connectionId}
-        dbType={dbType}
-      />
+      <TableDesignerTab connectionId={activeTab.connectionId} dbType={dbType} />
     );
   }
 
@@ -172,10 +179,7 @@ export function MainContent() {
     const conn = connections.find((c) => c.id === activeTab.connectionId);
     const dbType: DatabaseType = conn?.dbType ?? "mysql";
     return (
-      <ProcessListTab
-        connectionId={activeTab.connectionId}
-        dbType={dbType}
-      />
+      <ProcessListTab connectionId={activeTab.connectionId} dbType={dbType} />
     );
   }
 
@@ -183,10 +187,7 @@ export function MainContent() {
     const conn = connections.find((c) => c.id === activeTab.connectionId);
     const dbType: DatabaseType = conn?.dbType ?? "mysql";
     return (
-      <DiskUsageTab
-        connectionId={activeTab.connectionId}
-        dbType={dbType}
-      />
+      <DiskUsageTab connectionId={activeTab.connectionId} dbType={dbType} />
     );
   }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Dialog,
@@ -49,22 +49,18 @@ const TYPE_COLOR: Record<string, string> = {
   procedure: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
 };
 
-export function ObjectSearchDialog({ open, onOpenChange, connectionId }: Props) {
+export function ObjectSearchDialog(props: Props) {
+  return props.open ? <ObjectSearchBody key={props.connectionId ?? "all"} {...props} /> : null;
+}
+
+function ObjectSearchBody({ open, onOpenChange, connectionId }: Props) {
   const [input, setInput] = useState("");
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selection, setSelection] = useState({ key: "", index: 0 });
   const debouncedQuery = useDebounce(input, 250);
 
   const addTab = useWorkspaceStore((s) => s.addTab);
   const tabs = useWorkspaceStore((s) => s.tabs);
   const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
-
-  // Reset state whenever dialog opens
-  useEffect(() => {
-    if (open) {
-      setInput("");
-      setSelectedIndex(0);
-    }
-  }, [open]);
 
   const { data: results = [], isFetching } = useQuery({
     queryKey: ["search", connectionId, debouncedQuery],
@@ -73,8 +69,11 @@ export function ObjectSearchDialog({ open, onOpenChange, connectionId }: Props) 
     placeholderData: (prev) => prev,
   });
 
-  // Reset selection when results change
-  useEffect(() => setSelectedIndex(0), [results]);
+  const resultKey = JSON.stringify(results);
+  const selectedIndex = selection.key === resultKey ? selection.index : 0;
+  const setSelectedIndex = (next: number | ((previous: number) => number)) => {
+    setSelection({ key: resultKey, index: typeof next === "function" ? next(selectedIndex) : next });
+  };
 
   const openResult = useCallback(
     (result: SearchResult) => {

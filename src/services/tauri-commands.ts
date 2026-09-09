@@ -43,6 +43,7 @@ export interface ExecuteOptions {
   maxRows?: number;
   /** 本次执行的唯一 ID，用于取消查询 */
   executionId?: string;
+  sessionId?: string;
 }
 
 export async function openConnection(config: ConnectionConfig): Promise<void> {
@@ -67,6 +68,7 @@ export async function executeQuery(
     sql,
     maxRows: opts?.maxRows ?? null,
     executionId: opts?.executionId ?? null,
+    sessionId: opts?.sessionId ?? null,
   });
 }
 
@@ -82,6 +84,7 @@ export async function executeQueryWithParams(
     params,
     maxRows: opts?.maxRows ?? null,
     executionId: opts?.executionId ?? null,
+    sessionId: opts?.sessionId ?? null,
   });
 }
 
@@ -842,8 +845,9 @@ export async function explainQuery(
   connectionId: string,
   sql: string,
   analyze: boolean,
+  opts?: ExecuteOptions,
 ): Promise<ExplainResult> {
-  return invoke<ExplainResult>("explain_query", { connectionId, sql, analyze });
+  return invoke<ExplainResult>("explain_query", { connectionId, sql, analyze, sessionId: opts?.sessionId ?? null, executionId: opts?.executionId ?? null });
 }
 
 // ─── Cross-connection data transfer ──────────────────────────────
@@ -945,4 +949,8 @@ export async function importConnections(
   configs: ConnectionConfig[],
 ): Promise<ImportConnectionsResult> {
   return invoke<ImportConnectionsResult>("import_connections", { configs });
+}
+
+export async function closeQuerySession(connectionId: string, sessionId: string): Promise<void> {
+  return invoke<void>("close_query_session", { connectionId, sessionId });
 }

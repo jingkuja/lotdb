@@ -1,14 +1,23 @@
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::SqlitePool;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub async fn init_local_db(app_data_dir: PathBuf) -> Result<SqlitePool, sqlx::Error> {
     std::fs::create_dir_all(&app_data_dir).ok();
     let db_path = app_data_dir.join("lotdb.db");
-    let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
+
+    // Use filename() instead of a sqlite: URL — app_data_dir contains
+    // "Application Support" and URL-parsing spaces can hang or mis-resolve.
+    let opts = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .busy_timeout(Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect(&db_url)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect_with(opts)
         .await?;
 
     // Run migrations
