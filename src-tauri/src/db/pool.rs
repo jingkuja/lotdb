@@ -22,6 +22,7 @@ pub struct ActiveConnection {
 }
 
 /// A live database connection pool — either MySQL or PostgreSQL.
+#[derive(Clone)]
 pub enum DbPool {
     MySQL(MySqlPool),
     Postgres(PgPool),

@@ -1,4 +1,11 @@
-import { needsWriteConfirmation } from "@/lib/query-actions";
+import { useQuery } from "@tanstack/react-query";
+import { useWorkspaceStore } from "@/stores/workspace-store";
+import {
+  configureQuerySession,
+  listDatabases,
+  listSchemas,
+} from "@/services/tauri-commands";
+import { needsWriteConfirmation, transactionAction } from "@/lib/query-actions";
 import { useWorkspaceGuard } from "@/hooks/use-workspace-guard";
 import { useRef, useState, useEffect, useCallback } from "react";
 import {
@@ -37,7 +44,6 @@ import { useConnections } from "@/hooks/use-connections";
 import { useCompletionSchema } from "@/hooks/use-completion-schema";
 import { useSaveHistory } from "@/hooks/use-history";
 import { usePreferencesStore } from "@/stores/preferences-store";
-import { format as formatSql } from "sql-formatter";
 import { detectParams, type SqlParam } from "@/lib/sql-params";
 import { splitStatements } from "@/lib/split-statements";
 import { formatDbError, isConnectionError } from "@/lib/error";
@@ -50,13 +56,28 @@ interface QueryTabProps {
 
 export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const editorRef = useRef<SqlEditorHandle>(null);
-  const { editorFontSize, editorFontFamily, saveQueryHistory, queryMaxRows, confirmDml } =
-    usePreferencesStore((s) => s.prefs);
+  const {
+    editorFontSize,
+    editorFontFamily,
+    saveQueryHistory,
+    queryMaxRows,
+    confirmDml,
+  } = usePreferencesStore((s) => s.prefs);
   const [resultState, setResultState] = useState<ResultState>({
     status: "idle",
   });
   const [running, setRunning] = useState(false);
-  useWorkspaceGuard(tabId, running ? "此查询仍在执行，关闭将取消查询并结束会话。" : null);
+  const [transaction, setTransaction] = useState<"idle" | "open" | "error">(
+    "idle",
+  );
+  const recordStatement = useCallback((sql: string, failed = false) => {
+    if (failed)
+      setTransaction((previous) => (previous === "idle" ? previous : "error"));
+    else {
+      const action = transactionAction(sql);
+      if (action) setTransaction(action === "begin" ? "open" : "idle");
+    }
+  }, []);
   const [explainResult, setExplainResult] = useState<ExplainResult | null>(
     null,
   );
@@ -74,6 +95,14 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const currentExecutionRef = useRef<string | null>(null);
   const cancelRequestedRef = useRef(false);
 
+  useWorkspaceGuard(
+    tabId,
+    running || explaining
+      ? "此查询仍在执行，关闭将取消查询并结束会话。"
+      : transaction !== "idle"
+        ? "此查询有未结束的显式事务，关闭会回滚未提交修改。"
+        : null,
+  );
   const setContent = useEditorStore((s) => s.setContent);
   const getContent = useEditorStore((s) => s.getContent);
 
@@ -81,7 +110,85 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const conn = connections.find((c) => c.id === connectionId);
   const dbType: DatabaseType = conn?.dbType ?? "mysql";
 
-  const completionSchema = useCompletionSchema(connectionId);
+  const savedContext = useWorkspaceStore
+    .getState()
+    .tabs.find((t) => t.id === tabId)?.metadata;
+  const [database, setDatabase] = useState(
+    String(savedContext?.database ?? ""),
+  );
+  const [schema, setSchema] = useState(String(savedContext?.schema ?? ""));
+  const [contextBusy, setContextBusy] = useState(false);
+  const sessionReady = useRef(false);
+  const generation = useConnectionStore(
+    (s) => s.generations[connectionId] ?? 0,
+  );
+  useEffect(() => {
+    sessionReady.current = false;
+  }, [generation]);
+  const poolOpen = useConnectionStore((s) => s.openPoolIds.has(connectionId));
+  const { data: databases = [] } = useQuery({
+    queryKey: ["databases", connectionId],
+    queryFn: () => listDatabases(connectionId),
+    enabled: poolOpen,
+    staleTime: 60_000,
+  });
+  const { data: schemas = [] } = useQuery({
+    queryKey: ["schemas", connectionId, database || conn?.database],
+    queryFn: () => listSchemas(connectionId, database || conn?.database || ""),
+    enabled:
+      poolOpen && dbType === "postgres" && !!(database || conn?.database),
+    staleTime: 60_000,
+  });
+  const ensureSession = useCallback(async () => {
+    if (!sessionReady.current) {
+      await configureQuerySession(
+        connectionId,
+        tabId,
+        database || undefined,
+        schema || undefined,
+      );
+      sessionReady.current = true;
+    }
+  }, [connectionId, tabId, database, schema]);
+  const changeContext = async (nextDatabase: string, nextSchema: string) => {
+    if (running || explaining || contextBusy) return;
+    if (
+      sessionReady.current &&
+      !window.confirm(
+        "切换数据库或 schema 将结束当前会话，并回滚未提交事务。确认切换？",
+      )
+    )
+      return;
+    setContextBusy(true);
+    try {
+      await configureQuerySession(
+        connectionId,
+        tabId,
+        nextDatabase,
+        nextSchema,
+      );
+      sessionReady.current = true;
+      setDatabase(nextDatabase);
+      setSchema(nextSchema);
+      useWorkspaceStore
+        .getState()
+        .updateTab(tabId, {
+          metadata: { database: nextDatabase, schema: nextSchema },
+        });
+      setResultState({ status: "idle" });
+      setExplainResult(null);
+      setTransaction("idle");
+    } catch (error) {
+      setResultState({ status: "error", message: formatDbError(error) });
+    } finally {
+      setContextBusy(false);
+    }
+  };
+  const completionSchema = useCompletionSchema(
+    connectionId,
+    poolOpen,
+    database || conn?.database,
+  );
   const saveHistoryMutation = useSaveHistory();
 
   const newExecutionId = () =>
@@ -95,6 +202,8 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   // everything (including the SSH tunnel), so this covers tunnel drops too.
   const handleReconnect = useCallback(async () => {
     if (!conn) return;
+    sessionReady.current = false;
+    setTransaction("idle");
     await openConnection(conn);
     markPoolOpen(conn.id);
   }, [conn, markPoolOpen]);
@@ -108,10 +217,13 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       cancelRequestedRef.current = false;
       const opts = { maxRows: queryMaxRows, executionId, sessionId: tabId };
       try {
+        await ensureSession();
+        if (cancelRequestedRef.current) throw new Error("查询已取消");
         const result =
           params && params.length > 0
             ? await executeQueryWithParams(connectionId, trimmed, params, opts)
             : await executeQuery(connectionId, trimmed, opts);
+        recordStatement(trimmed);
         setResultState({ status: "success", result });
         if (saveQueryHistory) {
           saveHistoryMutation.mutate({
@@ -124,6 +236,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           });
         }
       } catch (e) {
+        recordStatement(trimmed, true);
         const cancelled = cancelRequestedRef.current;
         const errMsg = cancelled ? "查询已取消" : formatDbError(e);
         const onReconnect =
@@ -152,6 +265,8 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       saveQueryHistory,
       queryMaxRows,
       handleReconnect,
+      ensureSession,
+      recordStatement,
     ],
   );
 
@@ -187,14 +302,18 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         currentExecutionRef.current = execId;
         update(i, { status: "running" });
         try {
+          await ensureSession();
+          if (cancelRequestedRef.current) throw new Error("查询已取消");
           const r = await executeQuery(connectionId, stmts[i]!, {
             maxRows: queryMaxRows,
             executionId: execId,
             sessionId: tabId,
           });
+          recordStatement(stmts[i]!);
           totalMs += r.executionMs ?? 0;
           update(i, { status: "success", result: r });
         } catch (e) {
+          recordStatement(stmts[i]!, true);
           const cancelled = cancelRequestedRef.current;
           failMessage = cancelled ? "查询已取消" : formatDbError(e);
           update(i, {
@@ -238,6 +357,8 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       saveQueryHistory,
       queryMaxRows,
       handleReconnect,
+      ensureSession,
+      recordStatement,
     ],
   );
 
@@ -255,14 +376,19 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
 
   const runQuery = useCallback(
     (sqlToRun: string) => {
-      if (currentExecutionRef.current) return;
+      if (currentExecutionRef.current || contextBusy) return;
       const trimmed = sqlToRun.trim();
       if (!trimmed) return;
       const stmts = splitStatements(trimmed, dbType);
       if (stmts.length === 0) return;
-      if (confirmDml && stmts.some(needsWriteConfirmation) && !window.confirm(
-        `即将在 ${conn?.name ?? connectionId} 执行可能修改数据或结构的 SQL（${stmts.length} 条）。\n${trimmed.slice(0, 1200)}\n确认执行？`
-      )) return;
+      if (
+        confirmDml &&
+        stmts.some(needsWriteConfirmation) &&
+        !window.confirm(
+          `即将在 ${conn?.name ?? connectionId} 执行可能修改数据或结构的 SQL（${stmts.length} 条）。\n${trimmed.slice(0, 1200)}\n确认执行？`,
+        )
+      )
+        return;
 
       // Multi-statement scripts run sequentially with one result tab each.
       // Parameter binding is only supported for single-statement runs.
@@ -281,7 +407,15 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         void doExecute(single);
       }
     },
-    [doExecute, doExecuteMulti, dbType, confirmDml, conn?.name, connectionId],
+    [
+      doExecute,
+      doExecuteMulti,
+      dbType,
+      confirmDml,
+      conn?.name,
+      connectionId,
+      contextBusy,
+    ],
   );
 
   const handleParamExecute = useCallback(
@@ -299,16 +433,23 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
 
   const handleExplain = useCallback(
     async (analyze: boolean) => {
-      if (currentExecutionRef.current) return;
+      if (currentExecutionRef.current || contextBusy) return;
       const sql = (editorRef.current?.getSelection() ?? "").trim();
       if (!sql) return;
-      if (analyze && confirmDml && needsWriteConfirmation(sql) && !window.confirm("ANALYZE 将实际执行该 SQL，可能修改数据。确认执行？")) return;
+      if (
+        analyze &&
+        confirmDml &&
+        needsWriteConfirmation(sql) &&
+        !window.confirm("ANALYZE 将实际执行该 SQL，可能修改数据。确认执行？")
+      )
+        return;
       const executionId = newExecutionId();
       currentExecutionRef.current = executionId;
       cancelRequestedRef.current = false;
       setExplaining(true);
       setResultMode("explain");
       try {
+        await ensureSession();
         const result = await explainQuery(connectionId, sql, analyze, {
           sessionId: tabId,
           executionId,
@@ -329,7 +470,14 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         setExplaining(false);
       }
     },
-    [connectionId, tabId, handleReconnect, confirmDml],
+    [
+      connectionId,
+      tabId,
+      handleReconnect,
+      confirmDml,
+      ensureSession,
+      contextBusy,
+    ],
   );
 
   // Stop: cancel the in-flight query on the server (KILL QUERY /
@@ -348,8 +496,9 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
 
   // sql-formatter — passed to SqlEditor so Shift+Alt+F works inside CM too
   const handleFormat = useCallback(
-    (sqlText: string): string => {
+    async (sqlText: string): Promise<string> => {
       try {
+        const { format: formatSql } = await import("sql-formatter");
         return formatSql(sqlText, {
           language: dbType === "postgres" ? "postgresql" : "mysql",
           tabWidth: 2,
@@ -363,10 +512,12 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
     [dbType],
   );
 
-  const handleFormatClick = () => {
+  const handleFormatClick = async () => {
     const editor = editorRef.current;
     if (!editor) return;
-    editor.setValue(handleFormat(editor.getValue()));
+    const original = editor.getValue();
+    const formatted = await handleFormat(original);
+    if (editor.getValue() === original) editor.setValue(formatted);
   };
 
   // History: insert SQL into editor
@@ -415,6 +566,28 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
     <div className="flex h-full flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-1.5">
+        {!poolOpen && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!conn || contextBusy}
+            onClick={async () => {
+              setContextBusy(true);
+              try {
+                await handleReconnect();
+              } catch (error) {
+                setResultState({
+                  status: "error",
+                  message: formatDbError(error),
+                });
+              } finally {
+                setContextBusy(false);
+              }
+            }}
+          >
+            连接数据库
+          </Button>
+        )}
         {running || explaining ? (
           <Button
             variant="destructive"
@@ -430,6 +603,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
             variant="default"
             size="sm"
             className="h-7 gap-1.5 px-2.5 text-xs"
+            disabled={contextBusy}
             onClick={handleRun}
           >
             <Play className="size-3" />
@@ -437,8 +611,18 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           </Button>
         )}
 
-        <Button variant="outline" size="sm" className="h-7 text-xs" disabled={running || explaining}
-          onClick={() => { setResultMode("query"); runQuery(editorRef.current?.getValue() ?? ""); }}>执行全部</Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs"
+          disabled={running || explaining}
+          onClick={() => {
+            setResultMode("query");
+            runQuery(editorRef.current?.getValue() ?? "");
+          }}
+        >
+          执行全部
+        </Button>
         <Button
           variant="ghost"
           size="sm"
@@ -508,11 +692,66 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         </span>
         <div className="flex-1" />
 
+        <select
+          aria-label="查询数据库"
+          value={database}
+          disabled={running || explaining || contextBusy}
+          onChange={(e) => void changeContext(e.target.value, "")}
+          className="max-w-48 rounded border bg-background px-2 py-1 text-xs"
+        >
+          <option value="">连接默认数据库</option>
+          {databases.map((db) => (
+            <option key={db} value={db}>
+              {db}
+            </option>
+          ))}
+        </select>
+        {dbType === "postgres" && (
+          <select
+            aria-label="查询 schema"
+            value={schema}
+            disabled={running || explaining || contextBusy}
+            onChange={(e) => void changeContext(database, e.target.value)}
+            className="max-w-40 rounded border bg-background px-2 py-1 text-xs"
+          >
+            <option value="">默认 search_path</option>
+            {schemas.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        )}
+        {transaction !== "idle" && (
+          <span className="rounded bg-amber-500/15 px-2 py-1 text-xs text-amber-700 dark:text-amber-400">
+            {transaction === "error"
+              ? "显式事务中 · 有错误，请回滚"
+              : "显式事务中 · 尚未提交"}
+          </span>
+        )}
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 text-xs"
+          disabled={running || explaining || contextBusy}
+          onClick={() => runQuery("COMMIT")}
+        >
+          提交事务
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 text-xs"
+          disabled={running || explaining || contextBusy}
+          onClick={() => runQuery("ROLLBACK")}
+        >
+          回滚事务
+        </Button>
         {conn && (
           <span className="flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
             <Database className="size-3" />
             {conn.name}
-            {conn.database ? ` · ${conn.database}` : ""}
+            {database || conn.database ? ` · ${database || conn.database}` : ""}
           </span>
         )}
       </div>

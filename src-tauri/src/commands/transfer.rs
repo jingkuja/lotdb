@@ -1,10 +1,15 @@
 use crate::db::pool::{DbPool, PoolManager};
-use futures::StreamExt;
+use dashmap::DashMap;
+use futures::{stream::BoxStream, StreamExt};
 use rust_xlsxwriter::{Color, Format, Workbook};
 use serde::{Deserialize, Serialize};
 use sqlx::{Column, Row};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 use tauri::{Emitter, State};
 
@@ -412,7 +417,7 @@ pub async fn export_table_data_impl(
     file_path: String,
 ) -> Result<ExportResult, String> {
     // Route PG queries to the selected database (not the connection default).
-    let pool = resolve_pool(&pools, &connection_id, &database).await?;
+    let pool = resolve_pool(pools, &connection_id, &database).await?;
 
     // Excel needs all rows in memory (rust_xlsxwriter builds the file in-memory)
     // Use fetch_all for excel; stream for everything else.
@@ -437,7 +442,7 @@ pub async fn export_table_data_impl(
     // Build SQL and open output file
     let (table_ref, col_select, db_quote): (String, String, fn(&str) -> String) = match &pool {
         DbPool::MySQL(_) => {
-            let tr = crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref());
+            let tr = crate::utils::sql::qualified_mysql(&database, &table);
             let cs = if columns.is_empty() {
                 "*".to_string()
             } else {
@@ -685,7 +690,7 @@ async fn fetch_all_as_json(
 ) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), String> {
     let (q_table, col_select) = match pool {
         DbPool::MySQL(_) => {
-            let tr = crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref());
+            let tr = crate::utils::sql::qualified_mysql(database, table);
             let cs = if columns.is_empty() {
                 "*".to_string()
             } else {
@@ -699,7 +704,7 @@ async fn fetch_all_as_json(
         }
         DbPool::Postgres(_) => {
             let sn = schema.unwrap_or("public");
-            let tr = crate::utils::sql::qualified_pg(sn, &table);
+            let tr = crate::utils::sql::qualified_pg(sn, table);
             let cs = if columns.is_empty() {
                 "*".to_string()
             } else {
@@ -815,7 +820,7 @@ pub async fn batch_export_tables(
 
         let fetch_result = match &pool {
             DbPool::MySQL(pool) => {
-                let q_table = crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref());
+                let q_table = crate::utils::sql::qualified_mysql(&database, table);
                 let sql = format!("SELECT * FROM {q_table}{limit_part}");
                 sqlx::query(&sql)
                     .fetch_all(pool)
@@ -835,7 +840,7 @@ pub async fn batch_export_tables(
             }
             DbPool::Postgres(pool) => {
                 let schema_name = schema.as_deref().unwrap_or("public");
-                let q_table = crate::utils::sql::qualified_pg(schema_name, &table);
+                let q_table = crate::utils::sql::qualified_pg(schema_name, table);
                 let sql = format!("SELECT * FROM {q_table}{limit_part}");
                 sqlx::query(&sql)
                     .fetch_all(pool)
@@ -890,7 +895,7 @@ pub async fn batch_export_tables(
                             ),
                             DbPool::Postgres(_) => {
                                 let s = schema.as_deref().unwrap_or("public");
-                                (crate::utils::sql::qualified_pg(s, &table), |c| {
+                                (crate::utils::sql::qualified_pg(s, table), |c| {
                                     crate::utils::sql::quote_ident_pg(c)
                                 })
                             }
@@ -999,7 +1004,7 @@ pub async fn import_table_data_impl(
 ) -> Result<ImportResult, String> {
     pools.ensure_writable(&connection_id)?;
     // Route PG queries to the selected database (not the connection default).
-    let pool = resolve_pool(&pools, &connection_id, &database).await?;
+    let pool = resolve_pool(pools, &connection_id, &database).await?;
 
     // ── SQL: execute statements directly ──────────────────────────
     if format == "sql" {
@@ -1115,10 +1120,9 @@ pub async fn import_table_data_impl(
         }
         let schema_name = schema.as_deref().unwrap_or("public");
         let (table_ref, col_quote): (String, fn(&str) -> String) = match &pool {
-            DbPool::MySQL(_) => (
-                crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref()),
-                |c| crate::utils::sql::quote_ident_mysql(c),
-            ),
+            DbPool::MySQL(_) => (crate::utils::sql::qualified_mysql(&database, &table), |c| {
+                crate::utils::sql::quote_ident_mysql(c)
+            }),
             DbPool::Postgres(_) => (crate::utils::sql::qualified_pg(schema_name, &table), |c| {
                 crate::utils::sql::quote_ident_pg(c)
             }),
@@ -1264,10 +1268,9 @@ pub async fn import_table_data_impl(
 
     let schema_name = schema.as_deref().unwrap_or("public");
     let (table_ref, col_quote): (String, fn(&str) -> String) = match &pool {
-        DbPool::MySQL(_) => (
-            crate::utils::sql::qualified_mysql(database.as_ref(), table.as_ref()),
-            |c| crate::utils::sql::quote_ident_mysql(c),
-        ),
+        DbPool::MySQL(_) => (crate::utils::sql::qualified_mysql(&database, &table), |c| {
+            crate::utils::sql::quote_ident_mysql(c)
+        }),
         DbPool::Postgres(_) => (crate::utils::sql::qualified_pg(schema_name, &table), |c| {
             crate::utils::sql::quote_ident_pg(c)
         }),
@@ -1483,6 +1486,7 @@ pub struct TransferResult {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TransferProgress {
+    transfer_id: String,
     current: u64,
     total: u64,
     rows_per_sec: f64,
@@ -1500,6 +1504,8 @@ struct TransferProgress {
 pub async fn transfer_table_data(
     app: tauri::AppHandle,
     pools: State<'_, PoolManager>,
+    registry: State<'_, TransferRegistry>,
+    transfer_id: Option<String>,
     src_connection_id: String,
     src_database: String,
     src_schema: Option<String>,
@@ -1513,7 +1519,21 @@ pub async fn transfer_table_data(
     where_clause: Option<String>,
     limit: u64,
 ) -> Result<TransferResult, String> {
-    transfer_table_data_impl(
+    let transfer_id = transfer_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let control = Arc::new(TransferControl::default());
+    let control = match registry.0.entry(transfer_id.clone()) {
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            entry.insert(control.clone());
+            control
+        }
+        dashmap::mapref::entry::Entry::Occupied(entry)
+            if entry.get().cancelled.load(Ordering::Acquire) =>
+        {
+            entry.get().clone()
+        }
+        _ => return Err("传输任务 ID 重复".into()),
+    };
+    let result = transfer_stream_impl(
         Some(&app),
         &pools,
         src_connection_id,
@@ -1528,8 +1548,12 @@ pub async fn transfer_table_data(
         truncate_first,
         where_clause,
         limit,
+        &transfer_id,
+        &control,
     )
-    .await
+    .await;
+    registry.0.remove(&transfer_id);
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1549,149 +1573,292 @@ pub async fn transfer_table_data_impl(
     where_clause: Option<String>,
     limit: u64,
 ) -> Result<TransferResult, String> {
-    pools.ensure_writable(&tgt_connection_id)?;
-    // Route PG queries to the selected databases (not the connection defaults).
-    let src_pool = resolve_pool(&pools, &src_connection_id, &src_database).await?;
-    let tgt_pool = resolve_pool(&pools, &tgt_connection_id, &tgt_database).await?;
-
-    // ── 1. Read all source rows into memory (batch) ────────────────
-    let (src_col_names, src_rows) = fetch_all_as_json(
-        &src_pool,
-        &src_database,
-        src_schema.as_deref(),
-        &src_table,
-        &[],
-        where_clause.as_deref(),
+    transfer_stream_impl(
+        app,
+        pools,
+        src_connection_id,
+        src_database,
+        src_schema,
+        src_table,
+        tgt_connection_id,
+        tgt_database,
+        tgt_schema,
+        tgt_table,
+        column_mapping,
+        truncate_first,
+        where_clause,
         limit,
+        "test",
+        &TransferControl::default(),
     )
-    .await?;
+    .await
+}
 
-    if src_rows.is_empty() {
-        return Ok(TransferResult {
-            rows_transferred: 0,
-            rows_failed: 0,
-            error_message: None,
-        });
+#[derive(Default)]
+struct TransferControl {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+#[derive(Default)]
+pub struct TransferRegistry(DashMap<String, Arc<TransferControl>>);
+#[tauri::command]
+pub fn cancel_transfer(registry: State<'_, TransferRegistry>, transfer_id: String) {
+    let control = registry
+        .0
+        .entry(transfer_id)
+        .or_insert_with(|| Arc::new(TransferControl::default()));
+    control.cancelled.store(true, Ordering::Release);
+    control.notify.notify_one();
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn transfer_stream_impl(
+    app: Option<&tauri::AppHandle>,
+    pools: &PoolManager,
+    src_connection_id: String,
+    src_database: String,
+    src_schema: Option<String>,
+    src_table: String,
+    tgt_connection_id: String,
+    tgt_database: String,
+    tgt_schema: Option<String>,
+    tgt_table: String,
+    column_mapping: Vec<ColumnMap>,
+    truncate_first: bool,
+    where_clause: Option<String>,
+    limit: u64,
+    transfer_id: &str,
+    control: &TransferControl,
+) -> Result<TransferResult, String> {
+    pools.ensure_writable(&tgt_connection_id)?;
+    if src_connection_id == tgt_connection_id
+        && src_database == tgt_database
+        && src_schema == tgt_schema
+        && src_table == tgt_table
+    {
+        return Err("不能将表传输到自身".into());
     }
-
-    // ── 2. Resolve column mapping ──────────────────────────────────
-    // pairs of (src_idx, tgt_col_name)
-    let mapped: Vec<(usize, String)> = if column_mapping.is_empty() {
-        src_col_names
+    let src_pool = resolve_pool(pools, &src_connection_id, &src_database).await?;
+    let tgt_pool = resolve_pool(pools, &tgt_connection_id, &tgt_database).await?;
+    let mysql_src = matches!(src_pool, DbPool::MySQL(_));
+    let mysql_tgt = matches!(tgt_pool, DbPool::MySQL(_));
+    let source = if mysql_src {
+        crate::utils::sql::qualified_mysql(&src_database, &src_table)
+    } else {
+        format!(
+            "{}.{}",
+            crate::utils::sql::quote_ident_pg(src_schema.as_deref().unwrap_or("public")),
+            crate::utils::sql::quote_ident_pg(&src_table)
+        )
+    };
+    let target = if mysql_tgt {
+        crate::utils::sql::qualified_mysql(&tgt_database, &tgt_table)
+    } else {
+        format!(
+            "{}.{}",
+            crate::utils::sql::quote_ident_pg(tgt_schema.as_deref().unwrap_or("public")),
+            crate::utils::sql::quote_ident_pg(&tgt_table)
+        )
+    };
+    let sql = build_select_sql(&source, "*", where_clause.as_deref(), limit);
+    let columns: Vec<String> = match &src_pool {
+        DbPool::MySQL(p) => sqlx::Executor::describe(p, &sql)
+            .await
+            .map_err(|e| e.to_string())?
+            .columns()
             .iter()
-            .enumerate()
-            .map(|(i, name)| (i, name.clone()))
+            .map(|c| c.name().to_owned())
+            .collect(),
+        DbPool::Postgres(p) => sqlx::Executor::describe(p, &sql)
+            .await
+            .map_err(|e| e.to_string())?
+            .columns()
+            .iter()
+            .map(|c| c.name().to_owned())
+            .collect(),
+    };
+    let mapping = if column_mapping.is_empty() {
+        columns
+            .iter()
+            .map(|c| ColumnMap {
+                src: c.clone(),
+                tgt: c.clone(),
+            })
             .collect()
     } else {
         column_mapping
-            .iter()
-            .filter_map(|cm| {
-                src_col_names
-                    .iter()
-                    .position(|n| n == &cm.src)
-                    .map(|idx| (idx, cm.tgt.clone()))
-            })
-            .collect()
     };
-
-    if mapped.is_empty() {
-        return Err("列映射为空，无法传输".to_string());
+    let mut seen = std::collections::HashSet::new();
+    let mut mapped = vec![];
+    for item in mapping {
+        let index = columns
+            .iter()
+            .position(|c| c == &item.src)
+            .ok_or_else(|| format!("找不到源列 {}", item.src))?;
+        if !seen.insert(item.tgt.clone()) {
+            return Err(format!("目标列 {} 重复映射", item.tgt));
+        }
+        mapped.push((index, item.tgt));
     }
-
-    // ── 3. Truncate target if requested ───────────────────────────
+    if mapped.is_empty() {
+        return Err("列映射为空".into());
+    }
+    let col_list = mapped
+        .iter()
+        .map(|(_, col)| {
+            if mysql_tgt {
+                crate::utils::sql::quote_ident_mysql(col)
+            } else {
+                crate::utils::sql::quote_ident_pg(col)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let prefix = format!("INSERT INTO {target} ({col_list}) VALUES ");
+    if control.cancelled.load(Ordering::Acquire) {
+        return Ok(TransferResult {
+            rows_transferred: 0,
+            rows_failed: 0,
+            error_message: Some("已取消".into()),
+        });
+    }
     if truncate_first {
         run_truncate(&tgt_pool, &tgt_database, tgt_schema.as_deref(), &tgt_table).await?;
     }
-
-    // ── 4. Build target table ref + quoting ───────────────────────
-    let (tgt_table_ref, tgt_col_quote): (String, fn(&str) -> String) = match &tgt_pool {
-        DbPool::MySQL(_) => (
-            crate::utils::sql::qualified_mysql(&tgt_database, &tgt_table),
-            |c| crate::utils::sql::quote_ident_mysql(c),
-        ),
-        DbPool::Postgres(_) => {
-            let s = tgt_schema.as_deref().unwrap_or("public");
-            (crate::utils::sql::qualified_pg(s, &tgt_table), |c| {
-                crate::utils::sql::quote_ident_pg(c)
+    let mut stream: BoxStream<'_, Result<Vec<serde_json::Value>, sqlx::Error>> = match &src_pool {
+        DbPool::MySQL(p) => sqlx::query(&sql)
+            .fetch(p)
+            .map(|r| {
+                r.map(|row| {
+                    (0..row.columns().len())
+                        .map(|i| mysql_val(&row, i))
+                        .collect()
+                })
             })
-        }
+            .boxed(),
+        DbPool::Postgres(p) => sqlx::query(&sql)
+            .fetch(p)
+            .map(|r| r.map(|row| (0..row.columns().len()).map(|i| pg_val(&row, i)).collect()))
+            .boxed(),
     };
-
-    let col_list = mapped
-        .iter()
-        .map(|(_, t)| tgt_col_quote(t))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    // ── 5. Insert rows into target ─────────────────────────────────
-    let total = src_rows.len() as u64;
-    let mut rows_transferred: u64 = 0;
-    let mut rows_failed: u64 = 0;
-    let mut first_error: Option<String> = None;
     let start = Instant::now();
-
-    for (idx, row) in src_rows.iter().enumerate() {
-        let val_list = mapped
-            .iter()
-            .map(|(src_idx, _)| {
-                sql_val(
-                    row.get(*src_idx).unwrap_or(&serde_json::Value::Null),
-                    matches!(&tgt_pool, DbPool::MySQL(_)),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let insert_sql = format!("INSERT INTO {tgt_table_ref} ({col_list}) VALUES ({val_list})");
-        let res = match &tgt_pool {
-            DbPool::MySQL(p) => sqlx::query(&insert_sql)
-                .execute(p)
-                .await
-                .map(|r| r.rows_affected()),
-            DbPool::Postgres(p) => sqlx::query(&insert_sql)
-                .execute(p)
-                .await
-                .map(|r| r.rows_affected()),
+    let mut rows_transferred = 0;
+    let mut rows_failed = 0;
+    let mut error_message = None;
+    let mut batch: Vec<String> = vec![];
+    let mut bytes = 0;
+    loop {
+        if control.cancelled.load(Ordering::Acquire) {
+            error_message = Some("已取消；已提交批次保留，未提交批次已丢弃".into());
+            break;
+        }
+        let item = tokio::select! {
+            _ = control.notify.notified() => { error_message = Some("已取消；已提交批次保留，未提交批次已丢弃".into()); break; }
+            item = stream.next() => item,
         };
-        match res {
-            Ok(n) => rows_transferred += n,
-            Err(e) => {
-                rows_failed += 1;
-                if first_error.is_none() {
-                    first_error = Some(e.to_string());
+        let done = item.is_none();
+        match item {
+            Some(Ok(row)) => {
+                let values = mapped
+                    .iter()
+                    .map(|(i, _)| sql_val(&row[*i], mysql_tgt))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bytes += values.len();
+                batch.push(format!("({values})"));
+            }
+            Some(Err(error)) => {
+                error_message = Some(format!("读取中断：{error}；已提交批次保留"));
+                break;
+            }
+            None => {}
+        }
+        if !batch.is_empty() && (done || batch.len() >= 500 || bytes >= 512 * 1024) {
+            match insert_transfer_batch(&tgt_pool, &format!("{prefix}{}", batch.join(","))).await {
+                Ok(n) => rows_transferred += n,
+                Err(error) => {
+                    rows_failed = batch.len() as u64;
+                    error_message = Some(format!(
+                        "批次失败，已停止：{error}；之前已提交 {rows_transferred} 行"
+                    ));
+                    break;
                 }
             }
-        }
-
-        let current = (idx + 1) as u64;
-        if current.is_multiple_of(100) || current == total {
-            let elapsed = start.elapsed().as_secs_f64().max(0.001);
-            let rps = current as f64 / elapsed;
-            let eta = if rps > 0.0 && current < total {
-                (total - current) as f64 / rps
-            } else {
-                0.0
-            };
+            batch.clear();
+            bytes = 0;
             if let Some(app) = app {
-                app.emit(
+                let _ = app.emit(
                     "transfer-progress",
                     TransferProgress {
-                        current,
-                        total,
-                        rows_per_sec: rps,
-                        eta_sec: eta,
+                        transfer_id: transfer_id.to_owned(),
+                        current: rows_transferred,
+                        total: 0,
+                        rows_per_sec: rows_transferred as f64
+                            / start.elapsed().as_secs_f64().max(0.001),
+                        eta_sec: 0.0,
                     },
-                )
-                .ok();
+                );
             }
         }
+        if done {
+            break;
+        }
     }
-
     Ok(TransferResult {
         rows_transferred,
         rows_failed,
-        error_message: first_error.map(|e| format!("{rows_failed} 行失败: {e}")),
+        error_message,
     })
+}
+
+/// A failed statement is rolled back before retry. Only deadlocks and
+/// serialization failures are retried; connection/commit errors are ambiguous.
+async fn insert_transfer_batch(pool: &DbPool, sql: &str) -> Result<u64, String> {
+    for attempt in 0..3 {
+        let result: Result<u64, sqlx::Error> = match pool {
+            DbPool::MySQL(p) => {
+                let mut tx = p.begin().await.map_err(|e| e.to_string())?;
+                match sqlx::query(sql).execute(&mut *tx).await {
+                    Ok(done) => {
+                        tx.commit().await.map_err(|e| e.to_string())?;
+                        return Ok(done.rows_affected());
+                    }
+                    Err(e) => {
+                        tx.rollback()
+                            .await
+                            .map_err(|rollback| rollback.to_string())?;
+                        Err(e)
+                    }
+                }
+            }
+            DbPool::Postgres(p) => {
+                let mut tx = p.begin().await.map_err(|e| e.to_string())?;
+                match sqlx::query(sql).execute(&mut *tx).await {
+                    Ok(done) => {
+                        tx.commit().await.map_err(|e| e.to_string())?;
+                        return Ok(done.rows_affected());
+                    }
+                    Err(e) => {
+                        tx.rollback()
+                            .await
+                            .map_err(|rollback| rollback.to_string())?;
+                        Err(e)
+                    }
+                }
+            }
+        };
+        if let Err(error) = result {
+            let retryable = error
+                .as_database_error()
+                .and_then(|e| e.code())
+                .is_some_and(|c| matches!(c.as_ref(), "40001" | "40P01" | "1213"));
+            if !retryable || attempt == 2 {
+                return Err(error.to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt + 1))).await;
+        }
+    }
+    unreachable!()
 }
 
 fn parse_json(file_path: &str) -> Result<ParsedTable, String> {
@@ -1791,18 +1958,30 @@ mod tests {
 
 /// Exports only the already-loaded query result; never silently overwrites a file.
 #[tauri::command]
-pub async fn export_query_result(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, file_path: String) -> Result<(), String> {
+pub async fn export_query_result(
+    columns: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+    file_path: String,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&file_path).map_err(|e| e.to_string())?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file_path)
+            .map_err(|e| e.to_string())?;
         let mut writer = csv::Writer::from_writer(file);
         writer.write_record(&columns).map_err(|e| e.to_string())?;
         for row in rows {
-            writer.write_record(row.iter().map(|value| match value {
-                serde_json::Value::Null => String::new(),
-                serde_json::Value::String(s) => s.clone(),
-                value => value.to_string(),
-            })).map_err(|e| e.to_string())?;
+            writer
+                .write_record(row.iter().map(|value| match value {
+                    serde_json::Value::Null => String::new(),
+                    serde_json::Value::String(s) => s.clone(),
+                    value => value.to_string(),
+                }))
+                .map_err(|e| e.to_string())?;
         }
         writer.flush().map_err(|e| e.to_string())
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

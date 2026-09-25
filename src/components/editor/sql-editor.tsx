@@ -6,12 +6,21 @@ import {
   useImperativeHandle,
   useCallback,
 } from "react";
-import { EditorView, keymap, placeholder, type ViewUpdate } from "@codemirror/view";
+import {
+  EditorView,
+  keymap,
+  placeholder,
+  type ViewUpdate,
+} from "@codemirror/view";
 import { EditorState, Compartment } from "@codemirror/state";
 import { basicSetup } from "codemirror";
 import { sql, MySQL, PostgreSQL } from "@codemirror/lang-sql";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { defaultKeymap, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  defaultKeymap,
+  historyKeymap,
+  indentWithTab,
+} from "@codemirror/commands";
 import type { DatabaseType } from "@/types/database";
 import type { CmSchema } from "@/hooks/use-completion-schema";
 
@@ -34,7 +43,7 @@ interface SqlEditorProps {
   onChange?: (value: string) => void;
   onExecute?: (sql: string) => void;
   /** Sync formatter: receives current SQL, returns formatted SQL */
-  onFormat?: (sql: string) => string;
+  onFormat?: (sql: string) => string | Promise<string>;
   /** Editor font size in px (default 13) */
   fontSize?: number;
   /** Editor font family (default JetBrains Mono) */
@@ -43,8 +52,17 @@ interface SqlEditorProps {
 
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
   function SqlEditor(
-    { tabId, initialValue = "", dbType, schema, onChange, onExecute, onFormat,
-      fontSize = 13, fontFamily = "JetBrains Mono" },
+    {
+      tabId,
+      initialValue = "",
+      dbType,
+      schema,
+      onChange,
+      onExecute,
+      onFormat,
+      fontSize = 13,
+      fontFamily = "JetBrains Mono",
+    },
     ref,
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -60,16 +78,26 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
     const onChangeRef = useRef(onChange);
     const onExecuteRef = useRef(onExecute);
     const onFormatRef = useRef(onFormat);
-    useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
-    useEffect(() => { onExecuteRef.current = onExecute; }, [onExecute]);
-    useEffect(() => { onFormatRef.current = onFormat; }, [onFormat]);
+    useEffect(() => {
+      onChangeRef.current = onChange;
+    }, [onChange]);
+    useEffect(() => {
+      onExecuteRef.current = onExecute;
+    }, [onExecute]);
+    useEffect(() => {
+      onFormatRef.current = onFormat;
+    }, [onFormat]);
 
     const getSelection = useCallback(() => {
       const view = viewRef.current;
       if (!view) return "";
       const { from, to } = view.state.selection.main;
       if (from !== to) return view.state.sliceDoc(from, to);
-      return currentStatement(view.state.doc.toString(), from, dbType ?? "mysql");
+      return currentStatement(
+        view.state.doc.toString(),
+        from,
+        dbType ?? "mysql",
+      );
     }, [dbType]);
 
     const setValue = useCallback((content: string) => {
@@ -109,12 +137,20 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
             const formatter = onFormatRef.current;
             if (!formatter) return false;
             const current = view.state.doc.toString();
-            const formatted = formatter(current);
-            if (formatted !== current) {
-              view.dispatch({
-                changes: { from: 0, to: view.state.doc.length, insert: formatted },
-              });
-            }
+            void Promise.resolve(formatter(current)).then((formatted) => {
+              if (
+                viewRef.current === view &&
+                view.state.doc.toString() === current &&
+                formatted !== current
+              )
+                view.dispatch({
+                  changes: {
+                    from: 0,
+                    to: view.state.doc.length,
+                    insert: formatted,
+                  },
+                });
+            });
             return true;
           },
         },
@@ -144,7 +180,9 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
         doc: initialValue,
         extensions: [
           basicSetup,
-          themeCompartmentRef.current.of(document.documentElement.classList.contains("dark") ? oneDark : []),
+          themeCompartmentRef.current.of(
+            document.documentElement.classList.contains("dark") ? oneDark : [],
+          ),
           // SQL extension is inside a compartment so schema can be updated later
           compartment.of(sql({ dialect, schema: {} })),
           // Font theme in its own compartment for hot-swap
@@ -158,11 +196,17 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
 
       const view = new EditorView({ state, parent: containerRef.current });
       viewRef.current = view;
-      const syncTheme = () => view.dispatch({ effects: themeCompartmentRef.current.reconfigure(
-        document.documentElement.classList.contains("dark") ? oneDark : []
-      ) });
+      const syncTheme = () =>
+        view.dispatch({
+          effects: themeCompartmentRef.current.reconfigure(
+            document.documentElement.classList.contains("dark") ? oneDark : [],
+          ),
+        });
       const observer = new MutationObserver(syncTheme);
-      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["class"],
+      });
 
       return () => {
         observer.disconnect();
@@ -202,12 +246,6 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
       });
     }, [fontSize, fontFamily]);
 
-    return (
-      <div
-        ref={containerRef}
-        className="h-full w-full overflow-hidden"
-
-      />
-    );
+    return <div ref={containerRef} className="h-full w-full overflow-hidden" />;
   },
 );

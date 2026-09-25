@@ -17,10 +17,11 @@ export type CmSchema = Record<string, readonly string[]>;
 export function useCompletionSchema(
   connectionId: string | null,
   enabled = true,
+  database?: string,
 ): CmSchema {
   const { data = [] } = useQuery({
-    queryKey: ["completion-schema", connectionId],
-    queryFn: () => getCompletionSchema(connectionId!),
+    queryKey: ["completion-schema", connectionId, database],
+    queryFn: () => getCompletionSchema(connectionId!, database),
     enabled: !!connectionId && enabled,
     // Schema rarely changes during a session — 5 min stale time
     staleTime: 5 * 60_000,

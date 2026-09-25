@@ -13,6 +13,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(PoolManager::new())
         .manage(QueryRegistry::default())
+        .manage(commands::transfer::TransferRegistry::default())
         .setup(|app| {
             // Must finish before the webview mounts: the packaged app loads
             // instantly and immediately invokes get_connections / list_groups.
@@ -49,6 +50,7 @@ pub fn run() {
             commands::query::execute_query_with_params,
             commands::query::cancel_query,
             commands::query::close_query_session,
+            commands::query::configure_query_session,
             // Schema / object browser
             commands::schema::list_databases,
             commands::schema::list_schemas,
@@ -100,6 +102,7 @@ pub fn run() {
             commands::transfer::preview_import_file,
             commands::transfer::import_table_data,
             commands::transfer::transfer_table_data,
+            commands::transfer::cancel_transfer,
             // Database management
             commands::admin::create_database,
             commands::admin::drop_database,

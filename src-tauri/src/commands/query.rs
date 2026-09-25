@@ -6,7 +6,7 @@ use crate::utils::keychain;
 use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use sqlx::{Arguments, Column, Row, Executor, Either};
+use sqlx::{Arguments, Column, Either, Executor, Row};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -451,14 +451,20 @@ pub async fn run_session_query(
     if session.is_none() {
         *session = Some(match pool {
             crate::db::pool::DbPool::MySQL(p) => {
-                let mut conn = p.acquire().await
-                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?.detach();
+                let mut conn = p
+                    .acquire()
+                    .await
+                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?
+                    .detach();
                 let pid = mysql_session_id(&mut conn).await?;
                 QuerySession::MySQL(conn, pid)
             }
             crate::db::pool::DbPool::Postgres(p) => {
-                let mut conn = p.acquire().await
-                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?.detach();
+                let mut conn = p
+                    .acquire()
+                    .await
+                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?
+                    .detach();
                 let pid = pg_session_id(&mut conn).await?;
                 QuerySession::Postgres(conn, pid)
             }
@@ -636,9 +642,14 @@ async fn run_mysql(
 ) -> Result<RawResult, AppError> {
     match kind {
         StmtKind::Rows => {
-            let columns = conn.describe(sql).await
+            let columns = conn
+                .describe(sql)
+                .await
                 .map_err(|e| AppError::from_sqlx("获取结果列失败", e))?
-                .columns().iter().map(|c| c.name().to_string()).collect();
+                .columns()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect();
             let mut stream = match args {
                 MySqlArgs::None => sqlx::Executor::fetch(&mut *conn, sql),
                 MySqlArgs::Some(a) => sqlx::query_with(sql, a).fetch(&mut *conn),
@@ -668,12 +679,21 @@ async fn run_postgres(
 ) -> Result<RawResult, AppError> {
     // Describe result-bearing statements before execution, including zero-row
     // RETURNING. Never issue a preflight for ROLLBACK in an aborted transaction.
-    let may_return = kind == StmtKind::Rows || sql.split(|c: char| !c.is_ascii_alphabetic())
-        .any(|word| word.eq_ignore_ascii_case("RETURNING"));
+    let may_return = kind == StmtKind::Rows
+        || sql
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|word| word.eq_ignore_ascii_case("RETURNING"));
     let mut columns: Vec<String> = if may_return {
-        conn.describe(sql).await.map_err(|e| AppError::from_sqlx("获取结果列失败", e))?
-            .columns().iter().map(|c| c.name().to_string()).collect()
-    } else { vec![] };
+        conn.describe(sql)
+            .await
+            .map_err(|e| AppError::from_sqlx("获取结果列失败", e))?
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect()
+    } else {
+        vec![]
+    };
     let mut stream = match args {
         PgArgs::None => sqlx::Executor::fetch_many(&mut *conn, sql),
         PgArgs::Some(a) => sqlx::query_with(sql, a).fetch_many(&mut *conn),
@@ -695,9 +715,14 @@ async fn run_postgres(
                     truncated = true;
                     continue;
                 }
-                let values: Vec<_> = (0..row.columns().len()).map(|i| pg_value_to_json(&row, i)).collect();
+                let values: Vec<_> = (0..row.columns().len())
+                    .map(|i| pg_value_to_json(&row, i))
+                    .collect();
                 bytes += serde_json::to_vec(&values).map_or(0, |v| v.len());
-                if bytes > MAX_RESULT_BYTES { truncated = true; continue; }
+                if bytes > MAX_RESULT_BYTES {
+                    truncated = true;
+                    continue;
+                }
                 rows.push(values);
             }
         }
@@ -738,7 +763,10 @@ where
         let n = row.columns().len();
         let values: Vec<_> = (0..n).map(|i| to_json(&row, i)).collect();
         bytes += serde_json::to_vec(&values).map_or(0, |v| v.len());
-        if bytes > MAX_RESULT_BYTES { truncated = true; break; }
+        if bytes > MAX_RESULT_BYTES {
+            truncated = true;
+            break;
+        }
         rows.push(values);
     }
 
@@ -898,4 +926,93 @@ mod tests {
         assert_eq!(normalize_max_rows(Some(0)), None);
         assert_eq!(normalize_max_rows(Some(5000)), Some(5000));
     }
+}
+
+/// Explicitly replace a tab session. The UI confirms that this rolls back any
+/// open transaction; constructing the replacement first keeps failures recoverable.
+#[tauri::command]
+pub async fn configure_query_session(
+    pools: State<'_, PoolManager>,
+    registry: State<'_, QueryRegistry>,
+    connection_id: String,
+    session_id: String,
+    database: Option<String>,
+    schema: Option<String>,
+) -> Result<(), AppError> {
+    configure_session_impl(
+        &pools,
+        &registry,
+        &connection_id,
+        &session_id,
+        database.as_deref(),
+        schema.as_deref(),
+    )
+    .await
+}
+
+pub async fn configure_session_impl(
+    pools: &PoolManager,
+    registry: &QueryRegistry,
+    connection_id: &str,
+    session_id: &str,
+    database: Option<&str>,
+    schema: Option<&str>,
+) -> Result<(), AppError> {
+    let pool = pools
+        .pools
+        .get(connection_id)
+        .ok_or_else(|| AppError::connection("连接未打开，请重新连接"))?
+        .pool
+        .clone();
+    let replacement = match pool {
+        crate::db::pool::DbPool::MySQL(pool) => {
+            let mut conn = pool
+                .acquire()
+                .await
+                .map_err(|e| AppError::from_sqlx("获取会话失败", e))?
+                .detach();
+            if let Some(db) = database.filter(|s| !s.is_empty()) {
+                conn.execute(format!("USE {}", crate::utils::sql::quote_ident_mysql(db)).as_str())
+                    .await
+                    .map_err(|e| AppError::from_sqlx("切换数据库失败", e))?;
+            }
+            let pid = mysql_session_id(&mut conn).await?;
+            QuerySession::MySQL(conn, pid)
+        }
+        crate::db::pool::DbPool::Postgres(pool) => {
+            let pool = if let Some(db) = database.filter(|s| !s.is_empty()) {
+                pools
+                    .pg_pool_for_database(connection_id, db)
+                    .await
+                    .map_err(AppError::connection)?
+            } else {
+                pool
+            };
+            let mut conn = pool
+                .acquire()
+                .await
+                .map_err(|e| AppError::from_sqlx("获取会话失败", e))?
+                .detach();
+            if let Some(schema) = schema.filter(|s| !s.is_empty()) {
+                conn.execute(
+                    format!(
+                        "SET search_path TO {}",
+                        crate::utils::sql::quote_ident_pg(schema)
+                    )
+                    .as_str(),
+                )
+                .await
+                .map_err(|e| AppError::from_sqlx("切换 schema 失败", e))?;
+            }
+            let pid = pg_session_id(&mut conn).await?;
+            QuerySession::Postgres(conn, pid)
+        }
+    };
+    let slot = registry
+        .sessions
+        .entry((connection_id.to_owned(), session_id.to_owned()))
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone();
+    *slot.lock().await = Some(replacement);
+    Ok(())
 }

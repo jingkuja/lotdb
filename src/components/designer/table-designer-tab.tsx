@@ -1,5 +1,14 @@
+import { useWorkspaceGuard } from "@/hooks/use-workspace-guard";
 import { useState, useCallback, useId } from "react";
-import { Plus, Trash2, GripVertical, ArrowUp, ArrowDown, Code2, GitCompare } from "lucide-react";
+import {
+  Plus,
+  Trash2,
+  GripVertical,
+  ArrowUp,
+  ArrowDown,
+  Code2,
+  GitCompare,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -44,7 +53,9 @@ function TypeSelect({
       {groups.map((g) => (
         <optgroup key={g.label} label={g.label}>
           {g.types.map((t) => (
-            <option key={t} value={t}>{t}</option>
+            <option key={t} value={t}>
+              {t}
+            </option>
           ))}
         </optgroup>
       ))}
@@ -98,9 +109,20 @@ interface ColRowProps {
   };
 }
 
-function ColRow({ col, index, total, dbType, onChange, onDelete, onMove, dragHandleProps }: ColRowProps) {
-  const set = <K extends keyof DesignerColumn>(key: K, val: DesignerColumn[K]) =>
-    onChange({ ...col, [key]: val });
+function ColRow({
+  col,
+  index,
+  total,
+  dbType,
+  onChange,
+  onDelete,
+  onMove,
+  dragHandleProps,
+}: ColRowProps) {
+  const set = <K extends keyof DesignerColumn>(
+    key: K,
+    val: DesignerColumn[K],
+  ) => onChange({ ...col, [key]: val });
 
   const hasLength = supportsLength(col.type);
   const hasAI = supportsAutoIncrement(col.type, dbType);
@@ -143,7 +165,11 @@ function ColRow({ col, index, total, dbType, onChange, onDelete, onMove, dragHan
 
       {/* Type */}
       <div className="w-36 shrink-0 px-1">
-        <TypeSelect value={col.type} dbType={dbType} onChange={(v) => set("type", v)} />
+        <TypeSelect
+          value={col.type}
+          dbType={dbType}
+          onChange={(v) => set("type", v)}
+        />
       </div>
 
       {/* Length */}
@@ -267,7 +293,13 @@ function ColRow({ col, index, total, dbType, onChange, onDelete, onMove, dragHan
 
 function HeaderRow({ dbType }: { dbType: DatabaseType }) {
   const th = (label: string, w: string, extra?: string) => (
-    <div className={cn("shrink-0 px-1 text-[10px] font-medium text-muted-foreground", w, extra)}>
+    <div
+      className={cn(
+        "shrink-0 px-1 text-[10px] font-medium text-muted-foreground",
+        w,
+        extra,
+      )}
+    >
       {label}
     </div>
   );
@@ -293,6 +325,7 @@ function HeaderRow({ dbType }: { dbType: DatabaseType }) {
 // ─── Main component ───────────────────────────────────────────────
 
 interface TableDesignerTabProps {
+  tabId?: string;
   connectionId: string;
   dbType: DatabaseType;
   /** If editing an existing table, pre-fill with its columns */
@@ -301,18 +334,34 @@ interface TableDesignerTabProps {
 
 type PanelTab = "columns" | "indexes" | "foreign-keys";
 
-export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps) {
+export function TableDesignerTab({
+  dbType,
+  initialState,
+  tabId,
+}: TableDesignerTabProps) {
   const uid = useId();
   // Freeze original state at mount for ALTER TABLE diff
   const [originalState] = useState<DesignerState | undefined>(initialState);
-  const [state, setState] = useState<DesignerState>(initialState ?? emptyState());
+  const [state, setState] = useState<DesignerState>(
+    initialState ?? emptyState(),
+  );
+  const [baseline] = useState(() => JSON.stringify(initialState ?? state));
+  useWorkspaceGuard(
+    tabId ?? uid,
+    JSON.stringify(state) !== baseline
+      ? "表设计器有未保存的修改，关闭将丢弃草稿。"
+      : null,
+  );
   const [activePanel, setActivePanel] = useState<PanelTab>("columns");
   const [dragFromIdx, setDragFromIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [ddlOpen, setDdlOpen] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
 
-  const nextId = useCallback(() => `${uid}-${Date.now()}-${Math.random()}`, [uid]);
+  const nextId = useCallback(
+    () => `${uid}-${Date.now()}-${Math.random()}`,
+    [uid],
+  );
 
   const addColumn = useCallback(() => {
     setState((prev) => ({
@@ -354,17 +403,20 @@ export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps
     });
   }, []);
 
-  const handleDrop = useCallback((toIdx: number) => {
-    if (dragFromIdx === null || dragFromIdx === toIdx) return;
-    setState((prev) => {
-      const cols = [...prev.columns];
-      const [moved] = cols.splice(dragFromIdx, 1);
-      cols.splice(toIdx, 0, moved!);
-      return { ...prev, columns: cols };
-    });
-    setDragFromIdx(null);
-    setDragOverIdx(null);
-  }, [dragFromIdx]);
+  const handleDrop = useCallback(
+    (toIdx: number) => {
+      if (dragFromIdx === null || dragFromIdx === toIdx) return;
+      setState((prev) => {
+        const cols = [...prev.columns];
+        const [moved] = cols.splice(dragFromIdx, 1);
+        cols.splice(toIdx, 0, moved!);
+        return { ...prev, columns: cols };
+      });
+      setDragFromIdx(null);
+      setDragOverIdx(null);
+    },
+    [dragFromIdx],
+  );
 
   const { columns, indexes, foreignKeys, tableName, tableComment } = state;
 
@@ -398,24 +450,61 @@ export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps
         <div className="h-4 w-px bg-border" />
 
         {activePanel === "columns" && (
-          <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs" onClick={addColumn}>
-            <Plus className="size-3" />添加列
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 gap-1 px-2 text-xs"
+            onClick={addColumn}
+          >
+            <Plus className="size-3" />
+            添加列
           </Button>
         )}
         {activePanel === "indexes" && (
           <Button
-            size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs"
-            onClick={() => updateIndexes([...indexes, { id: `idx-${Date.now()}`, name: "", type: "INDEX", columns: [], method: "BTREE", comment: "" }])}
+            size="sm"
+            variant="ghost"
+            className="h-7 gap-1 px-2 text-xs"
+            onClick={() =>
+              updateIndexes([
+                ...indexes,
+                {
+                  id: `idx-${Date.now()}`,
+                  name: "",
+                  type: "INDEX",
+                  columns: [],
+                  method: "BTREE",
+                  comment: "",
+                },
+              ])
+            }
           >
-            <Plus className="size-3" />添加索引
+            <Plus className="size-3" />
+            添加索引
           </Button>
         )}
         {activePanel === "foreign-keys" && (
           <Button
-            size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs"
-            onClick={() => updateForeignKeys([...foreignKeys, { id: `fk-${Date.now()}`, name: "", columns: [], refTable: "", refColumns: [], onDelete: "NO ACTION", onUpdate: "NO ACTION" }])}
+            size="sm"
+            variant="ghost"
+            className="h-7 gap-1 px-2 text-xs"
+            onClick={() =>
+              updateForeignKeys([
+                ...foreignKeys,
+                {
+                  id: `fk-${Date.now()}`,
+                  name: "",
+                  columns: [],
+                  refTable: "",
+                  refColumns: [],
+                  onDelete: "NO ACTION",
+                  onUpdate: "NO ACTION",
+                },
+              ])
+            }
           >
-            <Plus className="size-3" />添加外键
+            <Plus className="size-3" />
+            添加外键
           </Button>
         )}
 
@@ -452,7 +541,9 @@ export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps
             className="h-7 w-48 text-xs"
             placeholder="table_name"
             value={tableName}
-            onChange={(e) => setState((s) => ({ ...s, tableName: e.target.value }))}
+            onChange={(e) =>
+              setState((s) => ({ ...s, tableName: e.target.value }))
+            }
           />
         </div>
         <div className="flex items-center gap-2">
@@ -461,7 +552,9 @@ export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps
             className="h-7 w-64 text-xs"
             placeholder="表注释（可选）"
             value={tableComment}
-            onChange={(e) => setState((s) => ({ ...s, tableComment: e.target.value }))}
+            onChange={(e) =>
+              setState((s) => ({ ...s, tableComment: e.target.value }))
+            }
           />
         </div>
       </div>
@@ -489,45 +582,53 @@ export function TableDesignerTab({ dbType, initialState }: TableDesignerTabProps
       )}
 
       {/* Column editor */}
-      {activePanel === "columns" && <div className="flex-1 overflow-auto">
-        <div className="min-w-max">
-          <HeaderRow dbType={dbType} />
+      {activePanel === "columns" && (
+        <div className="flex-1 overflow-auto">
+          <div className="min-w-max">
+            <HeaderRow dbType={dbType} />
 
-          {columns.length === 0 ? (
-            <div
-              className="flex cursor-pointer flex-col items-center gap-2 py-16 text-muted-foreground hover:text-foreground"
-              onClick={addColumn}
-            >
-              <Plus className="size-8 opacity-30" />
-              <p className="text-sm">点击添加第一列</p>
-            </div>
-          ) : (
-            columns.map((col, idx) => (
-              <ColRow
-                key={col.id}
-                col={col}
-                index={idx}
-                total={columns.length}
-                dbType={dbType}
-                onChange={(c) => updateColumn(idx, c)}
-                onDelete={() => deleteColumn(idx)}
-                onMove={(dir) => moveColumn(idx, dir)}
-                dragHandleProps={{
-                  draggable: true,
-                  isDragOver: dragOverIdx === idx && dragFromIdx !== idx,
-                  onDragStart: (e) => {
-                    e.dataTransfer.effectAllowed = "move";
-                    setDragFromIdx(idx);
-                  },
-                  onDragOver: (e) => { e.preventDefault(); setDragOverIdx(idx); },
-                  onDrop: () => handleDrop(idx),
-                  onDragEnd: () => { setDragFromIdx(null); setDragOverIdx(null); },
-                }}
-              />
-            ))
-          )}
+            {columns.length === 0 ? (
+              <div
+                className="flex cursor-pointer flex-col items-center gap-2 py-16 text-muted-foreground hover:text-foreground"
+                onClick={addColumn}
+              >
+                <Plus className="size-8 opacity-30" />
+                <p className="text-sm">点击添加第一列</p>
+              </div>
+            ) : (
+              columns.map((col, idx) => (
+                <ColRow
+                  key={col.id}
+                  col={col}
+                  index={idx}
+                  total={columns.length}
+                  dbType={dbType}
+                  onChange={(c) => updateColumn(idx, c)}
+                  onDelete={() => deleteColumn(idx)}
+                  onMove={(dir) => moveColumn(idx, dir)}
+                  dragHandleProps={{
+                    draggable: true,
+                    isDragOver: dragOverIdx === idx && dragFromIdx !== idx,
+                    onDragStart: (e) => {
+                      e.dataTransfer.effectAllowed = "move";
+                      setDragFromIdx(idx);
+                    },
+                    onDragOver: (e) => {
+                      e.preventDefault();
+                      setDragOverIdx(idx);
+                    },
+                    onDrop: () => handleDrop(idx),
+                    onDragEnd: () => {
+                      setDragFromIdx(null);
+                      setDragOverIdx(null);
+                    },
+                  }}
+                />
+              ))
+            )}
+          </div>
         </div>
-      </div>}
+      )}
 
       <DdlPreviewDialog
         open={ddlOpen}

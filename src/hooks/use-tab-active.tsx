@@ -6,6 +6,10 @@ const subscribe = (callback: () => void) => {
 };
 export function useTabActive() {
   const tabActive = useContext(TabActiveContext);
-  const visible = useSyncExternalStore(subscribe, () => document.visibilityState !== "hidden", () => true);
+  const visible = useSyncExternalStore(
+    subscribe,
+    () => document.visibilityState !== "hidden",
+    () => true,
+  );
   return tabActive && visible;
 }

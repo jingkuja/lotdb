@@ -163,6 +163,7 @@ describe("table draft identity", () => {
           "c",
           [expect.stringContaining(`WHERE "id" = '9007199254740993'`)],
           "db",
+          [expect.objectContaining({ original: original.rows[0] })],
         ),
       );
     },
@@ -190,4 +191,30 @@ describe("table draft identity", () => {
     fireEvent.click(screen.getByText("预览"));
     expect(screen.getByTestId("sql").textContent).toContain(`WHERE "id" = '2'`);
   });
+});
+
+it("uses a primary-key cursor for the next page without requesting a count", async () => {
+  const first = {
+    columns: ["id", "name"],
+    rows: Array.from({ length: 201 }, (_, i) => [String(i + 1), "row"]),
+    totalCount: -1,
+  };
+  vi.mocked(getTableData).mockResolvedValue(first);
+  mount();
+  await screen.findByTestId("row-id");
+  fireEvent.click(screen.getByLabelText("下一页"));
+  await waitFor(() =>
+    expect(getTableData).toHaveBeenLastCalledWith(
+      "c",
+      "db",
+      undefined,
+      "users",
+      201,
+      0,
+      undefined,
+      undefined,
+      [{ column: "id", op: ">", value: "200" }],
+      { stableColumns: ["id"] },
+    ),
+  );
 });

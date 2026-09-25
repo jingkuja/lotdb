@@ -1,3 +1,4 @@
+import { useTabActive } from "@/hooks/use-tab-active";
 import { useWorkspaceGuard } from "@/hooks/use-workspace-guard";
 import { useState, useCallback, useMemo } from "react";
 import {
@@ -54,7 +55,10 @@ import {
   type ColumnFilter,
   type TableDataResult,
 } from "@/services/tauri-commands";
-import { generateChangeSql } from "@/lib/generate-change-sql";
+import {
+  generateChangeSql,
+  generateChangeChecks,
+} from "@/lib/generate-change-sql";
 import { useConnections } from "@/hooks/use-connections";
 import { useConnectionStore } from "@/stores/connection-store";
 import { openConnection } from "@/services/tauri-commands";
@@ -78,6 +82,7 @@ export function TableDataTab({
   table,
 }: TableDataTabProps) {
   const qc = useQueryClient();
+  const active = useTabActive();
   const [draftData, setDraftData] = useState<TableDataResult | null>(null);
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
@@ -116,11 +121,24 @@ export function TableDataTab({
     confirmDml,
   } = usePreferencesStore((s) => s.prefs);
 
+  const [previousPageSize, setPreviousPageSize] = useState(PAGE_SIZE);
+  if (previousPageSize !== PAGE_SIZE) {
+    setPreviousPageSize(PAGE_SIZE);
+    setPage(0);
+    setPageCursors({});
+    setSelectedRows(new Set());
+  }
+
   // Fetch PK info (stale is fine — schema rarely changes)
-  const { data: columnDefs = [] } = useQuery({
+  const {
+    data: columnDefs = [],
+    isLoading: columnsLoading,
+    error: columnsError,
+  } = useQuery({
     queryKey: ["table-columns", connectionId, database, schema, table],
     queryFn: () => getTableColumns(connectionId, database, schema, table),
     staleTime: 5 * 60_000,
+    enabled: active,
   });
   const pkColumns = useMemo(
     () => columnDefs.filter((c) => c.isPrimaryKey).map((c) => c.name),
@@ -141,15 +159,49 @@ export function TableDataTab({
 
   const activeFilters = Object.values(filterMap);
   const offset = page * PAGE_SIZE;
-  const cursorKey = pkColumns.length === 1 && (!sort || sort.column === pkColumns[0]) ? pkColumns[0] : undefined;
+  const cursorKey =
+    pkColumns.length === 1 && (!sort || sort.column === pkColumns[0])
+      ? pkColumns[0]
+      : undefined;
   const cursor = pageCursors[page];
-  const pageFilters: ColumnFilter[] = cursorKey && cursor !== undefined
-    ? [...activeFilters, { column: cursorKey, op: sort?.dir === "DESC" ? "<" : ">", value: cursor }]
-    : activeFilters;
-  const { data: countData, isFetching: counting, error: countError } = useQuery({
-    queryKey: ["table-count", connectionId, database, schema, table, activeFilters],
-    queryFn: () => getTableData(connectionId, database, schema, table, 0, 0, undefined, undefined, activeFilters, { includeCount: true }),
-    enabled: countRequested,
+  const pageFilters: ColumnFilter[] =
+    cursorKey && cursor !== undefined
+      ? [
+          ...activeFilters,
+          {
+            column: cursorKey,
+            op: sort?.dir === "DESC" ? "<" : ">",
+            value: cursor,
+          },
+        ]
+      : activeFilters;
+  const {
+    data: countData,
+    isFetching: counting,
+    error: countError,
+  } = useQuery({
+    queryKey: [
+      "table-count",
+      connectionId,
+      database,
+      schema,
+      table,
+      activeFilters,
+    ],
+    queryFn: () =>
+      getTableData(
+        connectionId,
+        database,
+        schema,
+        table,
+        0,
+        0,
+        undefined,
+        undefined,
+        activeFilters,
+        { includeCount: true },
+      ),
+    enabled: countRequested && active,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
@@ -188,7 +240,7 @@ export function TableDataTab({
         pageFilters.length > 0 ? pageFilters : undefined,
         { stableColumns: pkColumns },
       ),
-    enabled: columnDefs.length > 0,
+    enabled: columnDefs.length > 0 && active,
     placeholderData: keepPreviousData,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
@@ -198,21 +250,38 @@ export function TableDataTab({
     Object.keys(pendingEdits).length > 0 ||
     pendingDeletes.size > 0 ||
     newRows.length > 0;
-  useWorkspaceGuard(tabId ?? `${connectionId}/${database}/${schema}/${table}`, committing ? "数据正在提交，请等待完成。" : hasPending ? "此表有尚未提交的数据变更，关闭将丢弃变更。" : null);
-  const pageData = useMemo(() => fetchedData ? {...fetchedData, rows: fetchedData.rows.slice(0, PAGE_SIZE)} : undefined, [fetchedData, PAGE_SIZE]);
+  useWorkspaceGuard(
+    tabId ?? `${connectionId}/${database}/${schema}/${table}`,
+    committing
+      ? "数据正在提交，请等待完成。"
+      : hasPending
+        ? "此表有尚未提交的数据变更，关闭将丢弃变更。"
+        : null,
+  );
+  const pageData = useMemo(
+    () =>
+      fetchedData
+        ? { ...fetchedData, rows: fetchedData.rows.slice(0, PAGE_SIZE) }
+        : undefined,
+    [fetchedData, PAGE_SIZE],
+  );
   const data = hasPending ? (draftData ?? pageData) : pageData;
 
-  const totalCount = countData?.totalCount ?? (data && data.totalCount >= 0 ? data.totalCount : undefined);
+  const totalCount =
+    countData?.totalCount ??
+    (data && data.totalCount >= 0 ? data.totalCount : undefined);
   const hasNextPage = fetchedData ? fetchedData.rows.length > PAGE_SIZE : false;
   const rowStart = data?.rows.length ? offset + 1 : 0;
   const rowEnd = offset + (data?.rows.length ?? 0);
   const nextPage = () => {
     if (cursorKey && data?.rows.length) {
-      const value = data.rows[data.rows.length - 1]?.[data.columns.indexOf(cursorKey)];
-      if (value != null) setPageCursors(prev => ({...prev, [page + 1]: String(value)}));
+      const value =
+        data.rows[data.rows.length - 1]?.[data.columns.indexOf(cursorKey)];
+      if (value != null)
+        setPageCursors((prev) => ({ ...prev, [page + 1]: String(value) }));
     }
     setSelectedRows(new Set());
-    setPage(p => p + 1);
+    setPage((p) => p + 1);
   };
 
   // ── Change helpers ────────────────────────────────────────────────
@@ -405,14 +474,31 @@ export function TableDataTab({
     setCommitting(true);
     setCommitError(null);
     try {
-      await executeStatements(connectionId, changeSqls, database);
+      const checks = data
+        ? generateChangeChecks({
+            dbType,
+            database,
+            schema,
+            table,
+            columns: data.columns,
+            rows: data.rows,
+            pkColumns,
+            binaryColumns,
+            pendingEdits,
+            pendingDeletes,
+            newRows,
+          })
+        : [];
+      await executeStatements(connectionId, changeSqls, database, checks);
       // Reset pending state and refresh data
       setPendingEdits({});
       setPendingDeletes(new Set());
       setNewRows([]);
       setDraftData(null);
       setSelectedRows(new Set());
-      await qc.invalidateQueries({ queryKey: ["table-count", connectionId, database, schema, table] });
+      await qc.invalidateQueries({
+        queryKey: ["table-count", connectionId, database, schema, table],
+      });
       await qc.invalidateQueries({
         queryKey: ["table-data", connectionId, database, schema, table],
       });
@@ -422,7 +508,22 @@ export function TableDataTab({
     } finally {
       setCommitting(false);
     }
-  }, [connectionId, changeSqls, qc, database, schema, table, committing]);
+  }, [
+    connectionId,
+    changeSqls,
+    qc,
+    database,
+    schema,
+    table,
+    committing,
+    data,
+    dbType,
+    pkColumns,
+    binaryColumns,
+    pendingEdits,
+    pendingDeletes,
+    newRows,
+  ]);
 
   const pendingCount =
     Object.keys(pendingEdits).length + pendingDeletes.size + newRows.length;
@@ -594,10 +695,32 @@ export function TableDataTab({
 
         <div className="flex-1" />
 
-        {data && <span className="text-xs text-muted-foreground">{rowStart}–{rowEnd} 行{totalCount !== undefined ? ` / 共 ${totalCount.toLocaleString()} 行` : ""}</span>}
-        <Button variant="ghost" size="sm" className="h-7 text-xs" disabled={counting}
-          onClick={() => setCountRequested(true)}>{counting ? "统计中…" : totalCount !== undefined ? "总数已统计" : "统计总行数"}</Button>
-        {countError && <span role="alert" className="text-xs text-destructive">总数统计失败</span>}
+        {data && (
+          <span className="text-xs text-muted-foreground">
+            {rowStart}–{rowEnd} 行
+            {totalCount !== undefined
+              ? ` / 共 ${totalCount.toLocaleString()} 行`
+              : ""}
+          </span>
+        )}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 text-xs"
+          disabled={counting}
+          onClick={() => setCountRequested(true)}
+        >
+          {counting
+            ? "统计中…"
+            : totalCount !== undefined
+              ? "总数已统计"
+              : "统计总行数"}
+        </Button>
+        {countError && (
+          <span role="alert" className="text-xs text-destructive">
+            总数统计失败
+          </span>
+        )}
 
         <Button
           variant="ghost"
@@ -605,7 +728,10 @@ export function TableDataTab({
           className="h-7 w-7 p-0"
           disabled={page === 0 || isFetching || hasPending || committing}
           aria-label="上一页"
-          onClick={() => { setSelectedRows(new Set()); setPage((p) => p - 1); }}
+          onClick={() => {
+            setSelectedRows(new Set());
+            setPage((p) => p - 1);
+          }}
         >
           <ChevronLeft className="size-4" />
         </Button>
@@ -616,9 +742,7 @@ export function TableDataTab({
           variant="ghost"
           size="sm"
           className="h-7 w-7 p-0"
-          disabled={
-            !hasNextPage || isFetching || hasPending || committing
-          }
+          disabled={!hasNextPage || isFetching || hasPending || committing}
           aria-label="下一页"
           onClick={nextPage}
         >
@@ -647,22 +771,24 @@ export function TableDataTab({
       )}
       {/* Content */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        {isLoading && (
+        {(isLoading || columnsLoading) && (
           <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
             加载中…
           </div>
         )}
-        {isError && (
+        {(isError || columnsError) && (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-destructive">
             <div className="flex items-center gap-2">
               <AlertCircle className="size-4" />
-              {isConnectionError(error) ? "连接已断开" : "加载失败"}
+              {isConnectionError(columnsError ?? error)
+                ? "连接已断开"
+                : "加载失败"}
             </div>
             <div className="text-xs text-muted-foreground">
-              {formatDbError(error)}
+              {formatDbError(columnsError ?? error)}
             </div>
-            {isConnectionError(error) && (
+            {isConnectionError(columnsError ?? error) && (
               <Button
                 variant="outline"
                 size="sm"

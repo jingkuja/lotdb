@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { ArrowRight, Loader2, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
+import {
+  ArrowRight,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  RefreshCw,
+} from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import {
   Dialog,
@@ -16,6 +22,7 @@ import {
   listObjects,
   getTableColumns,
   transferTableData,
+  cancelTransfer,
   type ColumnMap,
 } from "@/services/tauri-commands";
 import type { ConnectionConfig } from "@/types/database";
@@ -35,6 +42,7 @@ function formatEta(sec: number): string {
 }
 
 interface TransferProgressEvent {
+  transferId: string;
   current: number;
   total: number;
   rowsPerSec: number;
@@ -50,7 +58,12 @@ interface SideConfig {
   table: string;
 }
 
-const EMPTY_SIDE: SideConfig = { connectionId: "", database: "", schema: "", table: "" };
+const EMPTY_SIDE: SideConfig = {
+  connectionId: "",
+  database: "",
+  schema: "",
+  table: "",
+};
 
 interface SideSelectorProps {
   label: string;
@@ -60,7 +73,13 @@ interface SideSelectorProps {
   disabled?: boolean;
 }
 
-function SideSelector({ label, connections, value, onChange, disabled }: SideSelectorProps) {
+function SideSelector({
+  label,
+  connections,
+  value,
+  onChange,
+  disabled,
+}: SideSelectorProps) {
   const [databases, setDatabases] = useState<string[]>([]);
   const [tables, setTables] = useState<string[]>([]);
   const [loadingDbs, setLoadingDbs] = useState(false);
@@ -82,18 +101,25 @@ function SideSelector({ label, connections, value, onChange, disabled }: SideSel
     }
   }, []);
 
-  const loadTables = useCallback(async (connectionId: string, database: string, schema: string) => {
-    if (!connectionId || !database) return;
-    setLoadingTbls(true);
-    try {
-      const objs = await listObjects(connectionId, database, schema || undefined);
-      setTables(objs.tables);
-    } catch {
-      setTables([]);
-    } finally {
-      setLoadingTbls(false);
-    }
-  }, []);
+  const loadTables = useCallback(
+    async (connectionId: string, database: string, schema: string) => {
+      if (!connectionId || !database) return;
+      setLoadingTbls(true);
+      try {
+        const objs = await listObjects(
+          connectionId,
+          database,
+          schema || undefined,
+        );
+        setTables(objs.tables);
+      } catch {
+        setTables([]);
+      } finally {
+        setLoadingTbls(false);
+      }
+    },
+    [],
+  );
 
   const handleConnectionChange = (connectionId: string) => {
     onChange({ ...EMPTY_SIDE, connectionId });
@@ -105,7 +131,8 @@ function SideSelector({ label, connections, value, onChange, disabled }: SideSel
   const handleDatabaseChange = (database: string) => {
     onChange({ ...value, database, schema: isPg ? "public" : "", table: "" });
     setTables([]);
-    if (database) loadTables(value.connectionId, database, isPg ? "public" : "");
+    if (database)
+      loadTables(value.connectionId, database, isPg ? "public" : "");
   };
 
   const handleSchemaChange = (schema: string) => {
@@ -116,7 +143,9 @@ function SideSelector({ label, connections, value, onChange, disabled }: SideSel
 
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{label}</p>
+      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+        {label}
+      </p>
       {/* Connection */}
       <div>
         <Label className="text-xs mb-1 block">连接</Label>
@@ -138,7 +167,10 @@ function SideSelector({ label, connections, value, onChange, disabled }: SideSel
       {value.connectionId && (
         <div>
           <Label className="text-xs mb-1 block">
-            数据库 {loadingDbs && <Loader2 className="inline size-3 animate-spin ml-1" />}
+            数据库{" "}
+            {loadingDbs && (
+              <Loader2 className="inline size-3 animate-spin ml-1" />
+            )}
           </Label>
           <select
             disabled={disabled || loadingDbs}
@@ -148,7 +180,9 @@ function SideSelector({ label, connections, value, onChange, disabled }: SideSel
           >
             <option value="">-- 选择数据库 --</option>
             {databases.map((db) => (
-              <option key={db} value={db}>{db}</option>
+              <option key={db} value={db}>
+                {db}
+              </option>
             ))}
           </select>
         </div>
@@ -170,7 +204,10 @@ function SideSelector({ label, connections, value, onChange, disabled }: SideSel
       {value.database && (
         <div>
           <Label className="text-xs mb-1 block">
-            表 {loadingTbls && <Loader2 className="inline size-3 animate-spin ml-1" />}
+            表{" "}
+            {loadingTbls && (
+              <Loader2 className="inline size-3 animate-spin ml-1" />
+            )}
           </Label>
           <select
             disabled={disabled || loadingTbls}
@@ -180,7 +217,9 @@ function SideSelector({ label, connections, value, onChange, disabled }: SideSel
           >
             <option value="">-- 选择表 --</option>
             {tables.map((t) => (
-              <option key={t} value={t}>{t}</option>
+              <option key={t} value={t}>
+                {t}
+              </option>
             ))}
           </select>
         </div>
@@ -201,20 +240,32 @@ interface ColMapRowProps {
 
 const SKIP = "__skip__";
 
-function ColMapRow({ srcCol, tgtColumns, value, onChange, disabled }: ColMapRowProps) {
+function ColMapRow({
+  srcCol,
+  tgtColumns,
+  value,
+  onChange,
+  disabled,
+}: ColMapRowProps) {
   return (
     <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-      <span className="truncate rounded bg-muted px-2 py-0.5 font-mono text-xs">{srcCol}</span>
+      <span className="truncate rounded bg-muted px-2 py-0.5 font-mono text-xs">
+        {srcCol}
+      </span>
       <ArrowRight className="size-3 shrink-0 text-muted-foreground" />
       <select
         disabled={disabled}
         value={value ?? SKIP}
-        onChange={(e) => onChange(e.target.value === SKIP ? null : e.target.value)}
+        onChange={(e) =>
+          onChange(e.target.value === SKIP ? null : e.target.value)
+        }
         className="w-full rounded border border-border bg-background px-2 py-0.5 text-xs disabled:opacity-50"
       >
         <option value={SKIP}>-- 跳过 --</option>
         {tgtColumns.map((c) => (
-          <option key={c} value={c}>{c}</option>
+          <option key={c} value={c}>
+            {c}
+          </option>
         ))}
       </select>
     </div>
@@ -230,7 +281,12 @@ interface DataTransferDialogProps {
   onOpenChange: (open: boolean) => void;
   connections: ConnectionConfig[];
   /** Pre-fill source side when opened from a table context */
-  defaultSrc?: { connectionId: string; database: string; schema?: string; table: string };
+  defaultSrc?: {
+    connectionId: string;
+    database: string;
+    schema?: string;
+    table: string;
+  };
 }
 
 export function DataTransferDialog({
@@ -262,12 +318,15 @@ export function DataTransferDialog({
   const [resultRows, setResultRows] = useState(0);
 
   const mountedRef = useRef(true);
+  const transferIdRef = useRef<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const addTask = useTaskStore((s) => s.addTask);
   const updateTask = useTaskStore((s) => s.updateTask);
 
   // Reset on open
   useEffect(() => {
-    if (open) {
+    mountedRef.current = open;
+    if (open && !transferIdRef.current) {
       mountedRef.current = true;
       setStep("config");
       setSrc(
@@ -301,16 +360,30 @@ export function DataTransferDialog({
   }, [open, defaultSrc]);
 
   const canGoToMapping =
-    src.connectionId && src.database && src.table &&
-    tgt.connectionId && tgt.database && tgt.table;
+    src.connectionId &&
+    src.database &&
+    src.table &&
+    tgt.connectionId &&
+    tgt.database &&
+    tgt.table;
 
   const loadColumns = useCallback(async () => {
     if (!canGoToMapping) return;
     setLoadingCols(true);
     try {
       const [srcCols, tgtCols] = await Promise.all([
-        getTableColumns(src.connectionId, src.database, src.schema || undefined, src.table),
-        getTableColumns(tgt.connectionId, tgt.database, tgt.schema || undefined, tgt.table),
+        getTableColumns(
+          src.connectionId,
+          src.database,
+          src.schema || undefined,
+          src.table,
+        ),
+        getTableColumns(
+          tgt.connectionId,
+          tgt.database,
+          tgt.schema || undefined,
+          tgt.table,
+        ),
       ]);
       const srcNames = srcCols.map((c) => c.name);
       const tgtNames = tgtCols.map((c) => c.name);
@@ -339,6 +412,8 @@ export function DataTransferDialog({
 
     const limit = parseInt(limitStr, 10) || 0;
     const taskId = newTaskId();
+    transferIdRef.current = taskId;
+    setCancelling(false);
     addTask({
       id: taskId,
       kind: "transfer",
@@ -357,29 +432,50 @@ export function DataTransferDialog({
       setRowsTotal(0);
     }
 
-    const unlisten = await listen<TransferProgressEvent>("transfer-progress", (event) => {
-      const p = event.payload;
-      const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
-      updateTask(taskId, { progress: pct, rowsDone: p.current, rowsPerSec: p.rowsPerSec });
-      if (mountedRef.current) {
-        setProgress(pct);
-        setRowsDone(p.current);
-        setRowsTotal(p.total);
-        setSpeed(p.rowsPerSec);
-        setEta(p.etaSec);
-      }
-    });
-
+    let unlisten = () => {};
     try {
+      unlisten = await listen<TransferProgressEvent>(
+        "transfer-progress",
+        (event) => {
+          const p = event.payload;
+          if (p.transferId !== taskId) return;
+          const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+          updateTask(taskId, {
+            progress: p.total > 0 ? pct : null,
+            rowsDone: p.current,
+            rowsPerSec: p.rowsPerSec,
+          });
+          if (mountedRef.current) {
+            setProgress(pct);
+            setRowsDone(p.current);
+            setRowsTotal(p.total);
+            setSpeed(p.rowsPerSec);
+            setEta(p.etaSec);
+          }
+        },
+      );
+
       const res = await transferTableData(
-        src.connectionId, src.database, src.schema || undefined, src.table,
-        tgt.connectionId, tgt.database, tgt.schema || undefined, tgt.table,
+        src.connectionId,
+        src.database,
+        src.schema || undefined,
+        src.table,
+        tgt.connectionId,
+        tgt.database,
+        tgt.schema || undefined,
+        tgt.table,
         colMapping,
         truncateFirst,
         whereClause || undefined,
         limit,
+        taskId,
       );
-      updateTask(taskId, { status: "done", rowsDone: res.rowsTransferred, progress: 100 });
+      updateTask(taskId, {
+        status: res.errorMessage ? "error" : "done",
+        errorMessage: res.errorMessage,
+        rowsDone: res.rowsTransferred,
+        progress: res.errorMessage ? null : 100,
+      });
       if (mountedRef.current) {
         setProgress(100);
         setResultRows(res.rowsTransferred);
@@ -394,11 +490,19 @@ export function DataTransferDialog({
         setStep("done");
       }
     } finally {
+      transferIdRef.current = null;
       unlisten();
     }
   }, [
-    src, tgt, srcColumns, mapping, limitStr, whereClause, truncateFirst,
-    addTask, updateTask,
+    src,
+    tgt,
+    srcColumns,
+    mapping,
+    limitStr,
+    whereClause,
+    truncateFirst,
+    addTask,
+    updateTask,
   ]);
 
   return (
@@ -430,7 +534,9 @@ export function DataTransferDialog({
             <div className="flex flex-col gap-2 border-t border-border pt-3">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs mb-1 block">WHERE 条件（可选）</Label>
+                  <Label className="text-xs mb-1 block">
+                    WHERE 条件（可选）
+                  </Label>
                   <Input
                     value={whereClause}
                     onChange={(e) => setWhereClause(e.target.value)}
@@ -439,7 +545,9 @@ export function DataTransferDialog({
                   />
                 </div>
                 <div>
-                  <Label className="text-xs mb-1 block">限制行数（0 = 不限）</Label>
+                  <Label className="text-xs mb-1 block">
+                    限制行数（0 = 不限）
+                  </Label>
                   <Input
                     value={limitStr}
                     onChange={(e) => setLimitStr(e.target.value)}
@@ -468,7 +576,10 @@ export function DataTransferDialog({
                 onClick={loadColumns}
               >
                 {loadingCols ? (
-                  <><Loader2 className="size-3.5 mr-1.5 animate-spin" />加载列…</>
+                  <>
+                    <Loader2 className="size-3.5 mr-1.5 animate-spin" />
+                    加载列…
+                  </>
                 ) : (
                   <>下一步：列映射</>
                 )}
@@ -501,7 +612,11 @@ export function DataTransferDialog({
             <div className="flex gap-1.5 text-xs text-muted-foreground">
               <button
                 className="underline"
-                onClick={() => setMapping(srcColumns.map((s) => (tgtColumns.includes(s) ? s : null)))}
+                onClick={() =>
+                  setMapping(
+                    srcColumns.map((s) => (tgtColumns.includes(s) ? s : null)),
+                  )
+                }
               >
                 自动匹配
               </button>
@@ -517,9 +632,7 @@ export function DataTransferDialog({
               <Button variant="outline" onClick={() => setStep("config")}>
                 上一步
               </Button>
-              <Button onClick={handleTransfer}>
-                开始传输
-              </Button>
+              <Button onClick={handleTransfer}>开始传输</Button>
             </DialogFooter>
           </div>
         )}
@@ -535,20 +648,45 @@ export function DataTransferDialog({
             </div>
             <div className="flex flex-col gap-1">
               <div className="flex justify-between text-xs text-muted-foreground">
-                <span>{rowsDone.toLocaleString()} / {rowsTotal > 0 ? rowsTotal.toLocaleString() : "?"} 行</span>
-                <span>{formatSpeed(speed)}{eta > 0 ? `，剩余 ${formatEta(eta)}` : ""}</span>
+                <span>
+                  {rowsDone.toLocaleString()} /{" "}
+                  {rowsTotal > 0 ? rowsTotal.toLocaleString() : "?"} 行
+                </span>
+                <span>
+                  {formatSpeed(speed)}
+                  {eta > 0 ? `，剩余 ${formatEta(eta)}` : ""}
+                </span>
               </div>
               <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
                 <div
                   className="h-full rounded-full bg-primary transition-all"
-                  style={{ width: `${progress}%` }}
+                  style={{ width: rowsTotal > 0 ? `${progress}%` : "35%" }}
                 />
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">传输在后台进行，可关闭此对话框</p>
+            <p className="text-xs text-muted-foreground">
+              按批次提交；取消后已提交数据会保留。可关闭此对话框，在底部任务栏查看进度。
+            </p>
             <DialogFooter>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 后台运行
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={cancelling}
+                onClick={async () => {
+                  if (transferIdRef.current) {
+                    setCancelling(true);
+                    try {
+                      await cancelTransfer(transferIdRef.current);
+                    } catch (error) {
+                      setCancelling(false);
+                      setResultError(String(error));
+                    }
+                  }
+                }}
+              >
+                {cancelling ? "正在取消…" : "取消传输"}
               </Button>
             </DialogFooter>
           </div>
@@ -564,7 +702,9 @@ export function DataTransferDialog({
                   <span className="text-sm font-medium">传输出现错误</span>
                   <span className="text-xs">{resultError}</span>
                   {resultRows > 0 && (
-                    <span className="text-xs text-muted-foreground">{resultRows.toLocaleString()} 行已成功传输</span>
+                    <span className="text-xs text-muted-foreground">
+                      {resultRows.toLocaleString()} 行已成功传输
+                    </span>
                   )}
                 </div>
               </div>

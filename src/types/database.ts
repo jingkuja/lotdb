@@ -43,7 +43,16 @@ export interface ConnectionGroup {
 
 export interface DatabaseObject {
   name: string;
-  type: "database" | "schema" | "table" | "view" | "function" | "procedure" | "trigger" | "sequence" | "enum";
+  type:
+    | "database"
+    | "schema"
+    | "table"
+    | "view"
+    | "function"
+    | "procedure"
+    | "trigger"
+    | "sequence"
+    | "enum";
   schema?: string;
   database?: string;
 }

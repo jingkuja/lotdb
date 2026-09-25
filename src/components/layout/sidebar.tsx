@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { pendingWorkspaceMessages } from "@/lib/workspace-guards";
+import { useState, useEffect } from "react";
 import {
   ChevronRight,
   ChevronDown,
@@ -73,6 +74,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [importExportOpen, setImportExportOpen] = useState(false);
@@ -135,7 +137,6 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
     });
   };
 
-
   const toggleExpand = (id: string) => {
     setExpandedIds((prev) => {
       const next = new Set(prev);
@@ -193,17 +194,29 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
     setActiveConnection(conn.id);
     if (!openPoolIds.has(conn.id)) {
       try {
+        setConnectionError(null);
         await openConnection(conn);
         markPoolOpen(conn.id);
         // Auto-expand tree once connected
         setExpandedIds((prev) => new Set([...prev, conn.id]));
-      } catch {
-        // Silently ignore — tree will show error state
+      } catch (error) {
+        setConnectionError(`${conn.name}：${String(error)}`);
       }
     }
   };
 
   const handleDisconnect = async (id: string) => {
+    const messages = useWorkspaceStore
+      .getState()
+      .tabs.filter((tab) => tab.connectionId === id)
+      .flatMap((tab) => pendingWorkspaceMessages(tab.id));
+    if (
+      messages.length &&
+      !window.confirm(
+        messages.join("\n") + "\n仍要断开连接？未提交事务将回滚。",
+      )
+    )
+      return;
     await closeConnection(id);
     markPoolClosed(id);
     setExpandedIds((prev) => {
@@ -218,6 +231,15 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
     setEditingConn(undefined);
     setDialogOpen(true);
   };
+
+  useEffect(() => {
+    const create = () => {
+      setEditingConn(undefined);
+      setDialogOpen(true);
+    };
+    window.addEventListener("lotdb:new-connection", create);
+    return () => window.removeEventListener("lotdb:new-connection", create);
+  }, []);
 
   const handleEditConnection = (conn: ConnectionConfig) => {
     setEditingConn(conn);
@@ -356,7 +378,11 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="ghost" size="icon-xs" onClick={() => setPrefsOpen(true)}>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => setPrefsOpen(true)}
+            >
               <Settings className="size-4" />
             </Button>
           </TooltipTrigger>
@@ -367,6 +393,14 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
       {/* Tree */}
       <ScrollArea className="flex-1">
         <div className="p-1">
+          {connectionError && (
+            <p
+              role="alert"
+              className="break-words rounded bg-destructive/10 p-2 text-xs text-destructive"
+            >
+              {connectionError}
+            </p>
+          )}
           <RecentPanel />
           {isLoading && (
             <div className="flex items-center gap-2 px-2 py-4 text-xs text-muted-foreground">
@@ -397,130 +431,127 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
 
           {(() => {
             const renderConnection = (conn: ConnectionConfig) => {
-            const isOpen = openPoolIds.has(conn.id);
-            const isActive = activeConnectionId === conn.id;
-            const isExpanded = expandedIds.has(conn.id);
+              const isOpen = openPoolIds.has(conn.id);
+              const isActive = activeConnectionId === conn.id;
+              const isExpanded = expandedIds.has(conn.id);
 
-            return (
-              <div key={conn.id}>
-                {/* Connection row */}
-                <div
-                  className={cn(
-                    "group flex items-center gap-1.5 rounded-md px-1 py-1 text-sm cursor-pointer",
-                    isActive
-                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                      : "hover:bg-sidebar-accent/50",
-                  )}
-                  onClick={() => {
-                    setActiveConnection(conn.id);
-                    if (isOpen) {
-                      toggleExpand(conn.id);
-                    } else {
-                      handleConnect(conn);
-                    }
-                  }}
-                >
-                  {/* Expand chevron */}
-                  <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
-                    {isOpen ? (
-                      isExpanded ? (
-                        <ChevronDown className="size-3.5" />
-                      ) : (
-                        <ChevronRight className="size-3.5" />
-                      )
-                    ) : null}
-                  </span>
-
-                  {/* DB type badge */}
-                  <span
+              return (
+                <div key={conn.id}>
+                  {/* Connection row */}
+                  <div
                     className={cn(
-                      "flex size-5 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white",
-                      conn.dbType === "mysql" ? "bg-blue-600" : "bg-sky-700",
-                      isOpen && "ring-2 ring-green-400",
+                      "group flex items-center gap-1.5 rounded-md px-1 py-1 text-sm cursor-pointer",
+                      isActive
+                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                        : "hover:bg-sidebar-accent/50",
                     )}
+                    onClick={() => {
+                      setActiveConnection(conn.id);
+                      if (isOpen) {
+                        toggleExpand(conn.id);
+                      } else {
+                        handleConnect(conn);
+                      }
+                    }}
                   >
-                    {dbBadge(conn.dbType)}
-                  </span>
+                    {/* Expand chevron */}
+                    <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
+                      {isOpen ? (
+                        isExpanded ? (
+                          <ChevronDown className="size-3.5" />
+                        ) : (
+                          <ChevronRight className="size-3.5" />
+                        )
+                      ) : null}
+                    </span>
 
-                  <span className="min-w-0 flex-1 truncate text-sm">
-                    {conn.name}
-                  </span>
-                  {conn.readonly && (
-                    <Lock
-                      className="size-3 shrink-0 text-amber-500"
-                      aria-label="只读模式"
-                    />
-                  )}
+                    {/* DB type badge */}
+                    <span
+                      className={cn(
+                        "flex size-5 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white",
+                        conn.dbType === "mysql" ? "bg-blue-600" : "bg-sky-700",
+                        isOpen && "ring-2 ring-green-400",
+                      )}
+                    >
+                      {dbBadge(conn.dbType)}
+                    </span>
 
-                  {/* Action buttons — visible on hover */}
-                  <div className="flex shrink-0 gap-0.5 opacity-0 group-hover:opacity-100">
-                    {isOpen ? (
-                      <>
+                    <span className="min-w-0 flex-1 truncate text-sm">
+                      {conn.name}
+                    </span>
+                    {conn.readonly && (
+                      <Lock
+                        className="size-3 shrink-0 text-amber-500"
+                        aria-label="只读模式"
+                      />
+                    )}
+
+                    {/* Action buttons — visible on hover */}
+                    <div className="flex shrink-0 gap-0.5 opacity-0 group-hover:opacity-100">
+                      {isOpen ? (
+                        <>
+                          <button
+                            className="rounded p-0.5 hover:bg-sidebar-border"
+                            title="新建查询"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleNewQuery(conn.id);
+                            }}
+                          >
+                            <Terminal className="size-3" />
+                          </button>
+                          <button
+                            className="rounded p-0.5 hover:bg-sidebar-border"
+                            title="断开连接"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDisconnect(conn.id);
+                            }}
+                          >
+                            <Unplug className="size-3" />
+                          </button>
+                        </>
+                      ) : (
                         <button
                           className="rounded p-0.5 hover:bg-sidebar-border"
-                          title="新建查询"
+                          title="连接"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleNewQuery(conn.id);
+                            handleConnect(conn);
                           }}
                         >
-                          <Terminal className="size-3" />
+                          <Wifi className="size-3" />
                         </button>
-                        <button
-                          className="rounded p-0.5 hover:bg-sidebar-border"
-                          title="断开连接"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDisconnect(conn.id);
-                          }}
-                        >
-                          <Unplug className="size-3" />
-                        </button>
-                      </>
-                    ) : (
+                      )}
                       <button
                         className="rounded p-0.5 hover:bg-sidebar-border"
-                        title="连接"
+                        title="编辑"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleConnect(conn);
+                          handleEditConnection(conn);
                         }}
                       >
-                        <Wifi className="size-3" />
+                        <Pencil className="size-3" />
                       </button>
-                    )}
-                    <button
-                      className="rounded p-0.5 hover:bg-sidebar-border"
-                      title="编辑"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleEditConnection(conn);
-                      }}
-                    >
-                      <Pencil className="size-3" />
-                    </button>
-                    <button
-                      className="rounded p-0.5 hover:bg-destructive/20 hover:text-destructive"
-                      title="删除"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDelete(conn.id);
-                      }}
-                    >
-                      <Trash2 className="size-3" />
-                    </button>
+                      <button
+                        className="rounded p-0.5 hover:bg-destructive/20 hover:text-destructive"
+                        title="删除"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDelete(conn.id);
+                        }}
+                      >
+                        <Trash2 className="size-3" />
+                      </button>
+                    </div>
                   </div>
-                </div>
 
-                {/* Object tree — shown when connected + expanded */}
-                {isOpen && isExpanded && (
-                  <ObjectTree
-                    connectionId={conn.id}
-                    dbType={conn.dbType}
-                  />
-                )}
-              </div>
-            );
+                  {/* Object tree — shown when connected + expanded */}
+                  {isOpen && isExpanded && (
+                    <ObjectTree connectionId={conn.id} dbType={conn.dbType} />
+                  )}
+                </div>
+              );
             };
 
             const ungrouped = connections.filter((c) => !c.groupId);
@@ -528,7 +559,9 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
               <>
                 {ungrouped.map((conn) => renderConnection(conn))}
                 {groups.map((g) => {
-                  const groupConns = connections.filter((c) => c.groupId === g.id);
+                  const groupConns = connections.filter(
+                    (c) => c.groupId === g.id,
+                  );
                   const gExpanded = expandedGroups.has(g.id);
                   return (
                     <div key={g.id}>
@@ -576,7 +609,8 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
                           </button>
                         </div>
                       </div>
-                      {gExpanded && groupConns.map((conn) => renderConnection(conn))}
+                      {gExpanded &&
+                        groupConns.map((conn) => renderConnection(conn))}
                     </div>
                   );
                 })}

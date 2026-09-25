@@ -284,6 +284,33 @@ fn pg_array_elem(s: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// Binary values carry a type tag in exports; text beginning with \x stays text.
+pub fn mysql_export_value(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
+    let value = mysql_value_to_json(row, i);
+    let t = row.column(i).type_info().name().to_ascii_lowercase();
+    if t.contains("blob") || t.contains("binary") || t == "geometry" || t == "point" {
+        if let Some(s) = value.as_str().and_then(|s| s.strip_prefix("\\x")) {
+            return serde_json::json!({"$lotdbBinary": s});
+        }
+    }
+    value
+}
+
+pub fn pg_export_value(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
+    let value = pg_value_to_json(row, i);
+    if row
+        .column(i)
+        .type_info()
+        .name()
+        .eq_ignore_ascii_case("bytea")
+    {
+        if let Some(s) = value.as_str().and_then(|s| s.strip_prefix("\\x")) {
+            return serde_json::json!({"$lotdbBinary": s});
+        }
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,31 +343,4 @@ mod tests {
         assert_eq!(pg_array_elem("q\"x"), "\"q\\\"x\"");
         assert_eq!(pg_array_elem("back\\slash"), "\"back\\\\slash\"");
     }
-}
-
-/// Binary values carry a type tag in exports; text beginning with \x stays text.
-pub fn mysql_export_value(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
-    let value = mysql_value_to_json(row, i);
-    let t = row.column(i).type_info().name().to_ascii_lowercase();
-    if t.contains("blob") || t.contains("binary") || t == "geometry" || t == "point" {
-        if let Some(s) = value.as_str().and_then(|s| s.strip_prefix("\\x")) {
-            return serde_json::json!({"$lotdbBinary": s});
-        }
-    }
-    value
-}
-
-pub fn pg_export_value(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
-    let value = pg_value_to_json(row, i);
-    if row
-        .column(i)
-        .type_info()
-        .name()
-        .eq_ignore_ascii_case("bytea")
-    {
-        if let Some(s) = value.as_str().and_then(|s| s.strip_prefix("\\x")) {
-            return serde_json::json!({"$lotdbBinary": s});
-        }
-    }
-    value
 }

@@ -1,10 +1,20 @@
+import { cancelTransfer } from "@/services/tauri-commands";
 import { useState } from "react";
-import { Loader2, CheckCircle2, XCircle, ChevronUp, ChevronDown, X } from "lucide-react";
+import {
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  ChevronUp,
+  ChevronDown,
+  X,
+} from "lucide-react";
 import { useTaskStore, type BgTask } from "@/stores/task-store";
 
 // ─── Single task row ──────────────────────────────────────────────
 
 function TaskRow({ task }: { task: BgTask }) {
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const removeTask = useTaskStore((s) => s.removeTask);
 
   return (
@@ -45,13 +55,39 @@ function TaskRow({ task }: { task: BgTask }) {
           </div>
         )}
         {task.status === "done" && (
-          <p className="text-[10px] text-muted-foreground">{task.rowsDone.toLocaleString()} 行</p>
+          <p className="text-[10px] text-muted-foreground">
+            {task.rowsDone.toLocaleString()} 行
+          </p>
         )}
         {task.status === "error" && task.errorMessage && (
-          <p className="truncate text-[10px] text-destructive">{task.errorMessage}</p>
+          <p className="truncate text-[10px] text-destructive">
+            {task.errorMessage}
+          </p>
         )}
       </div>
 
+      {cancelError && (
+        <span role="alert" className="text-xs text-destructive">
+          {cancelError}
+        </span>
+      )}
+      {task.status === "running" && task.kind === "transfer" && (
+        <button
+          disabled={cancelling}
+          className="text-xs text-destructive"
+          onClick={async () => {
+            setCancelling(true);
+            try {
+              await cancelTransfer(task.id);
+            } catch (error) {
+              setCancelError(String(error));
+              setCancelling(false);
+            }
+          }}
+        >
+          {cancelling ? "取消中" : "取消"}
+        </button>
+      )}
       {/* Close (only when done/error) */}
       {task.status !== "running" && (
         <button
@@ -98,7 +134,10 @@ export function TaskStatusBar() {
           {doneCount > 0 && !collapsed && (
             <button
               className="text-[10px] text-muted-foreground hover:text-foreground"
-              onClick={(e) => { e.stopPropagation(); clearDone(); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                clearDone();
+              }}
             >
               清除已完成
             </button>

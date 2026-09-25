@@ -1,18 +1,55 @@
+import { Button } from "@/components/ui/button";
 import { lazy, Suspense } from "react";
 import { TabActiveContext } from "@/hooks/use-tab-active";
 import { RecentPanel } from "./recent-panel";
 import { useWorkspaceStore, type Tab } from "@/stores/workspace-store";
 import { TableStructurePanel } from "@/components/explorer/table-structure-panel";
-const ObjectDdlTab = lazy(() => import("@/components/explorer/object-ddl-tab").then(m => ({default: m.ObjectDdlTab})));
-const SequenceManagerTab = lazy(() => import("@/components/explorer/sequence-manager-tab").then(m => ({default: m.SequenceManagerTab})));
-const EnumManagerTab = lazy(() => import("@/components/explorer/enum-manager-tab").then(m => ({default: m.EnumManagerTab})));
-const QueryTab = lazy(() => import("@/components/editor/query-tab").then(m => ({default: m.QueryTab})));
+const ObjectDdlTab = lazy(() =>
+  import("@/components/explorer/object-ddl-tab").then((m) => ({
+    default: m.ObjectDdlTab,
+  })),
+);
+const SequenceManagerTab = lazy(() =>
+  import("@/components/explorer/sequence-manager-tab").then((m) => ({
+    default: m.SequenceManagerTab,
+  })),
+);
+const EnumManagerTab = lazy(() =>
+  import("@/components/explorer/enum-manager-tab").then((m) => ({
+    default: m.EnumManagerTab,
+  })),
+);
+const QueryTab = lazy(() =>
+  import("@/components/editor/query-tab").then((m) => ({
+    default: m.QueryTab,
+  })),
+);
 import { TableDataTab } from "@/components/grid/table-data-tab";
-const TableDesignerTab = lazy(() => import("@/components/designer/table-designer-tab").then(m => ({default: m.TableDesignerTab})));
-const UserManagementTab = lazy(() => import("@/components/admin/user-management-tab").then(m => ({default: m.UserManagementTab})));
-const ProcessListTab = lazy(() => import("@/components/admin/process-list-tab").then(m => ({default: m.ProcessListTab})));
-const DiskUsageTab = lazy(() => import("@/components/admin/disk-usage-tab").then(m => ({default: m.DiskUsageTab})));
-const SchemaDiffTab = lazy(() => import("@/components/admin/schema-diff-tab").then(m => ({default: m.SchemaDiffTab})));
+const TableDesignerTab = lazy(() =>
+  import("@/components/designer/table-designer-tab").then((m) => ({
+    default: m.TableDesignerTab,
+  })),
+);
+const UserManagementTab = lazy(() =>
+  import("@/components/admin/user-management-tab").then((m) => ({
+    default: m.UserManagementTab,
+  })),
+);
+const ProcessListTab = lazy(() =>
+  import("@/components/admin/process-list-tab").then((m) => ({
+    default: m.ProcessListTab,
+  })),
+);
+const DiskUsageTab = lazy(() =>
+  import("@/components/admin/disk-usage-tab").then((m) => ({
+    default: m.DiskUsageTab,
+  })),
+);
+const SchemaDiffTab = lazy(() =>
+  import("@/components/admin/schema-diff-tab").then((m) => ({
+    default: m.SchemaDiffTab,
+  })),
+);
 import { useConnections } from "@/hooks/use-connections";
 import { useQuery } from "@tanstack/react-query";
 import { getTableDesignerState } from "@/lib/designer-loader";
@@ -23,12 +60,14 @@ import type { DesignerState } from "@/types/designer";
 // ─── Loader for existing-table designer ──────────────────────────
 
 function DesignerLoader({
+  tabId,
   connectionId,
   dbType,
   database,
   schema,
   tableName,
 }: {
+  tabId: string;
   connectionId: string;
   dbType: DatabaseType;
   database: string;
@@ -62,6 +101,7 @@ function DesignerLoader({
 
   return (
     <TableDesignerTab
+      tabId={tabId}
       key={`${connectionId}/${database}/${schema}/${tableName}`}
       connectionId={connectionId}
       dbType={dbType}
@@ -76,9 +116,22 @@ export function MainContent() {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
         <Database className="size-12 opacity-30" />
-        <p className="text-lg font-medium text-foreground">继续你的数据库工作</p>
-        <p className="text-sm">从左侧连接数据库，按 Cmd+N 创建查询。SQL 草稿随工作区自动恢复。</p>
-        <div className="mt-4 w-full max-w-lg rounded-lg border bg-card p-3"><RecentPanel limit={8} /></div>
+        <p className="text-lg font-medium text-foreground">
+          继续你的数据库工作
+        </p>
+        <p className="text-sm">
+          从左侧连接数据库，按 Cmd+N 创建查询。SQL 草稿随工作区自动恢复。
+        </p>
+        <Button
+          onClick={() =>
+            window.dispatchEvent(new Event("lotdb:new-connection"))
+          }
+        >
+          新建连接
+        </Button>
+        <div className="mt-4 w-full max-w-lg rounded-lg border bg-card p-3">
+          <RecentPanel limit={8} />
+        </div>
       </div>
     );
   }
@@ -93,7 +146,13 @@ export function MainContent() {
           }
         >
           <TabActiveContext.Provider value={tab.id === activeTabId}>
-            <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">加载工作区…</div>}>
+            <Suspense
+              fallback={
+                <div className="p-4 text-sm text-muted-foreground">
+                  加载工作区…
+                </div>
+              }
+            >
               <TabContent activeTab={tab} />
             </Suspense>
           </TabActiveContext.Provider>
@@ -161,6 +220,7 @@ function TabContent({ activeTab }: { activeTab: Tab }) {
     if (meta?.objectName) {
       return (
         <DesignerLoader
+          tabId={activeTab.id}
           connectionId={activeTab.connectionId}
           dbType={dbType}
           database={meta.database as string}
@@ -170,7 +230,11 @@ function TabContent({ activeTab }: { activeTab: Tab }) {
       );
     }
     return (
-      <TableDesignerTab connectionId={activeTab.connectionId} dbType={dbType} />
+      <TableDesignerTab
+        tabId={activeTab.id}
+        connectionId={activeTab.connectionId}
+        dbType={dbType}
+      />
     );
   }
 

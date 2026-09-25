@@ -1,3 +1,5 @@
+import { useConnectionStore } from "@/stores/connection-store";
+import { openConnection } from "@/services/tauri-commands";
 import { useState } from "react";
 import {
   ChevronDown,
@@ -38,29 +40,49 @@ function RecentRow({ item }: { item: RecentItem }) {
   const conn = connections.find((c) => c.id === item.connectionId);
   const Icon = ICON_MAP[item.type] ?? Terminal;
 
-  const handleOpen = () => {
-    // If tab already open, just switch to it
-    const existing = tabs.find((t) => {
-      const meta = t.metadata as Record<string, unknown> | undefined;
-      const iMeta = item.metadata as Record<string, unknown> | undefined;
-      return (
-        t.type === item.type &&
-        t.connectionId === item.connectionId &&
-        meta?.database === iMeta?.database &&
-        meta?.objectName === iMeta?.objectName
-      );
-    });
-    if (existing) {
-      setActiveTab(existing.id);
-      return;
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const handleOpen = async () => {
+    if (!conn || opening) return;
+    setOpening(true);
+    setOpenError(null);
+    try {
+      const connections = useConnectionStore.getState();
+      if (!connections.openPoolIds.has(conn.id)) {
+        await openConnection(conn);
+        connections.markPoolOpen(conn.id);
+      }
+      // If tab already open, just switch to it
+      const existing = tabs.find((t) => {
+        const meta = t.metadata as Record<string, unknown> | undefined;
+        const iMeta = item.metadata as Record<string, unknown> | undefined;
+        return (
+          t.type === item.type &&
+          t.connectionId === item.connectionId &&
+          meta?.database === iMeta?.database &&
+          meta?.schema === iMeta?.schema &&
+          meta?.managerKind === iMeta?.managerKind &&
+          meta?.ddlKind === iMeta?.ddlKind &&
+          meta?.table === iMeta?.table &&
+          meta?.objectName === iMeta?.objectName
+        );
+      });
+      if (existing) {
+        setActiveTab(existing.id);
+        return;
+      }
+      addTab({
+        id: `recent-${item.key}-${Date.now()}`,
+        type: item.type,
+        title: item.title,
+        connectionId: item.connectionId,
+        metadata: item.metadata,
+      });
+    } catch (error) {
+      setOpenError(String(error));
+    } finally {
+      setOpening(false);
     }
-    addTab({
-      id: `recent-${item.key}-${Date.now()}`,
-      type: item.type,
-      title: item.title,
-      connectionId: item.connectionId,
-      metadata: item.metadata,
-    });
   };
 
   return (
@@ -68,12 +90,31 @@ function RecentRow({ item }: { item: RecentItem }) {
       <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
         <Icon className="size-3" />
       </span>
-      <span
-        className="min-w-0 flex-1 truncate text-[11px] text-sidebar-foreground"
+      <button
+        type="button"
+        disabled={!conn || opening}
+        title={
+          openError ??
+          (!conn
+            ? "连接已删除"
+            : [
+                conn.name,
+                item.metadata?.database,
+                item.metadata?.schema,
+                item.title,
+              ]
+                .filter(Boolean)
+                .join(" / "))
+        }
+        className="min-w-0 flex-1 text-left disabled:opacity-50 truncate text-[11px] text-sidebar-foreground"
         onClick={handleOpen}
       >
-        {item.title}
-      </span>
+        {opening
+          ? "连接中…"
+          : openError
+            ? `连接失败：${openError}`
+            : item.title}
+      </button>
       {conn && (
         <span className="shrink-0 text-[10px] text-muted-foreground mr-1">
           {conn.name}

@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Loader2,
@@ -116,10 +116,21 @@ function CreateUserForm({
         </p>
       )}
       <div className="flex gap-2">
-        <Button type="submit" size="sm" className="h-7 flex-1 text-xs" disabled={loading || !username.trim()}>
+        <Button
+          type="submit"
+          size="sm"
+          className="h-7 flex-1 text-xs"
+          disabled={loading || !username.trim()}
+        >
           {loading ? <Loader2 className="size-3 animate-spin" /> : "创建"}
         </Button>
-        <Button type="button" size="sm" variant="outline" className="h-7 text-xs" onClick={onCancel}>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-7 text-xs"
+          onClick={onCancel}
+        >
           取消
         </Button>
       </div>
@@ -151,8 +162,14 @@ function UserList({
 
   const handleDrop = async (user: UserInfo, e: React.MouseEvent) => {
     e.stopPropagation();
-    const label = dbType === "mysql" ? `${user.username}@${user.host}` : user.username;
-    if (!confirm(`确定要删除${dbType === "mysql" ? "用户" : "角色"} "${label}" 吗？`)) return;
+    const label =
+      dbType === "mysql" ? `${user.username}@${user.host}` : user.username;
+    if (
+      !confirm(
+        `确定要删除${dbType === "mysql" ? "用户" : "角色"} "${label}" 吗？`,
+      )
+    )
+      return;
     const key = `${user.username}@${user.host}`;
     setDropping(key);
     try {
@@ -220,13 +237,16 @@ function UserList({
               className={cn(
                 "group flex cursor-pointer items-center gap-1.5 rounded px-2 py-1.5 text-xs",
                 "hover:bg-sidebar-accent/60",
-                isSelected && "bg-sidebar-accent text-sidebar-accent-foreground",
+                isSelected &&
+                  "bg-sidebar-accent text-sidebar-accent-foreground",
               )}
               onClick={() => onSelect(user)}
             >
               <User className="size-3 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
-                <p className="truncate font-mono font-medium">{user.username}</p>
+                <p className="truncate font-mono font-medium">
+                  {user.username}
+                </p>
                 {dbType === "mysql" && (
                   <p className="truncate text-[10px] text-muted-foreground">
                     @{user.host}
@@ -309,7 +329,9 @@ function DbPrivRow({
 
   return (
     <div className="flex items-center gap-3 border-b border-border/50 px-3 py-1.5 last:border-b-0 hover:bg-muted/30">
-      <span className="min-w-0 flex-1 truncate font-mono text-xs">{dbName}</span>
+      <span className="min-w-0 flex-1 truncate font-mono text-xs">
+        {dbName}
+      </span>
       {grant ? (
         <>
           <div className="flex items-center gap-1 text-[11px] text-green-600 dark:text-green-400">
@@ -323,7 +345,11 @@ function DbPrivRow({
             disabled={loading !== null}
             onClick={handleRevoke}
           >
-            {loading === "revoke" ? <Loader2 className="size-3 animate-spin" /> : "撤销"}
+            {loading === "revoke" ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              "撤销"
+            )}
           </Button>
         </>
       ) : (
@@ -338,7 +364,11 @@ function DbPrivRow({
             disabled={loading !== null}
             onClick={handleGrant}
           >
-            {loading === "grant" ? <Loader2 className="size-3 animate-spin" /> : "授权"}
+            {loading === "grant" ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              "授权"
+            )}
           </Button>
         </>
       )}
@@ -357,10 +387,17 @@ interface UserDetailProps {
 function UserDetail({ connectionId, dbType, user }: UserDetailProps) {
   const queryClient = useQueryClient();
 
-  const grantsKey = ["user-grants", connectionId, user.username, user.host];
+  const grantsKey = useMemo(
+    () => ["user-grants", connectionId, user.username, user.host],
+    [connectionId, user.username, user.host],
+  );
   const dbsKey = ["databases", connectionId];
 
-  const { data: grants = [], isLoading: grantsLoading, isError: grantsError } = useQuery({
+  const {
+    data: grants = [],
+    isLoading: grantsLoading,
+    isError: grantsError,
+  } = useQuery({
     queryKey: grantsKey,
     queryFn: () => getUserGrants(connectionId, user.username, user.host),
     staleTime: 10_000,
@@ -409,7 +446,9 @@ function UserDetail({ connectionId, dbType, user }: UserDetailProps) {
       {/* Database privileges */}
       <div className="flex flex-1 flex-col overflow-hidden">
         <div className="flex items-center justify-between border-b border-border px-4 py-2">
-          <span className="text-xs font-medium text-muted-foreground">数据库权限</span>
+          <span className="text-xs font-medium text-muted-foreground">
+            数据库权限
+          </span>
           <button
             className="text-muted-foreground hover:text-foreground"
             onClick={refreshGrants}
@@ -436,7 +475,9 @@ function UserDetail({ connectionId, dbType, user }: UserDetailProps) {
         {!grantsLoading && !dbsLoading && !grantsError && (
           <div className="flex-1 overflow-auto">
             {databases.length === 0 ? (
-              <p className="px-4 py-3 text-xs text-muted-foreground">没有数据库</p>
+              <p className="px-4 py-3 text-xs text-muted-foreground">
+                没有数据库
+              </p>
             ) : (
               databases.map((db) => (
                 <DbPrivRow
@@ -471,8 +512,12 @@ export function UserManagementTab({
   const queryClient = useQueryClient();
   const [selectedUser, setSelectedUser] = useState<UserInfo | null>(null);
 
-  const usersKey = ["users", connectionId];
-  const { data: users = [], isLoading, isError } = useQuery({
+  const usersKey = useMemo(() => ["users", connectionId], [connectionId]);
+  const {
+    data: users = [],
+    isLoading,
+    isError,
+  } = useQuery({
     queryKey: usersKey,
     queryFn: () => listUsers(connectionId),
     staleTime: 15_000,
@@ -522,7 +567,9 @@ export function UserManagementTab({
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
           <User className="size-10 opacity-20" />
-          <p className="text-sm">选择{dbType === "mysql" ? "用户" : "角色"}查看权限</p>
+          <p className="text-sm">
+            选择{dbType === "mysql" ? "用户" : "角色"}查看权限
+          </p>
         </div>
       )}
     </div>

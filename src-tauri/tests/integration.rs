@@ -624,6 +624,7 @@ async fn review_regressions(mut cfg: ConnectionConfig, mysql: bool) {
     pools.open(&cfg).await.unwrap();
     let id = cfg.id.clone();
     let db = cfg.database.clone().unwrap();
+    verify_optimizations(&pools, &reg, &id, &db, mysql).await;
     let table = "lotdb_review_values";
     let query = |sql: String| {
         let pools = &pools;
@@ -995,4 +996,193 @@ async fn review_regressions(mut cfg: ConnectionConfig, mysql: bool) {
     );
     reg.close_sessions(&id);
     pools.close(&id).await;
+}
+
+async fn verify_optimizations(
+    pools: &PoolManager,
+    registry: &QueryRegistry,
+    id: &str,
+    db: &str,
+    mysql: bool,
+) {
+    use lotdb_lib::commands::data::{
+        execute_checked_statements_impl, get_table_page_impl, RowCheck,
+    };
+    use lotdb_lib::commands::query::run_session_query;
+    use lotdb_lib::commands::transfer::transfer_table_data_impl;
+    let query = |sql: String| async move {
+        run_query(pools, registry, id, &sql, None, None)
+            .await
+            .unwrap()
+    };
+    let empty = query("SELECT 1 AS empty_column WHERE 1=0".into()).await;
+    assert_eq!(empty.columns, ["empty_column"]);
+    assert!(empty.rows.is_empty());
+    if !mysql {
+        for sql in ["BEGIN", "SELECT 1 / 0", "ROLLBACK", "SELECT 42"] {
+            let result = run_session_query(
+                pools,
+                registry,
+                id,
+                sql,
+                &[],
+                None,
+                None,
+                Some("aborted-transaction"),
+            )
+            .await;
+            if sql.contains("1 / 0") {
+                assert!(result.is_err());
+            } else {
+                assert!(result.is_ok(), "{sql}: {result:?}");
+            }
+        }
+    }
+    for table in ["lotdb_opt_values", "lotdb_opt_target"] {
+        query(format!("DROP TABLE IF EXISTS {table}")).await;
+        query(format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY, txt VARCHAR(100))"
+        ))
+        .await;
+    }
+    let values = (1..=1201)
+        .map(|id| format!("({id}, 'original')"))
+        .collect::<Vec<_>>()
+        .join(",");
+    query(format!("INSERT INTO lotdb_opt_values VALUES {values}")).await;
+    if !mysql {
+        let result =
+            query("UPDATE lotdb_opt_values SET txt='returned' WHERE id=1 RETURNING id, txt".into())
+                .await;
+        assert_eq!(result.columns, ["id", "txt"]);
+        assert_eq!(result.affected_rows, 1);
+        assert_eq!(result.rows[0][1], "returned");
+        let empty = query("DELETE FROM lotdb_opt_values WHERE id=-1 RETURNING id".into()).await;
+        assert_eq!(empty.columns, ["id"]);
+        assert!(empty.rows.is_empty());
+    }
+    let page = get_table_page_impl(
+        pools,
+        id,
+        db,
+        None,
+        "lotdb_opt_values",
+        3,
+        0,
+        None,
+        None,
+        &[],
+        false,
+        &["id".into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.total_count, -1);
+    assert_eq!(page.rows.len(), 3);
+    assert_eq!(page.rows[0][0], 1);
+    let next = get_table_page_impl(
+        pools,
+        id,
+        db,
+        None,
+        "lotdb_opt_values",
+        3,
+        0,
+        Some("id"),
+        None,
+        &[ColumnFilter {
+            column: "id".into(),
+            op: ">".into(),
+            value: "3".into(),
+        }],
+        false,
+        &["id".into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(next.rows[0][0], 4);
+    let original = query("SELECT id, txt FROM lotdb_opt_values WHERE id=1".into())
+        .await
+        .rows[0]
+        .clone();
+    query("UPDATE lotdb_opt_values SET txt='external' WHERE id=1".into()).await;
+    let conflict = execute_checked_statements_impl(
+        pools,
+        id,
+        Some(db),
+        &["UPDATE lotdb_opt_values SET txt='lost' WHERE id=1".into()],
+        &[RowCheck {
+            sql: "SELECT id, txt FROM lotdb_opt_values WHERE id=1 FOR UPDATE".into(),
+            original,
+        }],
+    )
+    .await;
+    assert!(conflict.unwrap_err().to_string().contains("数据已被"));
+    assert_eq!(
+        query("SELECT txt FROM lotdb_opt_values WHERE id=1".into())
+            .await
+            .rows[0][0],
+        "external"
+    );
+    let transfer = transfer_table_data_impl(
+        None,
+        pools,
+        id.into(),
+        db.into(),
+        None,
+        "lotdb_opt_values".into(),
+        id.into(),
+        db.into(),
+        None,
+        "lotdb_opt_target".into(),
+        vec![],
+        false,
+        None,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(transfer.rows_transferred, 1201);
+    assert_eq!(transfer.rows_failed, 0);
+    assert!(transfer.error_message.is_none());
+    let count = get_table_data_impl(
+        pools,
+        id,
+        db,
+        None,
+        "lotdb_opt_target",
+        0,
+        0,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(count.total_count, 1201);
+    let duplicate = transfer_table_data_impl(
+        None,
+        pools,
+        id.into(),
+        db.into(),
+        None,
+        "lotdb_opt_values".into(),
+        id.into(),
+        db.into(),
+        None,
+        "lotdb_opt_target".into(),
+        vec![],
+        false,
+        None,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(duplicate.rows_transferred, 0);
+    assert_eq!(duplicate.rows_failed, 500);
+    assert!(duplicate.error_message.is_some());
+    registry.close_sessions(id);
+    for table in ["lotdb_opt_values", "lotdb_opt_target"] {
+        query(format!("DROP TABLE {table}")).await;
+    }
 }

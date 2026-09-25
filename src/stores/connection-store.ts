@@ -6,6 +6,7 @@ interface ConnectionState {
   groups: ConnectionGroup[];
   activeConnectionId: string | null;
   openPoolIds: Set<string>;
+  generations: Record<string, number>;
   setActiveConnection: (id: string | null) => void;
   addConnection: (connection: ConnectionConfig) => void;
   removeConnection: (id: string) => void;
@@ -19,6 +20,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   groups: [],
   activeConnectionId: null,
   openPoolIds: new Set(),
+  generations: {},
   setActiveConnection: (id) => set({ activeConnectionId: id }),
   addConnection: (connection) =>
     set((state) => ({ connections: [...state.connections, connection] })),
@@ -33,7 +35,13 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
       ),
     })),
   markPoolOpen: (id) =>
-    set((state) => ({ openPoolIds: new Set([...state.openPoolIds, id]) })),
+    set((state) => ({
+      openPoolIds: new Set([...state.openPoolIds, id]),
+      generations: {
+        ...state.generations,
+        [id]: (state.generations[id] ?? 0) + 1,
+      },
+    })),
   markPoolClosed: (id) =>
     set((state) => {
       const next = new Set(state.openPoolIds);

@@ -283,17 +283,21 @@ function GridCell({
         !isEdited && !isDeleted && "hover:bg-primary/10",
       )}
       title={
-        kind === "null" ? "NULL" : kind === "empty" ? "(empty string)" : text
+        kind === "null"
+          ? "NULL"
+          : kind === "empty"
+            ? "(empty string)"
+            : text.slice(0, 512)
       }
-      tabIndex={!isDeleted && onStartEdit ? 0 : undefined}
+      tabIndex={!isDeleted && (onStartEdit || onView) ? 0 : undefined}
       onKeyDown={(e) => {
         if (
           !isDeleted &&
-          onStartEdit &&
+          (onStartEdit || onView) &&
           (e.key === "Enter" || e.key === "F2")
         ) {
           e.preventDefault();
-          onStartEdit();
+          (onStartEdit ?? onView)?.();
         }
       }}
       onClick={!isDeleted && !onStartEdit ? onView : undefined}
@@ -307,7 +311,9 @@ function GridCell({
       ) : kind === "empty" ? (
         <span className="truncate font-mono text-[10px]">(empty)</span>
       ) : (
-        <span className="truncate">{text}</span>
+        <span className="truncate">
+          {text.length > 512 ? text.slice(0, 512) + "…" : text}
+        </span>
       )}
       {!isDeleted && (onStartEdit || onView) && (
         <span className="ml-auto flex shrink-0 opacity-0 group-hover/cell:opacity-100 group-focus-within/cell:opacity-100">
@@ -466,7 +472,10 @@ export function DataGrid({
   const colDefs = useMemo<ColumnDef<GridRow>[]>(
     () =>
       columns.map((col, colIdx) => ({
-        id: columns.indexOf(col) === colIdx ? (col || String(colIdx)) : `${col} (${colIdx + 1})`,
+        id:
+          columns.indexOf(col) === colIdx
+            ? col || String(colIdx)
+            : `${col} (${colIdx + 1})`,
         accessorFn: (row: GridRow) => row[colIdx],
         header: col,
         size: 140,

@@ -18,7 +18,7 @@ function stableKey(tab: Tab): string {
   const meta = tab.metadata as Record<string, unknown> | undefined;
   const db = meta?.database ?? "";
   const obj = meta?.objectName ?? "";
-  return `${tab.type}::${tab.connectionId}::${db}::${obj}`;
+  return `${tab.type}::${tab.connectionId}::${db}::${meta?.schema ?? ""}::${obj}::${meta?.managerKind ?? ""}::${meta?.ddlKind ?? ""}::${meta?.table ?? ""}`;
 }
 
 function load(): RecentItem[] {

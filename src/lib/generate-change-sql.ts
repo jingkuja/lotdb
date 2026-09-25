@@ -120,3 +120,32 @@ export function generateChangeSql(opts: GenerateOptions): string[] {
 
   return sqls;
 }
+
+/** Lock and compare the original snapshot inside the commit transaction. */
+export function generateChangeChecks(
+  opts: GenerateOptions,
+): { sql: string; original: unknown[] }[] {
+  const indexes = new Set([
+    ...Object.values(opts.pendingEdits).map((e) => e.rowIndex),
+    ...opts.pendingDeletes,
+  ]);
+  return [...indexes]
+    .sort((a, b) => a - b)
+    .flatMap((index) => {
+      const where = buildWhere(
+        index,
+        opts.columns,
+        opts.rows,
+        opts.pkColumns,
+        opts.dbType,
+        opts.binaryColumns ?? [],
+      );
+      if (!where) return [];
+      return [
+        {
+          sql: `SELECT ${opts.columns.map((c) => quoteIdent(c, opts.dbType)).join(", ")} FROM ${quoteTable(opts)} WHERE ${where} FOR UPDATE`,
+          original: opts.rows[index]!,
+        },
+      ];
+    });
+}

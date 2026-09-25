@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Loader2,
@@ -22,7 +22,8 @@ import type { DatabaseType } from "@/types/database";
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
@@ -63,7 +64,8 @@ function DbList({ items, selected, onSelect }: DbListProps) {
               key={item.database}
               className={cn(
                 "cursor-pointer px-3 py-2 hover:bg-sidebar-accent/60",
-                isSelected && "bg-sidebar-accent text-sidebar-accent-foreground",
+                isSelected &&
+                  "bg-sidebar-accent text-sidebar-accent-foreground",
               )}
               onClick={() => onSelect(item.database)}
             >
@@ -143,13 +145,21 @@ interface TableSizePanelProps {
   dbType: DatabaseType;
 }
 
-function TableSizePanel({ connectionId, database, dbType }: TableSizePanelProps) {
+function TableSizePanel({
+  connectionId,
+  database,
+  dbType,
+}: TableSizePanelProps) {
   const queryClient = useQueryClient();
   const [sortCol, setSortCol] = useState<SortCol>("total");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   const key = ["table-sizes", connectionId, database];
-  const { data: tables = [], isLoading, isError } = useQuery({
+  const {
+    data: tables = [],
+    isLoading,
+    isError,
+  } = useQuery({
     queryKey: key,
     queryFn: () => getTableSizes(connectionId, database),
     staleTime: 30_000,
@@ -169,21 +179,36 @@ function TableSizePanel({ connectionId, database, dbType }: TableSizePanelProps)
   const sorted = [...tables].sort((a, b) => {
     let av: number | string, bv: number | string;
     switch (sortCol) {
-      case "name":   av = a.tableName; bv = b.tableName; break;
-      case "data":   av = a.dataBytes; bv = b.dataBytes; break;
-      case "index":  av = a.indexBytes; bv = b.indexBytes; break;
-      case "rows":   av = a.rowCount ?? -1; bv = b.rowCount ?? -1; break;
-      default:       av = a.totalBytes; bv = b.totalBytes; break;
+      case "name":
+        av = a.tableName;
+        bv = b.tableName;
+        break;
+      case "data":
+        av = a.dataBytes;
+        bv = b.dataBytes;
+        break;
+      case "index":
+        av = a.indexBytes;
+        bv = b.indexBytes;
+        break;
+      case "rows":
+        av = a.rowCount ?? -1;
+        bv = b.rowCount ?? -1;
+        break;
+      default:
+        av = a.totalBytes;
+        bv = b.totalBytes;
+        break;
     }
     if (av < bv) return sortDir === "asc" ? -1 : 1;
     if (av > bv) return sortDir === "asc" ? 1 : -1;
     return 0;
   });
 
-  const totalData  = tables.reduce((s, t) => s + t.dataBytes, 0);
+  const totalData = tables.reduce((s, t) => s + t.dataBytes, 0);
   const totalIndex = tables.reduce((s, t) => s + t.indexBytes, 0);
-  const totalAll   = tables.reduce((s, t) => s + t.totalBytes, 0);
-  const maxTotal   = Math.max(...tables.map((t) => t.totalBytes), 1);
+  const totalAll = tables.reduce((s, t) => s + t.totalBytes, 0);
+  const maxTotal = Math.max(...tables.map((t) => t.totalBytes), 1);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -208,13 +233,20 @@ function TableSizePanel({ connectionId, database, dbType }: TableSizePanelProps)
       {tables.length > 0 && (
         <div className="flex gap-6 border-b border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
           <span>
-            数据：<strong className="text-foreground">{formatBytes(totalData)}</strong>
+            数据：
+            <strong className="text-foreground">
+              {formatBytes(totalData)}
+            </strong>
           </span>
           <span>
-            索引：<strong className="text-foreground">{formatBytes(totalIndex)}</strong>
+            索引：
+            <strong className="text-foreground">
+              {formatBytes(totalIndex)}
+            </strong>
           </span>
           <span>
-            合计：<strong className="text-foreground">{formatBytes(totalAll)}</strong>
+            合计：
+            <strong className="text-foreground">{formatBytes(totalAll)}</strong>
           </span>
         </div>
       )}
@@ -239,12 +271,46 @@ function TableSizePanel({ connectionId, database, dbType }: TableSizePanelProps)
           <table className="w-full text-left">
             <thead className="sticky top-0 border-b border-border bg-muted/80 backdrop-blur-sm">
               <tr>
-                <SortTh col="name"  label="表名"   sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
-                <SortTh col="data"  label="数据"   sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="text-right" />
-                <SortTh col="index" label="索引"   sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="text-right" />
-                <SortTh col="total" label="合计"   sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="text-right" />
+                <SortTh
+                  col="name"
+                  label="表名"
+                  sortCol={sortCol}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                />
+                <SortTh
+                  col="data"
+                  label="数据"
+                  sortCol={sortCol}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                  className="text-right"
+                />
+                <SortTh
+                  col="index"
+                  label="索引"
+                  sortCol={sortCol}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                  className="text-right"
+                />
+                <SortTh
+                  col="total"
+                  label="合计"
+                  sortCol={sortCol}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                  className="text-right"
+                />
                 {dbType === "mysql" && (
-                  <SortTh col="rows" label="预估行数" sortCol={sortCol} sortDir={sortDir} onSort={handleSort} className="text-right" />
+                  <SortTh
+                    col="rows"
+                    label="预估行数"
+                    sortCol={sortCol}
+                    sortDir={sortDir}
+                    onSort={handleSort}
+                    className="text-right"
+                  />
                 )}
                 <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">
                   占比
@@ -255,7 +321,10 @@ function TableSizePanel({ connectionId, database, dbType }: TableSizePanelProps)
               {sorted.map((t) => {
                 const pct = (t.totalBytes / maxTotal) * 100;
                 return (
-                  <tr key={t.tableName} className="border-b border-border/50 hover:bg-muted/30">
+                  <tr
+                    key={t.tableName}
+                    className="border-b border-border/50 hover:bg-muted/30"
+                  >
                     <td className="px-3 py-1.5 font-mono text-xs font-medium">
                       {t.tableName}
                     </td>
@@ -291,7 +360,10 @@ function TableSizePanel({ connectionId, database, dbType }: TableSizePanelProps)
               })}
               {sorted.length === 0 && (
                 <tr>
-                  <td colSpan={dbType === "mysql" ? 6 : 5} className="px-4 py-8 text-center text-xs text-muted-foreground">
+                  <td
+                    colSpan={dbType === "mysql" ? 6 : 5}
+                    className="px-4 py-8 text-center text-xs text-muted-foreground"
+                  >
                     没有表数据
                   </td>
                 </tr>
@@ -315,8 +387,12 @@ export function DiskUsageTab({ connectionId, dbType }: DiskUsageTabProps) {
   const queryClient = useQueryClient();
   const [selectedDb, setSelectedDb] = useState<string | null>(null);
 
-  const key = ["disk-usage", connectionId];
-  const { data: dbSizes = [], isLoading, isError } = useQuery({
+  const key = useMemo(() => ["disk-usage", connectionId], [connectionId]);
+  const {
+    data: dbSizes = [],
+    isLoading,
+    isError,
+  } = useQuery({
     queryKey: key,
     queryFn: () => getDiskUsage(connectionId),
     staleTime: 30_000,
@@ -325,7 +401,9 @@ export function DiskUsageTab({ connectionId, dbType }: DiskUsageTabProps) {
   const refresh = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: key });
     if (selectedDb) {
-      queryClient.invalidateQueries({ queryKey: ["table-sizes", connectionId, selectedDb] });
+      queryClient.invalidateQueries({
+        queryKey: ["table-sizes", connectionId, selectedDb],
+      });
     }
   }, [queryClient, key, connectionId, selectedDb]);
 
@@ -357,7 +435,8 @@ export function DiskUsageTab({ connectionId, dbType }: DiskUsageTabProps) {
         <span className="text-xs font-medium text-muted-foreground">
           磁盘占用 · 总计{" "}
           <strong className="text-foreground">{formatBytes(totalAll)}</strong>
-          {" · "}{dbSizes.length} 个数据库
+          {" · "}
+          {dbSizes.length} 个数据库
         </span>
         <button
           className="ml-auto rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"

@@ -761,13 +761,21 @@ pub struct CompletionTable {
 pub async fn get_completion_schema(
     pools: State<'_, PoolManager>,
     connection_id: String,
+    database: Option<String>,
 ) -> Result<Vec<CompletionTable>, String> {
-    let entry = pools
+    let base = pools
         .pools
         .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?
+        .pool
+        .clone();
+    let pool = match (&base, database.as_deref()) {
+        (DbPool::Postgres(_), Some(db)) => {
+            DbPool::Postgres(pools.pg_pool_for_database(&connection_id, db).await?)
+        }
+        _ => base,
+    };
+    match &pool {
         DbPool::MySQL(pool) => {
             #[derive(sqlx::FromRow)]
             struct Row {
@@ -786,8 +794,11 @@ pub async fn get_completion_schema(
                   AND c.TABLE_NAME   = t.TABLE_NAME \
                  WHERE c.TABLE_SCHEMA NOT IN \
                    ('information_schema','performance_schema','mysql','sys') \
+                 AND (? IS NULL OR c.TABLE_SCHEMA = ?) \
                  ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION",
             )
+            .bind(database.as_deref())
+            .bind(database.as_deref())
             .fetch_all(pool)
             .await
             .map_err(|e| format!("获取补全数据失败: {e}"))?;

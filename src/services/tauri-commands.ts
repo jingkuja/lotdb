@@ -117,7 +117,11 @@ export async function listObjects(
   database: string,
   schema?: string,
 ): Promise<SchemaObjects> {
-  return invoke<SchemaObjects>("list_objects", { connectionId, database, schema });
+  return invoke<SchemaObjects>("list_objects", {
+    connectionId,
+    database,
+    schema,
+  });
 }
 
 // ─── Table structure ──────────────────────────────────────────────
@@ -205,7 +209,11 @@ export async function searchObjects(
   query: string,
   limit?: number,
 ): Promise<SearchResult[]> {
-  return invoke<SearchResult[]>("search_objects", { connectionId, query, limit });
+  return invoke<SearchResult[]>("search_objects", {
+    connectionId,
+    query,
+    limit,
+  });
 }
 
 // ─── Autocomplete schema ──────────────────────────────────────────
@@ -219,8 +227,12 @@ export interface CompletionTable {
 
 export async function getCompletionSchema(
   connectionId: string,
+  database?: string,
 ): Promise<CompletionTable[]> {
-  return invoke<CompletionTable[]>("get_completion_schema", { connectionId });
+  return invoke<CompletionTable[]>("get_completion_schema", {
+    connectionId,
+    database: database || null,
+  });
 }
 
 // ─── Object DDL (views / functions) ───────────────────────────────
@@ -237,7 +249,12 @@ export async function getViewDdl(
   schema: string | undefined,
   name: string,
 ): Promise<ObjectDdl> {
-  return invoke<ObjectDdl>("get_view_ddl", { connectionId, database, schema: schema ?? null, name });
+  return invoke<ObjectDdl>("get_view_ddl", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    name,
+  });
 }
 
 export async function getFunctionDdl(
@@ -246,7 +263,12 @@ export async function getFunctionDdl(
   schema: string | undefined,
   name: string,
 ): Promise<ObjectDdl> {
-  return invoke<ObjectDdl>("get_function_ddl", { connectionId, database, schema: schema ?? null, name });
+  return invoke<ObjectDdl>("get_function_ddl", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    name,
+  });
 }
 
 // ─── Triggers ─────────────────────────────────────────────────────
@@ -296,7 +318,13 @@ export async function dropTrigger(
   table: string,
   name: string,
 ): Promise<void> {
-  return invoke<void>("drop_trigger", { connectionId, database, schema: schema ?? null, table, name });
+  return invoke<void>("drop_trigger", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    table,
+    name,
+  });
 }
 
 // ─── PG sequences ─────────────────────────────────────────────────
@@ -325,7 +353,11 @@ export async function listSequences(
   database: string,
   schema: string | undefined,
 ): Promise<SequenceInfo[]> {
-  return invoke<SequenceInfo[]>("list_sequences", { connectionId, database, schema: schema ?? null });
+  return invoke<SequenceInfo[]>("list_sequences", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+  });
 }
 
 export async function createSequence(
@@ -335,7 +367,13 @@ export async function createSequence(
   name: string,
   options: SequenceOptions,
 ): Promise<void> {
-  return invoke<void>("create_sequence", { connectionId, database, schema: schema ?? null, name, options });
+  return invoke<void>("create_sequence", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    name,
+    options,
+  });
 }
 
 export async function restartSequence(
@@ -360,7 +398,12 @@ export async function dropSequence(
   schema: string | undefined,
   name: string,
 ): Promise<void> {
-  return invoke<void>("drop_sequence", { connectionId, database, schema: schema ?? null, name });
+  return invoke<void>("drop_sequence", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    name,
+  });
 }
 
 // ─── PG enum types ────────────────────────────────────────────────
@@ -375,7 +418,11 @@ export async function listEnums(
   database: string,
   schema: string | undefined,
 ): Promise<EnumTypeInfo[]> {
-  return invoke<EnumTypeInfo[]>("list_enums", { connectionId, database, schema: schema ?? null });
+  return invoke<EnumTypeInfo[]>("list_enums", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+  });
 }
 
 export async function createEnumType(
@@ -385,7 +432,13 @@ export async function createEnumType(
   name: string,
   labels: string[],
 ): Promise<void> {
-  return invoke<void>("create_enum_type", { connectionId, database, schema: schema ?? null, name, labels });
+  return invoke<void>("create_enum_type", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    name,
+    labels,
+  });
 }
 
 export async function addEnumValue(
@@ -395,7 +448,13 @@ export async function addEnumValue(
   name: string,
   label: string,
 ): Promise<void> {
-  return invoke<void>("add_enum_value", { connectionId, database, schema: schema ?? null, name, label });
+  return invoke<void>("add_enum_value", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    name,
+    label,
+  });
 }
 
 export async function dropEnumType(
@@ -405,7 +464,13 @@ export async function dropEnumType(
   name: string,
   cascade: boolean,
 ): Promise<void> {
-  return invoke<void>("drop_enum_type", { connectionId, database, schema: schema ?? null, name, cascade });
+  return invoke<void>("drop_enum_type", {
+    connectionId,
+    database,
+    schema: schema ?? null,
+    name,
+    cascade,
+  });
 }
 
 // ─── Connection groups ────────────────────────────────────────────
@@ -457,7 +522,15 @@ export interface SaveHistoryArgs {
 }
 
 export async function saveHistory(args: SaveHistoryArgs): Promise<number> {
-  const { connectionId, connectionName, sql, status, rowsAffected, executionMs, errorMessage } = args;
+  const {
+    connectionId,
+    connectionName,
+    sql,
+    status,
+    rowsAffected,
+    executionMs,
+    errorMessage,
+  } = args;
   return invoke<number>("save_history", {
     connectionId,
     connectionName,
@@ -495,7 +568,17 @@ export interface TableDataResult {
 
 export interface ColumnFilter {
   column: string;
-  op: "=" | "!=" | "LIKE" | "NOT LIKE" | ">" | "<" | ">=" | "<=" | "IS NULL" | "IS NOT NULL";
+  op:
+    | "="
+    | "!="
+    | "LIKE"
+    | "NOT LIKE"
+    | ">"
+    | "<"
+    | ">="
+    | "<="
+    | "IS NULL"
+    | "IS NOT NULL";
   value: string;
 }
 
@@ -530,8 +613,14 @@ export async function executeStatements(
   connectionId: string,
   sqls: string[],
   database?: string,
+  checks?: { sql: string; original: unknown[] }[],
 ): Promise<number> {
-  return invoke<number>("execute_statements", { connectionId, sqls, database: database ?? null });
+  return invoke<number>("execute_statements", {
+    connectionId,
+    sqls,
+    database: database ?? null,
+    checks: checks ?? [],
+  });
 }
 
 // ─── Snippets ─────────────────────────────────────────────────────
@@ -595,7 +684,9 @@ export interface ExportResult {
   filePath: string;
 }
 
-export async function exportTableData(opts: ExportOptions): Promise<ExportResult> {
+export async function exportTableData(
+  opts: ExportOptions,
+): Promise<ExportResult> {
   return invoke<ExportResult>("export_table_data", {
     connectionId: opts.connectionId,
     database: opts.database,
@@ -714,7 +805,12 @@ export async function createDatabase(
   charset?: string,
   collation?: string,
 ): Promise<void> {
-  return invoke<void>("create_database", { connectionId, dbName, charset, collation });
+  return invoke<void>("create_database", {
+    connectionId,
+    dbName,
+    charset,
+    collation,
+  });
 }
 
 export async function dropDatabase(
@@ -728,7 +824,7 @@ export async function dropDatabase(
 
 export interface UserInfo {
   username: string;
-  host: string;      // empty for PG
+  host: string; // empty for PG
   isSuper: boolean;
   canLogin: boolean; // PG only
 }
@@ -747,7 +843,11 @@ export async function getUserGrants(
   username: string,
   host: string,
 ): Promise<DbPrivilege[]> {
-  return invoke<DbPrivilege[]>("get_user_grants", { connectionId, username, host });
+  return invoke<DbPrivilege[]>("get_user_grants", {
+    connectionId,
+    username,
+    host,
+  });
 }
 
 export async function createUser(
@@ -756,7 +856,12 @@ export async function createUser(
   host: string,
   password: string,
 ): Promise<void> {
-  return invoke<void>("create_user", { connectionId, username, host, password });
+  return invoke<void>("create_user", {
+    connectionId,
+    username,
+    host,
+    password,
+  });
 }
 
 export async function dropUser(
@@ -773,7 +878,12 @@ export async function grantPrivilege(
   host: string,
   database: string,
 ): Promise<void> {
-  return invoke<void>("grant_privilege", { connectionId, username, host, database });
+  return invoke<void>("grant_privilege", {
+    connectionId,
+    username,
+    host,
+    database,
+  });
 }
 
 export async function revokePrivilege(
@@ -782,7 +892,12 @@ export async function revokePrivilege(
   host: string,
   database: string,
 ): Promise<void> {
-  return invoke<void>("revoke_privilege", { connectionId, username, host, database });
+  return invoke<void>("revoke_privilege", {
+    connectionId,
+    username,
+    host,
+    database,
+  });
 }
 
 // ─── Process list ─────────────────────────────────────────────────
@@ -798,7 +913,9 @@ export interface ProcessInfo {
   info: string | null;
 }
 
-export async function listProcesses(connectionId: string): Promise<ProcessInfo[]> {
+export async function listProcesses(
+  connectionId: string,
+): Promise<ProcessInfo[]> {
   return invoke<ProcessInfo[]>("list_processes", { connectionId });
 }
 
@@ -825,7 +942,9 @@ export interface TableSizeInfo {
   rowCount: number | null;
 }
 
-export async function getDiskUsage(connectionId: string): Promise<DbSizeInfo[]> {
+export async function getDiskUsage(
+  connectionId: string,
+): Promise<DbSizeInfo[]> {
   return invoke<DbSizeInfo[]>("get_disk_usage", { connectionId });
 }
 
@@ -834,7 +953,11 @@ export async function getTableSizes(
   database: string,
   schema?: string,
 ): Promise<TableSizeInfo[]> {
-  return invoke<TableSizeInfo[]>("get_table_sizes", { connectionId, database, schema });
+  return invoke<TableSizeInfo[]>("get_table_sizes", {
+    connectionId,
+    database,
+    schema,
+  });
 }
 
 // ─── Explain ──────────────────────────────────────────────────────
@@ -851,7 +974,13 @@ export async function explainQuery(
   analyze: boolean,
   opts?: ExecuteOptions,
 ): Promise<ExplainResult> {
-  return invoke<ExplainResult>("explain_query", { connectionId, sql, analyze, sessionId: opts?.sessionId ?? null, executionId: opts?.executionId ?? null });
+  return invoke<ExplainResult>("explain_query", {
+    connectionId,
+    sql,
+    analyze,
+    sessionId: opts?.sessionId ?? null,
+    executionId: opts?.executionId ?? null,
+  });
 }
 
 // ─── Cross-connection data transfer ──────────────────────────────
@@ -925,8 +1054,10 @@ export async function transferTableData(
   truncateFirst: boolean,
   whereClause: string | undefined,
   limit: number,
+  transferId?: string,
 ): Promise<TransferResult> {
   return invoke<TransferResult>("transfer_table_data", {
+    transferId,
     srcConnectionId,
     srcDatabase,
     srcSchema,
@@ -955,10 +1086,35 @@ export async function importConnections(
   return invoke<ImportConnectionsResult>("import_connections", { configs });
 }
 
-export async function closeQuerySession(connectionId: string, sessionId: string): Promise<void> {
+export async function closeQuerySession(
+  connectionId: string,
+  sessionId: string,
+): Promise<void> {
   return invoke<void>("close_query_session", { connectionId, sessionId });
 }
 
-export function exportQueryResult(columns: string[], rows: unknown[][], filePath: string): Promise<void> {
+export function exportQueryResult(
+  columns: string[],
+  rows: unknown[][],
+  filePath: string,
+): Promise<void> {
   return invoke("export_query_result", { columns, rows, filePath });
+}
+
+export function configureQuerySession(
+  connectionId: string,
+  sessionId: string,
+  database?: string,
+  schema?: string,
+): Promise<void> {
+  return invoke("configure_query_session", {
+    connectionId,
+    sessionId,
+    database: database || null,
+    schema: schema || null,
+  });
+}
+
+export function cancelTransfer(transferId: string): Promise<void> {
+  return invoke("cancel_transfer", { transferId });
 }

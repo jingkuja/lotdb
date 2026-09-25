@@ -36,14 +36,14 @@ function truncate(s: string, max = 120): string {
 }
 
 const STATE_COLORS: Record<string, string> = {
-  active:    "text-green-600 dark:text-green-400",
-  idle:      "text-muted-foreground",
+  active: "text-green-600 dark:text-green-400",
+  idle: "text-muted-foreground",
   "idle in transaction": "text-amber-600 dark:text-amber-400",
   "idle in transaction (aborted)": "text-destructive",
-  Query:     "text-green-600 dark:text-green-400",
-  Sleep:     "text-muted-foreground",
-  Connect:   "text-blue-600 dark:text-blue-400",
-  Killed:    "text-destructive",
+  Query: "text-green-600 dark:text-green-400",
+  Sleep: "text-muted-foreground",
+  Connect: "text-blue-600 dark:text-blue-400",
+  Killed: "text-destructive",
 };
 
 function stateColor(state: string): string {
@@ -60,8 +60,8 @@ function SummaryBar({
   dbType: DatabaseType;
 }) {
   const total = processes.length;
-  const active = processes.filter(
-    (p) => (dbType === "mysql" ? p.command === "Query" : p.state === "active"),
+  const active = processes.filter((p) =>
+    dbType === "mysql" ? p.command === "Query" : p.state === "active",
   ).length;
   const idle = total - active;
 
@@ -72,7 +72,8 @@ function SummaryBar({
         <strong className="text-foreground">{total}</strong> 个连接
       </span>
       <span>
-        <strong className="text-green-600 dark:text-green-400">{active}</strong> 活跃
+        <strong className="text-green-600 dark:text-green-400">{active}</strong>{" "}
+        活跃
       </span>
       <span>
         <strong>{idle}</strong> 空闲
@@ -157,7 +158,9 @@ export function ProcessListTab({ connectionId, dbType }: ProcessListTabProps) {
     <div className="flex flex-1 flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex items-center gap-3 border-b border-border px-4 py-2">
-        <span className="text-xs font-medium text-muted-foreground">活跃查询</span>
+        <span className="text-xs font-medium text-muted-foreground">
+          活跃查询
+        </span>
 
         {/* Filter */}
         <input
@@ -238,14 +241,30 @@ export function ProcessListTab({ connectionId, dbType }: ProcessListTabProps) {
         <table className="w-full text-left">
           <thead className="sticky top-0 border-b border-border bg-muted/80 backdrop-blur-sm">
             <tr>
-              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">ID</th>
-              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">用户</th>
-              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">来源</th>
-              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">数据库</th>
-              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">状态</th>
-              <th className="px-3 py-2 text-right text-[11px] font-semibold text-muted-foreground">时长</th>
-              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">SQL</th>
-              <th className="px-3 py-2 text-right text-[11px] font-semibold text-muted-foreground">操作</th>
+              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">
+                ID
+              </th>
+              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">
+                用户
+              </th>
+              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">
+                来源
+              </th>
+              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">
+                数据库
+              </th>
+              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">
+                状态
+              </th>
+              <th className="px-3 py-2 text-right text-[11px] font-semibold text-muted-foreground">
+                时长
+              </th>
+              <th className="px-3 py-2 text-[11px] font-semibold text-muted-foreground">
+                SQL
+              </th>
+              <th className="px-3 py-2 text-right text-[11px] font-semibold text-muted-foreground">
+                操作
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -260,7 +279,10 @@ export function ProcessListTab({ connectionId, dbType }: ProcessListTabProps) {
             ))}
             {filtered.length === 0 && !loading && (
               <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-xs text-muted-foreground">
+                <td
+                  colSpan={8}
+                  className="px-4 py-8 text-center text-xs text-muted-foreground"
+                >
                   {filter ? "没有匹配的进程" : "没有活跃进程"}
                 </td>
               </tr>
@@ -271,10 +293,9 @@ export function ProcessListTab({ connectionId, dbType }: ProcessListTabProps) {
 
       {/* Footer: last refresh time */}
       <div className="border-t border-border px-4 py-1.5 text-[10px] text-muted-foreground">
-        {autoRefresh
-          ? `自动刷新：每 ${intervalSec} 秒`
-          : "自动刷新已暂停"}
-        {" · "}共 {filtered.length} 条{filter ? `（已过滤，共 ${processes.length} 条）` : ""}
+        {autoRefresh ? `自动刷新：每 ${intervalSec} 秒` : "自动刷新已暂停"}
+        {" · "}共 {filtered.length} 条
+        {filter ? `（已过滤，共 ${processes.length} 条）` : ""}
       </div>
     </div>
   );
@@ -309,7 +330,9 @@ function BoundProcessRow({
 
   return (
     <tr className="border-b border-border/50 hover:bg-muted/30">
-      <td className="px-3 py-1.5 font-mono text-xs text-muted-foreground">{proc.id}</td>
+      <td className="px-3 py-1.5 font-mono text-xs text-muted-foreground">
+        {proc.id}
+      </td>
       <td className="px-3 py-1.5 text-xs font-medium">{proc.user}</td>
       <td className="max-w-[120px] truncate px-3 py-1.5 text-xs text-muted-foreground">
         {proc.host || "—"}
@@ -339,7 +362,11 @@ function BoundProcessRow({
         <div className="flex items-center justify-end gap-1">
           <button
             className="rounded p-0.5 text-muted-foreground hover:bg-amber-500/10 hover:text-amber-600 dark:hover:text-amber-400"
-            title={dbType === "mysql" ? "KILL QUERY (中止 SQL)" : "pg_cancel_backend (取消查询)"}
+            title={
+              dbType === "mysql"
+                ? "KILL QUERY (中止 SQL)"
+                : "pg_cancel_backend (取消查询)"
+            }
             disabled={killing !== null}
             onClick={() => doKill("query")}
           >
@@ -351,7 +378,11 @@ function BoundProcessRow({
           </button>
           <button
             className="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-            title={dbType === "mysql" ? "KILL CONNECTION (断开连接)" : "pg_terminate_backend (终止连接)"}
+            title={
+              dbType === "mysql"
+                ? "KILL CONNECTION (断开连接)"
+                : "pg_terminate_backend (终止连接)"
+            }
             disabled={killing !== null}
             onClick={() => doKill("connection")}
           >
