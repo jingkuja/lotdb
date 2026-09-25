@@ -1,15 +1,18 @@
+import { lazy, Suspense } from "react";
+import { TabActiveContext } from "@/hooks/use-tab-active";
+import { RecentPanel } from "./recent-panel";
 import { useWorkspaceStore, type Tab } from "@/stores/workspace-store";
 import { TableStructurePanel } from "@/components/explorer/table-structure-panel";
-import { ObjectDdlTab } from "@/components/explorer/object-ddl-tab";
-import { SequenceManagerTab } from "@/components/explorer/sequence-manager-tab";
-import { EnumManagerTab } from "@/components/explorer/enum-manager-tab";
-import { QueryTab } from "@/components/editor/query-tab";
+const ObjectDdlTab = lazy(() => import("@/components/explorer/object-ddl-tab").then(m => ({default: m.ObjectDdlTab})));
+const SequenceManagerTab = lazy(() => import("@/components/explorer/sequence-manager-tab").then(m => ({default: m.SequenceManagerTab})));
+const EnumManagerTab = lazy(() => import("@/components/explorer/enum-manager-tab").then(m => ({default: m.EnumManagerTab})));
+const QueryTab = lazy(() => import("@/components/editor/query-tab").then(m => ({default: m.QueryTab})));
 import { TableDataTab } from "@/components/grid/table-data-tab";
-import { TableDesignerTab } from "@/components/designer/table-designer-tab";
-import { UserManagementTab } from "@/components/admin/user-management-tab";
-import { ProcessListTab } from "@/components/admin/process-list-tab";
-import { DiskUsageTab } from "@/components/admin/disk-usage-tab";
-import { SchemaDiffTab } from "@/components/admin/schema-diff-tab";
+const TableDesignerTab = lazy(() => import("@/components/designer/table-designer-tab").then(m => ({default: m.TableDesignerTab})));
+const UserManagementTab = lazy(() => import("@/components/admin/user-management-tab").then(m => ({default: m.UserManagementTab})));
+const ProcessListTab = lazy(() => import("@/components/admin/process-list-tab").then(m => ({default: m.ProcessListTab})));
+const DiskUsageTab = lazy(() => import("@/components/admin/disk-usage-tab").then(m => ({default: m.DiskUsageTab})));
+const SchemaDiffTab = lazy(() => import("@/components/admin/schema-diff-tab").then(m => ({default: m.SchemaDiffTab})));
 import { useConnections } from "@/hooks/use-connections";
 import { useQuery } from "@tanstack/react-query";
 import { getTableDesignerState } from "@/lib/designer-loader";
@@ -73,7 +76,9 @@ export function MainContent() {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
         <Database className="size-12 opacity-30" />
-        <p className="text-sm">选择连接或打开查询开始使用</p>
+        <p className="text-lg font-medium text-foreground">继续你的数据库工作</p>
+        <p className="text-sm">从左侧连接数据库，按 Cmd+N 创建查询。SQL 草稿随工作区自动恢复。</p>
+        <div className="mt-4 w-full max-w-lg rounded-lg border bg-card p-3"><RecentPanel limit={8} /></div>
       </div>
     );
   }
@@ -87,7 +92,11 @@ export function MainContent() {
             tab.id === activeTabId ? "flex min-h-0 flex-1 flex-col" : "hidden"
           }
         >
-          <TabContent activeTab={tab} />
+          <TabActiveContext.Provider value={tab.id === activeTabId}>
+            <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">加载工作区…</div>}>
+              <TabContent activeTab={tab} />
+            </Suspense>
+          </TabActiveContext.Provider>
         </div>
       ))}
     </>
@@ -136,6 +145,7 @@ function TabContent({ activeTab }: { activeTab: Tab }) {
   if (activeTab.type === "table-data" && meta?.database && meta?.objectName) {
     return (
       <TableDataTab
+        tabId={activeTab.id}
         connectionId={activeTab.connectionId}
         database={meta.database as string}
         schema={meta.schema as string | undefined}

@@ -29,6 +29,8 @@ impl std::fmt::Display for DbType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key_fingerprint: Option<String>,
     pub host: String,
     pub port: u16,
     pub user: String,

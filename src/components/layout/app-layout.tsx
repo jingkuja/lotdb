@@ -1,4 +1,5 @@
-import { useState, useCallback } from "react";
+import { pendingWorkspaceMessages } from "@/lib/workspace-guards";
+import { useState, useCallback, useEffect } from "react";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { Sidebar } from "./sidebar";
 import { TabBar } from "./tab-bar";
@@ -16,6 +17,27 @@ export function AppLayout() {
   const onShowSearch = useCallback(() => setSearchOpen(true), []);
 
   useGlobalShortcuts({ onShowShortcuts, onShowSearch });
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (pendingWorkspaceMessages().length) { event.preventDefault(); event.returnValue = ""; }
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    if ("__TAURI_INTERNALS__" in window) {
+      void import("@tauri-apps/api/window").then(async ({getCurrentWindow}) => {
+        const stop = await getCurrentWindow().onCloseRequested(async (event) => {
+          const messages = pendingWorkspaceMessages();
+          if (messages.length) {
+            event.preventDefault();
+            if (window.confirm(messages.join("\n") + "\n退出将丢弃未提交变更，确定退出？")) await getCurrentWindow().destroy();
+          }
+        });
+        if (disposed) stop(); else unlisten = stop;
+      });
+    }
+    return () => { disposed = true; unlisten?.(); window.removeEventListener("beforeunload", beforeUnload); };
+  }, []);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">

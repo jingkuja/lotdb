@@ -75,7 +75,7 @@ function RecentRow({ item }: { item: RecentItem }) {
         {item.title}
       </span>
       {conn && (
-        <span className="shrink-0 text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 mr-1">
+        <span className="shrink-0 text-[10px] text-muted-foreground mr-1">
           {conn.name}
         </span>
       )}
@@ -93,7 +93,7 @@ function RecentRow({ item }: { item: RecentItem }) {
   );
 }
 
-export function RecentPanel() {
+export function RecentPanel({ limit = 3 }: { limit?: number }) {
   const [expanded, setExpanded] = useState(true);
   const { items, clearRecent } = useRecentStore();
 
@@ -135,7 +135,7 @@ export function RecentPanel() {
       {/* Items */}
       {expanded && (
         <div>
-          {items.slice(0, 10).map((item) => (
+          {items.slice(0, limit).map((item) => (
             <RecentRow key={item.key} item={item} />
           ))}
         </div>

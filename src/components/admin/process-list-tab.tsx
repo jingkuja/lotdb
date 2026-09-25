@@ -1,3 +1,4 @@
+import { useTabActive } from "@/hooks/use-tab-active";
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Loader2,
@@ -95,6 +96,8 @@ const REFRESH_INTERVALS = [
 ];
 
 export function ProcessListTab({ connectionId, dbType }: ProcessListTabProps) {
+  const active = useTabActive();
+  const refreshingRef = useRef(false);
   const [processes, setProcesses] = useState<ProcessInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,6 +115,8 @@ export function ProcessListTab({ connectionId, dbType }: ProcessListTabProps) {
   );
 
   const refresh = useCallback(async () => {
+    if (!active || refreshingRef.current) return;
+    refreshingRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -120,9 +125,10 @@ export function ProcessListTab({ connectionId, dbType }: ProcessListTabProps) {
     } catch (e) {
       setError(String(e));
     } finally {
+      refreshingRef.current = false;
       setLoading(false);
     }
-  }, [connectionId]);
+  }, [connectionId, active]);
 
   // Initial load
   useEffect(() => {
@@ -131,12 +137,12 @@ export function ProcessListTab({ connectionId, dbType }: ProcessListTabProps) {
 
   // Auto-refresh timer
   useEffect(() => {
-    if (!autoRefresh) return;
+    if (!autoRefresh || !active) return;
     timerRef.current = setInterval(refresh, intervalSec * 1000);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [autoRefresh, intervalSec, refresh]);
+  }, [autoRefresh, intervalSec, refresh, active]);
 
   const filtered = filter
     ? processes.filter(

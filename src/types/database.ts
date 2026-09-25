@@ -24,6 +24,7 @@ export interface SSHConfig {
   authType: "password" | "key";
   password?: string;
   privateKeyPath?: string;
+  hostKeyFingerprint?: string;
   passphrase?: string;
 }
 

@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { DataGrid, type CellViewTarget } from "@/components/grid/data-grid";
+import { CellViewerDialog } from "@/components/grid/cell-viewer-dialog";
+import { copyAsCsv } from "@/lib/copy-as";
+import { useTabActive } from "@/hooks/use-tab-active";
+import { exportQueryResult } from "@/services/tauri-commands";
+import { downloadDir, join } from "@tauri-apps/api/path";
 import { Button } from "@/components/ui/button";
 import {
   Loader2,
@@ -138,7 +143,7 @@ function SingleResultView({ result }: { result: QueryResult }) {
         {result.truncated && (
           <span
             className="flex items-center gap-1 text-amber-600 dark:text-amber-400"
-            title="结果超出上限，仅加载前 N 行。可在 偏好设置 → 行为 → 查询结果行数上限 中调整。"
+            title="结果达到行数或 16 MiB 大小上限；请缩小查询范围，导出仅包含已加载数据。"
           >
             <TriangleAlert className="size-3" />
             已截断，仅显示前 {result.rows.length} 行
@@ -154,59 +159,35 @@ function SingleResultView({ result }: { result: QueryResult }) {
 }
 
 function ResultGrid({ result }: { result: QueryResult }) {
-  return (
-    <ScrollArea className="flex-1">
-      <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-xs">
-          <thead>
-            <tr className="border-b border-border bg-muted/60">
-              {/* Row number column */}
-              <th className="sticky left-0 top-0 w-10 bg-muted/80 px-2 py-1.5 text-right font-mono text-[10px] text-muted-foreground">
-                #
-              </th>
-              {result.columns.map((col) => (
-                <th
-                  key={col}
-                  className="sticky top-0 whitespace-nowrap bg-muted/80 px-3 py-1.5 text-left font-medium backdrop-blur"
-                >
-                  {col}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {result.rows.map((row, ri) => (
-              <tr
-                key={ri}
-                className={cn(
-                  "border-b border-border/40 hover:bg-muted/30",
-                  ri % 2 === 1 && "bg-muted/10",
-                )}
-              >
-                <td className="px-2 py-1 text-right font-mono text-[10px] text-muted-foreground">
-                  {ri + 1}
-                </td>
-                {(row as unknown[]).map((cell, ci) => (
-                  <td
-                    key={ci}
-                    className="max-w-xs truncate whitespace-nowrap px-3 py-1 font-mono"
-                  >
-                    {cell === null ? (
-                      <span className="italic text-muted-foreground/60">
-                        NULL
-                      </span>
-                    ) : (
-                      String(cell)
-                    )}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </ScrollArea>
-  );
+  const active = useTabActive();
+  const [cell, setCell] = useState<CellViewTarget | null>(null);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const exportCsv = async () => {
+    setBusy(true);
+    try {
+      const defaultPath = await join(await downloadDir(), `query_${Date.now()}.csv`);
+      const path = window.prompt("导出当前已加载结果为 CSV，输入保存路径：", defaultPath);
+      if (!path) return;
+      await exportQueryResult(result.columns, result.rows, path);
+      setMessage(`已导出 ${result.rows.length} 行：${path}`);
+    } catch (error) { setMessage(`导出失败：${String(error)}`); }
+    finally { setBusy(false); }
+  };
+  if (!active) return null;
+  return <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex flex-wrap items-center gap-2 border-b px-3 py-1 text-xs">
+      <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={async () => {
+        try { await navigator.clipboard.writeText(copyAsCsv(result.columns, result.rows)); setMessage("已复制 CSV"); }
+        catch (error) { setMessage(`复制失败：${String(error)}`); }
+      }}>复制 CSV</Button>
+      <Button variant="ghost" size="sm" className="h-6 text-xs" disabled={busy} onClick={() => void exportCsv()}>导出 CSV</Button>
+      <span role="status" className="text-muted-foreground">{message || "拖动调整列宽 · 双击查看完整值"}</span>
+    </div>
+    <DataGrid columns={result.columns} rows={result.rows} onCellView={setCell} />
+    {result.rows.length === 0 && <p className="p-4 text-sm text-muted-foreground">查询完成，无匹配数据</p>}
+    <CellViewerDialog open={cell !== null} onOpenChange={open => { if (!open) setCell(null); }} columnName={cell?.columnName ?? ""} value={cell?.value} />
+  </div>;
 }
 
 // ─── Multi-statement results ──────────────────────────────────────

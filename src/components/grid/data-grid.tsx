@@ -1,5 +1,4 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from "react";
-import { useDebounce } from "@/hooks/use-debounce";
 import {
   useReactTable,
   getCoreRowModel,
@@ -72,29 +71,25 @@ function FilterCell({
   filter?: ColumnFilter;
   onChange: (f: ColumnFilter | null) => void;
 }) {
-  const op: FilterOp = filter?.op ?? "=";
+  const [op, setOp] = useState<FilterOp>(filter?.op ?? "=");
   const noValue = NO_VALUE_OPS.includes(op);
-
-  // Local input state so keystrokes don't lag; debounce propagation to parent
   const [localValue, setLocalValue] = useState(filter?.value ?? "");
-  const debouncedValue = useDebounce(localValue, 300);
 
-  // Propagate debounced value upstream
-  useEffect(() => {
-    if (noValue) return;
-    onChange(
-      debouncedValue === ""
-        ? null
-        : { column: colName, op, value: debouncedValue },
-    );
-    // Only trigger when debounced value or op changes; onChange identity is stable
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedValue, op, noValue, colName]);
-
-  // Sync local value when external filter is cleared (e.g., "清除筛选" button)
-  useEffect(() => {
+  const committedKey = JSON.stringify(filter ?? null);
+  const [previousKey, setPreviousKey] = useState(committedKey);
+  if (previousKey !== committedKey) {
+    setPreviousKey(committedKey);
+    setOp(filter?.op ?? "=");
     setLocalValue(filter?.value ?? "");
-  }, [filter?.value]);
+  }
+
+  const applyFilter = () => {
+    onChange(
+      noValue || localValue !== ""
+        ? { column: colName, op, value: noValue ? "" : localValue }
+        : null,
+    );
+  };
 
   return (
     <div
@@ -109,12 +104,10 @@ function FilterCell({
         value={op}
         onChange={(e) => {
           const newOp = e.target.value as FilterOp;
+          setOp(newOp);
           if (NO_VALUE_OPS.includes(newOp)) {
             setLocalValue("");
             onChange({ column: colName, op: newOp, value: "" });
-          } else {
-            onChange(null);
-            setLocalValue("");
           }
         }}
       >
@@ -127,9 +120,22 @@ function FilterCell({
       {!noValue && (
         <input
           className="min-w-0 flex-1 rounded bg-transparent px-1 text-[11px] outline-none focus:ring-1 focus:ring-ring"
-          placeholder="值…"
+          placeholder="值…（Enter 筛选）"
+          aria-label={`${colName} 筛选值`}
+          title="输入完成后按 Enter 执行筛选"
           value={localValue}
           onChange={(e) => setLocalValue(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (
+              e.key === "Enter" &&
+              !e.nativeEvent.isComposing &&
+              e.keyCode !== 229
+            ) {
+              e.preventDefault();
+              applyFilter();
+            }
+          }}
         />
       )}
     </div>
@@ -460,7 +466,7 @@ export function DataGrid({
   const colDefs = useMemo<ColumnDef<GridRow>[]>(
     () =>
       columns.map((col, colIdx) => ({
-        id: col || String(colIdx),
+        id: columns.indexOf(col) === colIdx ? (col || String(colIdx)) : `${col} (${colIdx + 1})`,
         accessorFn: (row: GridRow) => row[colIdx],
         header: col,
         size: 140,

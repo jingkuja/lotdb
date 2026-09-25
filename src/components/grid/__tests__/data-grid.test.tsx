@@ -152,3 +152,49 @@ it("does not expose editing for read-only grids", () => {
   expect(screen.queryByRole("textbox")).toBeNull();
   expect(screen.queryByTitle("编辑单元格")).toBeNull();
 });
+
+it("keeps filter drafts focused until Enter and ignores IME confirmation", () => {
+  vi.useFakeTimers();
+  try {
+    const onFilterChange = vi.fn();
+    const { rerender } = render(
+      <DataGrid
+        columns={["name"]}
+        rows={[["Alice"]]}
+        showFilterRow
+        onFilterChange={onFilterChange}
+      />,
+    );
+    const input = screen.getByLabelText("name 筛选值");
+    input.focus();
+    fireEvent.change(input, { target: { value: "Al" } });
+    vi.advanceTimersByTime(1000);
+    expect(onFilterChange).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: "Alice" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(onFilterChange).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "LIKE" },
+    });
+    fireEvent.keyDown(input, { key: "Enter" });
+    const filter = { column: "name", op: "LIKE" as const, value: "Alice" };
+    expect(onFilterChange).toHaveBeenCalledExactlyOnceWith("name", filter);
+    rerender(
+      <DataGrid
+        columns={["name"]}
+        rows={[]}
+        showFilterRow
+        filters={{ name: filter }}
+        onFilterChange={onFilterChange}
+      />,
+    );
+    expect(screen.getByLabelText("name 筛选值")).toBe(input);
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onFilterChange).toHaveBeenLastCalledWith("name", null);
+  } finally {
+    vi.useRealTimers();
+  }
+});

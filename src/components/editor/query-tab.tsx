@@ -1,3 +1,5 @@
+import { needsWriteConfirmation } from "@/lib/query-actions";
+import { useWorkspaceGuard } from "@/hooks/use-workspace-guard";
 import { useRef, useState, useEffect, useCallback } from "react";
 import {
   Play,
@@ -9,6 +11,7 @@ import {
   Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { QuerySplit } from "./query-split";
 import { SqlEditor, type SqlEditorHandle } from "./sql-editor";
 import {
   ResultPanel,
@@ -45,38 +48,15 @@ interface QueryTabProps {
   connectionId: string;
 }
 
-// Draggable horizontal split divider
-function SplitHandle({ onDrag }: { onDrag: (dy: number) => void }) {
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const onMove = (ev: MouseEvent) => onDrag(ev.clientY - startY);
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
-  return (
-    <div
-      className="group relative flex h-1.5 shrink-0 cursor-row-resize items-center justify-center bg-border hover:bg-primary/40"
-      onMouseDown={handleMouseDown}
-    >
-      <div className="h-0.5 w-8 rounded-full bg-muted-foreground/30 group-hover:bg-primary/60" />
-    </div>
-  );
-}
-
 export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const editorRef = useRef<SqlEditorHandle>(null);
-  const { editorFontSize, editorFontFamily, saveQueryHistory, queryMaxRows } =
+  const { editorFontSize, editorFontFamily, saveQueryHistory, queryMaxRows, confirmDml } =
     usePreferencesStore((s) => s.prefs);
   const [resultState, setResultState] = useState<ResultState>({
     status: "idle",
   });
   const [running, setRunning] = useState(false);
+  useWorkspaceGuard(tabId, running ? "此查询仍在执行，关闭将取消查询并结束会话。" : null);
   const [explainResult, setExplainResult] = useState<ExplainResult | null>(
     null,
   );
@@ -93,8 +73,6 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   // In-flight execution tracking for the stop button
   const currentExecutionRef = useRef<string | null>(null);
   const cancelRequestedRef = useRef(false);
-  // Split: editorHeight in px (null = use flex default)
-  const [editorHeight, setEditorHeight] = useState<number | null>(null);
 
   const setContent = useEditorStore((s) => s.setContent);
   const getContent = useEditorStore((s) => s.getContent);
@@ -265,6 +243,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
 
   useEffect(
     () => () => {
+      cancelRequestedRef.current = true;
       const executionId = currentExecutionRef.current;
       void (async () => {
         if (executionId) await cancelQuery(executionId).catch(() => {});
@@ -281,6 +260,9 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       if (!trimmed) return;
       const stmts = splitStatements(trimmed, dbType);
       if (stmts.length === 0) return;
+      if (confirmDml && stmts.some(needsWriteConfirmation) && !window.confirm(
+        `即将在 ${conn?.name ?? connectionId} 执行可能修改数据或结构的 SQL（${stmts.length} 条）。\n${trimmed.slice(0, 1200)}\n确认执行？`
+      )) return;
 
       // Multi-statement scripts run sequentially with one result tab each.
       // Parameter binding is only supported for single-statement runs.
@@ -299,7 +281,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         void doExecute(single);
       }
     },
-    [doExecute, doExecuteMulti, dbType],
+    [doExecute, doExecuteMulti, dbType, confirmDml, conn?.name, connectionId],
   );
 
   const handleParamExecute = useCallback(
@@ -320,6 +302,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       if (currentExecutionRef.current) return;
       const sql = (editorRef.current?.getSelection() ?? "").trim();
       if (!sql) return;
+      if (analyze && confirmDml && needsWriteConfirmation(sql) && !window.confirm("ANALYZE 将实际执行该 SQL，可能修改数据。确认执行？")) return;
       const executionId = newExecutionId();
       currentExecutionRef.current = executionId;
       cancelRequestedRef.current = false;
@@ -346,7 +329,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         setExplaining(false);
       }
     },
-    [connectionId, tabId, handleReconnect],
+    [connectionId, tabId, handleReconnect, confirmDml],
   );
 
   // Stop: cancel the in-flight query on the server (KILL QUERY /
@@ -426,16 +409,12 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
     [runQuery],
   );
 
-  const handleDrag = useCallback((dy: number) => {
-    setEditorHeight((prev) => Math.max(80, (prev ?? 300) + dy));
-  }, []);
-
   const initialSql = getContent(tabId);
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Toolbar */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-1.5">
         {running || explaining ? (
           <Button
             variant="destructive"
@@ -454,10 +433,12 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
             onClick={handleRun}
           >
             <Play className="size-3" />
-            运行
+            执行当前 / 选区
           </Button>
         )}
 
+        <Button variant="outline" size="sm" className="h-7 text-xs" disabled={running || explaining}
+          onClick={() => { setResultMode("query"); runQuery(editorRef.current?.getValue() ?? ""); }}>执行全部</Button>
         <Button
           variant="ghost"
           size="sm"
@@ -523,7 +504,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         </Button>
 
         <span className="text-xs text-muted-foreground">
-          Cmd+Enter 执行 · Shift+Alt+F 格式化
+          Cmd+Enter 当前/选区 · SQL 草稿自动保存
         </span>
         <div className="flex-1" />
 
@@ -536,30 +517,22 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         )}
       </div>
 
-      {/* Editor pane */}
-      <div
-        className="shrink-0 overflow-hidden"
-        style={editorHeight ? { height: editorHeight } : { flex: "0 0 55%" }}
+      <QuerySplit
+        editor={
+          <SqlEditor
+            ref={editorRef}
+            tabId={tabId}
+            initialValue={initialSql}
+            dbType={dbType}
+            schema={completionSchema}
+            onChange={(v) => setContent(tabId, v)}
+            onExecute={runQuery}
+            onFormat={handleFormat}
+            fontSize={editorFontSize}
+            fontFamily={editorFontFamily}
+          />
+        }
       >
-        <SqlEditor
-          ref={editorRef}
-          tabId={tabId}
-          initialValue={initialSql}
-          dbType={dbType}
-          schema={completionSchema}
-          onChange={(v) => setContent(tabId, v)}
-          onExecute={runQuery}
-          onFormat={handleFormat}
-          fontSize={editorFontSize}
-          fontFamily={editorFontFamily}
-        />
-      </div>
-
-      {/* Drag handle */}
-      <SplitHandle onDrag={handleDrag} />
-
-      {/* Result pane */}
-      <div className="flex flex-1 flex-col overflow-hidden">
         {resultMode === "explain" && explainResult ? (
           <ExplainPanel result={explainResult} analyzed={explainAnalyzed} />
         ) : resultMode === "explain" && explaining ? (
@@ -570,7 +543,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         ) : (
           <ResultPanel state={resultState} />
         )}
-      </div>
+      </QuerySplit>
 
       {/* History dialog */}
       <HistoryDialog

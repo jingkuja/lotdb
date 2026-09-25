@@ -489,6 +489,7 @@ export async function clearHistory(connectionId?: string): Promise<void> {
 export interface TableDataResult {
   columns: string[];
   rows: unknown[][];
+  /** -1 means not counted; exact count is requested separately. */
   totalCount: number;
 }
 
@@ -508,6 +509,7 @@ export async function getTableData(
   orderBy?: string,
   orderDir?: "ASC" | "DESC",
   filters?: ColumnFilter[],
+  options?: { includeCount?: boolean; stableColumns?: string[] },
 ): Promise<TableDataResult> {
   return invoke<TableDataResult>("get_table_data", {
     connectionId,
@@ -519,6 +521,8 @@ export async function getTableData(
     orderBy: orderBy ?? null,
     orderDir: orderDir ?? null,
     filters: filters && filters.length > 0 ? filters : null,
+    includeCount: options?.includeCount ?? false,
+    stableColumns: options?.stableColumns ?? [],
   });
 }
 
@@ -953,4 +957,8 @@ export async function importConnections(
 
 export async function closeQuerySession(connectionId: string, sessionId: string): Promise<void> {
   return invoke<void>("close_query_session", { connectionId, sessionId });
+}
+
+export function exportQueryResult(columns: string[], rows: unknown[][], filePath: string): Promise<void> {
+  return invoke("export_query_result", { columns, rows, filePath });
 }

@@ -1,5 +1,10 @@
+import { useWorkspaceGuard } from "@/hooks/use-workspace-guard";
 import { useState, useCallback, useMemo } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   ChevronLeft,
   ChevronRight,
@@ -58,6 +63,7 @@ import type { DatabaseType } from "@/types/database";
 import { usePreferencesStore } from "@/stores/preferences-store";
 
 interface TableDataTabProps {
+  tabId?: string;
   connectionId: string;
   database: string;
   schema?: string;
@@ -65,6 +71,7 @@ interface TableDataTabProps {
 }
 
 export function TableDataTab({
+  tabId,
   connectionId,
   database,
   schema,
@@ -75,6 +82,8 @@ export function TableDataTab({
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
+  const [pageCursors, setPageCursors] = useState<Record<number, string>>({});
+  const [countRequested, setCountRequested] = useState(false);
   const [sort, setSort] = useState<SortState | undefined>(undefined);
   const [showFilterRow, setShowFilterRow] = useState(false);
   const [filterMap, setFilterMap] = useState<Record<string, ColumnFilter>>({});
@@ -107,50 +116,6 @@ export function TableDataTab({
     confirmDml,
   } = usePreferencesStore((s) => s.prefs);
 
-  const activeFilters = Object.values(filterMap);
-  const offset = page * PAGE_SIZE;
-
-  const {
-    data: fetchedData,
-    isLoading,
-    isError,
-    error,
-    refetch,
-    isFetching,
-  } = useQuery({
-    queryKey: [
-      "table-data",
-      connectionId,
-      database,
-      schema,
-      table,
-      page,
-      PAGE_SIZE,
-      sort,
-      activeFilters,
-    ],
-    queryFn: () =>
-      getTableData(
-        connectionId,
-        database,
-        schema,
-        table,
-        PAGE_SIZE,
-        offset,
-        sort?.column,
-        sort?.dir,
-        activeFilters.length > 0 ? activeFilters : undefined,
-      ),
-    staleTime: 30_000,
-    refetchOnWindowFocus: false,
-  });
-
-  const hasPending =
-    Object.keys(pendingEdits).length > 0 ||
-    pendingDeletes.size > 0 ||
-    newRows.length > 0;
-  const data = hasPending ? (draftData ?? fetchedData) : fetchedData;
-
   // Fetch PK info (stale is fine — schema rarely changes)
   const { data: columnDefs = [] } = useQuery({
     queryKey: ["table-columns", connectionId, database, schema, table],
@@ -174,11 +139,81 @@ export function TableDataTab({
     [columnDefs],
   );
 
-  const totalPages = data ? Math.ceil(data.totalCount / PAGE_SIZE) : 0;
-  const rowStart = offset + 1;
-  const rowEnd = data
-    ? Math.min(offset + data.rows.length, data.totalCount)
-    : 0;
+  const activeFilters = Object.values(filterMap);
+  const offset = page * PAGE_SIZE;
+  const cursorKey = pkColumns.length === 1 && (!sort || sort.column === pkColumns[0]) ? pkColumns[0] : undefined;
+  const cursor = pageCursors[page];
+  const pageFilters: ColumnFilter[] = cursorKey && cursor !== undefined
+    ? [...activeFilters, { column: cursorKey, op: sort?.dir === "DESC" ? "<" : ">", value: cursor }]
+    : activeFilters;
+  const { data: countData, isFetching: counting, error: countError } = useQuery({
+    queryKey: ["table-count", connectionId, database, schema, table, activeFilters],
+    queryFn: () => getTableData(connectionId, database, schema, table, 0, 0, undefined, undefined, activeFilters, { includeCount: true }),
+    enabled: countRequested,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const {
+    data: fetchedData,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+  } = useQuery({
+    queryKey: [
+      "table-data",
+      connectionId,
+      database,
+      schema,
+      table,
+      page,
+      PAGE_SIZE,
+      sort,
+      activeFilters,
+      cursor,
+      pkColumns,
+    ],
+    queryFn: () =>
+      getTableData(
+        connectionId,
+        database,
+        schema,
+        table,
+        PAGE_SIZE + 1,
+        cursorKey && cursor !== undefined ? 0 : offset,
+        sort?.column,
+        sort?.dir,
+        pageFilters.length > 0 ? pageFilters : undefined,
+        { stableColumns: pkColumns },
+      ),
+    enabled: columnDefs.length > 0,
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const hasPending =
+    Object.keys(pendingEdits).length > 0 ||
+    pendingDeletes.size > 0 ||
+    newRows.length > 0;
+  useWorkspaceGuard(tabId ?? `${connectionId}/${database}/${schema}/${table}`, committing ? "数据正在提交，请等待完成。" : hasPending ? "此表有尚未提交的数据变更，关闭将丢弃变更。" : null);
+  const pageData = useMemo(() => fetchedData ? {...fetchedData, rows: fetchedData.rows.slice(0, PAGE_SIZE)} : undefined, [fetchedData, PAGE_SIZE]);
+  const data = hasPending ? (draftData ?? pageData) : pageData;
+
+  const totalCount = countData?.totalCount ?? (data && data.totalCount >= 0 ? data.totalCount : undefined);
+  const hasNextPage = fetchedData ? fetchedData.rows.length > PAGE_SIZE : false;
+  const rowStart = data?.rows.length ? offset + 1 : 0;
+  const rowEnd = offset + (data?.rows.length ?? 0);
+  const nextPage = () => {
+    if (cursorKey && data?.rows.length) {
+      const value = data.rows[data.rows.length - 1]?.[data.columns.indexOf(cursorKey)];
+      if (value != null) setPageCursors(prev => ({...prev, [page + 1]: String(value)}));
+    }
+    setSelectedRows(new Set());
+    setPage(p => p + 1);
+  };
 
   // ── Change helpers ────────────────────────────────────────────────
 
@@ -186,6 +221,8 @@ export function TableDataTab({
     (col: string, dir: SortDir | null) => {
       if (hasPending || committing) return;
       setPage(0);
+      setPageCursors({});
+      setCountRequested(false);
       setSelectedRows(new Set());
       setSort(dir ? { column: col, dir } : undefined);
     },
@@ -247,6 +284,8 @@ export function TableDataTab({
     (col: string, filter: ColumnFilter | null) => {
       if (hasPending || committing) return;
       setPage(0);
+      setPageCursors({});
+      setCountRequested(false);
       setSelectedRows(new Set());
       setFilterMap((prev) => {
         const next = { ...prev };
@@ -262,6 +301,8 @@ export function TableDataTab({
     if (hasPending || committing) return;
     setFilterMap({});
     setPage(0);
+    setPageCursors({});
+    setCountRequested(false);
     setSelectedRows(new Set());
   }, [hasPending, committing]);
 
@@ -371,6 +412,7 @@ export function TableDataTab({
       setNewRows([]);
       setDraftData(null);
       setSelectedRows(new Set());
+      await qc.invalidateQueries({ queryKey: ["table-count", connectionId, database, schema, table] });
       await qc.invalidateQueries({
         queryKey: ["table-data", connectionId, database, schema, table],
       });
@@ -391,7 +433,7 @@ export function TableDataTab({
       style={{ "--grid-font-size": `${gridFontSize}px` } as React.CSSProperties}
     >
       {/* Toolbar */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-1.5">
         <Button
           variant="ghost"
           size="sm"
@@ -552,32 +594,33 @@ export function TableDataTab({
 
         <div className="flex-1" />
 
-        {data && data.totalCount > 0 && (
-          <span className="text-xs text-muted-foreground">
-            {rowStart}–{rowEnd} / {data.totalCount.toLocaleString()} 行
-          </span>
-        )}
+        {data && <span className="text-xs text-muted-foreground">{rowStart}–{rowEnd} 行{totalCount !== undefined ? ` / 共 ${totalCount.toLocaleString()} 行` : ""}</span>}
+        <Button variant="ghost" size="sm" className="h-7 text-xs" disabled={counting}
+          onClick={() => setCountRequested(true)}>{counting ? "统计中…" : totalCount !== undefined ? "总数已统计" : "统计总行数"}</Button>
+        {countError && <span role="alert" className="text-xs text-destructive">总数统计失败</span>}
 
         <Button
           variant="ghost"
           size="sm"
           className="h-7 w-7 p-0"
           disabled={page === 0 || isFetching || hasPending || committing}
-          onClick={() => setPage((p) => p - 1)}
+          aria-label="上一页"
+          onClick={() => { setSelectedRows(new Set()); setPage((p) => p - 1); }}
         >
           <ChevronLeft className="size-4" />
         </Button>
         <span className="min-w-[3rem] text-center text-xs text-muted-foreground">
-          {totalPages > 0 ? `${page + 1} / ${totalPages}` : "—"}
+          第 {page + 1} 页
         </span>
         <Button
           variant="ghost"
           size="sm"
           className="h-7 w-7 p-0"
           disabled={
-            page >= totalPages - 1 || isFetching || hasPending || committing
+            !hasNextPage || isFetching || hasPending || committing
           }
-          onClick={() => setPage((p) => p + 1)}
+          aria-label="下一页"
+          onClick={nextPage}
         >
           <ChevronRight className="size-4" />
         </Button>
@@ -639,35 +682,36 @@ export function TableDataTab({
               {activeFilters.length > 0 ? "筛选条件下无匹配数据" : "表中无数据"}
             </div>
           )}
-        {data && (data.rows.length > 0 || newRows.length > 0) && (
-          <DataGrid
-            columns={data.columns}
-            rows={data.rows}
-            sort={sort}
-            onSort={handleSort}
-            filters={filterMap}
-            onFilterChange={handleFilterChange}
-            showFilterRow={showFilterRow}
-            pendingEdits={pendingEdits}
-            onEditCommit={
-              pkColumns.length > 0 && !conn?.readonly && !committing
-                ? handleEditCommit
-                : undefined
-            }
-            pendingDeletes={pendingDeletes}
-            onDeleteToggle={
-              pkColumns.length > 0 && !conn?.readonly && !committing
-                ? handleDeleteToggle
-                : undefined
-            }
-            newRows={newRows}
-            onNewRowChange={handleNewRowChange}
-            onCellView={setCellView}
-            selectedRows={selectedRows}
-            onRowSelectToggle={handleRowSelectToggle}
-            onSelectAll={handleSelectAll}
-          />
-        )}
+        {data &&
+          (data.rows.length > 0 || newRows.length > 0 || showFilterRow) && (
+            <DataGrid
+              columns={data.columns}
+              rows={data.rows}
+              sort={sort}
+              onSort={handleSort}
+              filters={filterMap}
+              onFilterChange={handleFilterChange}
+              showFilterRow={showFilterRow}
+              pendingEdits={pendingEdits}
+              onEditCommit={
+                pkColumns.length > 0 && !conn?.readonly && !committing
+                  ? handleEditCommit
+                  : undefined
+              }
+              pendingDeletes={pendingDeletes}
+              onDeleteToggle={
+                pkColumns.length > 0 && !conn?.readonly && !committing
+                  ? handleDeleteToggle
+                  : undefined
+              }
+              newRows={newRows}
+              onNewRowChange={handleNewRowChange}
+              onCellView={setCellView}
+              selectedRows={selectedRows}
+              onRowSelectToggle={handleRowSelectToggle}
+              onSelectAll={handleSelectAll}
+            />
+          )}
       </div>
 
       <ChangePreviewDialog

@@ -95,6 +95,7 @@ pub fn run() {
             commands::data::execute_statements,
             // Export / Import
             commands::transfer::export_table_data,
+            commands::transfer::export_query_result,
             commands::transfer::batch_export_tables,
             commands::transfer::preview_import_file,
             commands::transfer::import_table_data,

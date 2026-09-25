@@ -139,8 +139,10 @@ pub async fn get_table_data(
     order_by: Option<String>,
     order_dir: Option<String>, // "ASC" | "DESC"
     filters: Option<Vec<ColumnFilter>>,
+    include_count: Option<bool>,
+    stable_columns: Option<Vec<String>>,
 ) -> Result<TableDataResult, AppError> {
-    get_table_data_impl(
+    get_table_page_impl(
         &pools,
         &connection_id,
         &database,
@@ -151,6 +153,8 @@ pub async fn get_table_data(
         order_by.as_deref(),
         order_dir.as_deref(),
         filters.as_deref().unwrap_or(&[]),
+        include_count.unwrap_or(false),
+        stable_columns.as_deref().unwrap_or(&[]),
     )
     .await
 }
@@ -169,6 +173,16 @@ pub async fn get_table_data_impl(
     order_dir: Option<&str>,
     filters: &[ColumnFilter],
 ) -> Result<TableDataResult, AppError> {
+    get_table_page_impl(pools, connection_id, database, schema, table, limit, offset,
+        order_by, order_dir, filters, true, &[]).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn get_table_page_impl(
+    pools: &PoolManager, connection_id: &str, database: &str, schema: Option<&str>,
+    table: &str, limit: i64, offset: i64, order_by: Option<&str>, order_dir: Option<&str>,
+    filters: &[ColumnFilter], include_count: bool, stable_columns: &[String],
+) -> Result<TableDataResult, AppError> {
     let entry = pools
         .pools
         .get(connection_id)
@@ -181,7 +195,7 @@ pub async fn get_table_data_impl(
 
     match &entry.pool {
         DbPool::MySQL(pool) => {
-            fetch_mysql(pool, database, table, limit, offset, order_by, dir, filters).await
+            fetch_mysql(pool, database, table, limit, offset, order_by, dir, filters, include_count, stable_columns).await
         }
         DbPool::Postgres(_) => {
             drop(entry);
@@ -191,7 +205,7 @@ pub async fn get_table_data_impl(
                 .map_err(AppError::connection)?;
             let schema_ref = schema.unwrap_or("public");
             fetch_postgres(
-                &pool, database, schema_ref, table, limit, offset, order_by, dir, filters,
+                &pool, database, schema_ref, table, limit, offset, order_by, dir, filters, include_count, stable_columns,
             )
             .await
         }
@@ -225,6 +239,8 @@ async fn fetch_mysql(
     order_by: Option<&str>,
     order_dir: &str,
     filters: &[ColumnFilter],
+    include_count: bool,
+    stable_columns: &[String],
 ) -> Result<TableDataResult, AppError> {
     let q_table = format!(
         "{}.{}",
@@ -234,14 +250,14 @@ async fn fetch_mysql(
     let (where_clause, binds) = build_where(filters, Dialect::MySQL, &Default::default());
 
     let count_sql = format!("SELECT COUNT(*) FROM {q_table}{where_clause}");
-    let total_count: i64 = sqlx::query_scalar_with(&count_sql, build_mysql_args(&binds)?)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| AppError::from_sqlx("计数失败", e))?;
+    let total_count: i64 = if include_count { sqlx::query_scalar_with(&count_sql, build_mysql_args(&binds)?)
+        .fetch_one(pool).await.map_err(|e| AppError::from_sqlx("计数失败", e))? } else { -1 };
 
-    let order_clause = order_by
-        .map(|col| format!(" ORDER BY {} {order_dir}", quote_ident_mysql(col)))
-        .unwrap_or_default();
+    let mut order_columns: Vec<String> = order_by.into_iter().map(str::to_owned).collect();
+    for col in stable_columns { if !order_columns.contains(col) { order_columns.push(col.clone()); } }
+    let order_clause = if order_columns.is_empty() { String::new() } else {
+        format!(" ORDER BY {}", order_columns.iter().map(|col| format!("{} {order_dir}", quote_ident_mysql(col))).collect::<Vec<_>>().join(", "))
+    };
     let (limit, offset) = sanitize_page(limit, offset);
     let data_sql = format!(
         "SELECT * FROM {q_table}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}"
@@ -287,20 +303,22 @@ async fn fetch_postgres(
     order_by: Option<&str>,
     order_dir: &str,
     filters: &[ColumnFilter],
+    include_count: bool,
+    stable_columns: &[String],
 ) -> Result<TableDataResult, AppError> {
     let q_table = format!("{}.{}", quote_ident_pg(schema), quote_ident_pg(table));
     let col_types = pg_column_types(pool, schema, table).await?;
     let (where_clause, binds) = build_where(filters, Dialect::Postgres, &col_types);
 
     let count_sql = format!("SELECT COUNT(*) FROM {q_table}{where_clause}");
-    let total_count: i64 = sqlx::query_scalar_with(&count_sql, build_pg_args(&binds)?)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| AppError::from_sqlx("计数失败", e))?;
+    let total_count: i64 = if include_count { sqlx::query_scalar_with(&count_sql, build_pg_args(&binds)?)
+        .fetch_one(pool).await.map_err(|e| AppError::from_sqlx("计数失败", e))? } else { -1 };
 
-    let order_clause = order_by
-        .map(|col| format!(" ORDER BY {} {order_dir}", quote_ident_pg(col)))
-        .unwrap_or_default();
+    let mut order_columns: Vec<String> = order_by.into_iter().map(str::to_owned).collect();
+    for col in stable_columns { if !order_columns.contains(col) { order_columns.push(col.clone()); } }
+    let order_clause = if order_columns.is_empty() { String::new() } else {
+        format!(" ORDER BY {}", order_columns.iter().map(|col| format!("{} {order_dir}", quote_ident_pg(col))).collect::<Vec<_>>().join(", "))
+    };
     let (limit, offset) = sanitize_page(limit, offset);
     let data_sql = format!(
         "SELECT * FROM {q_table}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}"
@@ -337,7 +355,7 @@ async fn fetch_postgres(
 
 /// Clamp LIMIT/OFFSET to non-negative values before inlining into SQL.
 fn sanitize_page(limit: i64, offset: i64) -> (i64, i64) {
-    (limit.clamp(0, i64::MAX), offset.clamp(0, i64::MAX))
+    (limit.clamp(0, 1001), offset.clamp(0, i64::MAX))
 }
 
 /// Column name → pg_catalog udt_name for a table (or view).

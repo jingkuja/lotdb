@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for LotDB","local":true,"windows":["main"],"permissions":["core:default","core:path:allow-resolve-directory","sql:default"]}}
+{"default":{"identifier":"default","description":"Default capabilities for LotDB","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-destroy","core:path:allow-resolve-directory","sql:default"]}}

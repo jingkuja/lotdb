@@ -1,3 +1,4 @@
+import { currentStatement } from "@/lib/query-actions";
 import {
   useEffect,
   useRef,
@@ -18,6 +19,7 @@ export interface SqlEditorHandle {
   getValue(): string;
   /** Selected text, or full content when nothing is selected */
   getSelection(): string;
+  getCurrentStatement(): string;
   /** Replace the entire document content (preserves undo history) */
   setValue(content: string): void;
   focus(): void;
@@ -52,6 +54,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
     const sqlCompartmentRef = useRef(new Compartment());
     // Separate compartment for font theme — hot-swappable
     const fontCompartmentRef = useRef(new Compartment());
+    const themeCompartmentRef = useRef(new Compartment());
 
     // Stable callback refs — avoids re-registering extensions on every render
     const onChangeRef = useRef(onChange);
@@ -66,8 +69,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
       if (!view) return "";
       const { from, to } = view.state.selection.main;
       if (from !== to) return view.state.sliceDoc(from, to);
-      return view.state.doc.toString();
-    }, []);
+      return currentStatement(view.state.doc.toString(), from, dbType ?? "mysql");
+    }, [dbType]);
 
     const setValue = useCallback((content: string) => {
       const view = viewRef.current;
@@ -80,6 +83,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
     useImperativeHandle(ref, () => ({
       getValue: () => viewRef.current?.state.doc.toString() ?? "",
       getSelection,
+      getCurrentStatement: getSelection,
       setValue,
       focus: () => viewRef.current?.focus(),
     }));
@@ -140,7 +144,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
         doc: initialValue,
         extensions: [
           basicSetup,
-          oneDark,
+          themeCompartmentRef.current.of(document.documentElement.classList.contains("dark") ? oneDark : []),
           // SQL extension is inside a compartment so schema can be updated later
           compartment.of(sql({ dialect, schema: {} })),
           // Font theme in its own compartment for hot-swap
@@ -148,14 +152,20 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
           editorCmds,
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
           changeListener,
-          placeholder("-- 在此输入 SQL，Cmd+Enter 执行"),
+          placeholder("-- Cmd+Enter 执行当前语句或选区"),
         ],
       });
 
       const view = new EditorView({ state, parent: containerRef.current });
       viewRef.current = view;
+      const syncTheme = () => view.dispatch({ effects: themeCompartmentRef.current.reconfigure(
+        document.documentElement.classList.contains("dark") ? oneDark : []
+      ) });
+      const observer = new MutationObserver(syncTheme);
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
 
       return () => {
+        observer.disconnect();
         view.destroy();
         viewRef.current = null;
       };
@@ -196,7 +206,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
       <div
         ref={containerRef}
         className="h-full w-full overflow-hidden"
-        style={{ colorScheme: "dark" }}
+
       />
     );
   },

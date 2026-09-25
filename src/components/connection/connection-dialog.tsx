@@ -59,6 +59,7 @@ export function ConnectionDialog({
 
   // SSH
   const [sshEnabled, setSshEnabled] = useState(!!initial?.ssh);
+  const [sshFingerprint, setSshFingerprint] = useState(initial?.ssh?.hostKeyFingerprint ?? "");
   const [sshHost, setSshHost] = useState(initial?.ssh?.host ?? "");
   const [sshPort, setSshPort] = useState(initial?.ssh?.port ?? 22);
   const [sshUser, setSshUser] = useState(initial?.ssh?.user ?? "");
@@ -106,6 +107,7 @@ export function ConnectionDialog({
     ssh: sshEnabled
       ? {
           host: sshHost,
+          hostKeyFingerprint: sshFingerprint.trim() || undefined,
           port: sshPort,
           user: sshUser,
           authType: sshAuthType,
@@ -253,6 +255,9 @@ export function ConnectionDialog({
               <div className="grid grid-cols-[100px_1fr] items-center gap-3">
                 <Label>SSH 主机</Label>
                 <Input value={sshHost} onChange={(e) => setSshHost(e.target.value)} />
+                <Label htmlFor="ssh-fingerprint">服务器指纹（可选）</Label>
+                <Input id="ssh-fingerprint" value={sshFingerprint} onChange={e => setSshFingerprint(e.target.value)} placeholder="SHA256:…" />
+                <p className="text-xs text-muted-foreground">默认校验 ~/.ssh/known_hosts；也可填写通过可信渠道确认的 SHA256 指纹。未知或变更的主机密钥会被拒绝。</p>
 
                 <Label>SSH 端口</Label>
                 <Input

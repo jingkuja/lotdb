@@ -1788,3 +1788,21 @@ mod tests {
         assert_eq!(ext_for_format("unknown"), "csv");
     }
 }
+
+/// Exports only the already-loaded query result; never silently overwrites a file.
+#[tauri::command]
+pub async fn export_query_result(columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, file_path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&file_path).map_err(|e| e.to_string())?;
+        let mut writer = csv::Writer::from_writer(file);
+        writer.write_record(&columns).map_err(|e| e.to_string())?;
+        for row in rows {
+            writer.write_record(row.iter().map(|value| match value {
+                serde_json::Value::Null => String::new(),
+                serde_json::Value::String(s) => s.clone(),
+                value => value.to_string(),
+            })).map_err(|e| e.to_string())?;
+        }
+        writer.flush().map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
+}

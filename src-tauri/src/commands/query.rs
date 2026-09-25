@@ -6,7 +6,7 @@ use crate::utils::keychain;
 use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use sqlx::{Arguments, Column, Row};
+use sqlx::{Arguments, Column, Row, Executor, Either};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -46,8 +46,8 @@ pub struct QueryRegistry {
 }
 
 enum QuerySession {
-    MySQL(sqlx::MySqlConnection),
-    Postgres(sqlx::PgConnection),
+    MySQL(sqlx::MySqlConnection, u64),
+    Postgres(sqlx::PgConnection, u64),
 }
 
 impl QueryRegistry {
@@ -450,26 +450,26 @@ pub async fn run_session_query(
     let mut session = slot.lock().await;
     if session.is_none() {
         *session = Some(match pool {
-            crate::db::pool::DbPool::MySQL(p) => QuerySession::MySQL(
-                p.acquire()
-                    .await
-                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?
-                    .detach(),
-            ),
-            crate::db::pool::DbPool::Postgres(p) => QuerySession::Postgres(
-                p.acquire()
-                    .await
-                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?
-                    .detach(),
-            ),
+            crate::db::pool::DbPool::MySQL(p) => {
+                let mut conn = p.acquire().await
+                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?.detach();
+                let pid = mysql_session_id(&mut conn).await?;
+                QuerySession::MySQL(conn, pid)
+            }
+            crate::db::pool::DbPool::Postgres(p) => {
+                let mut conn = p.acquire().await
+                    .map_err(|e| AppError::from_sqlx("获取会话失败", e))?.detach();
+                let pid = pg_session_id(&mut conn).await?;
+                QuerySession::Postgres(conn, pid)
+            }
         });
     }
     let kind = classify_statement(sql);
     let max_rows = normalize_max_rows(max_rows);
     let start = Instant::now();
     let result = match session.as_mut().unwrap() {
-        QuerySession::MySQL(conn) => {
-            let pid = mysql_session_id(conn).await?;
+        QuerySession::MySQL(conn, pid) => {
+            let pid = *pid;
             let _guard = CancellationGuard::register(registry, execution_id, connection_id, pid);
             let args = if params.is_empty() {
                 MySqlArgs::None
@@ -496,8 +496,8 @@ pub async fn run_session_query(
             }
             result
         }
-        QuerySession::Postgres(conn) => {
-            let pid = pg_session_id(conn).await?;
+        QuerySession::Postgres(conn, pid) => {
+            let pid = *pid;
             let _guard = CancellationGuard::register(registry, execution_id, connection_id, pid);
             let args = if params.is_empty() {
                 PgArgs::None
@@ -636,11 +636,14 @@ async fn run_mysql(
 ) -> Result<RawResult, AppError> {
     match kind {
         StmtKind::Rows => {
+            let columns = conn.describe(sql).await
+                .map_err(|e| AppError::from_sqlx("获取结果列失败", e))?
+                .columns().iter().map(|c| c.name().to_string()).collect();
             let mut stream = match args {
                 MySqlArgs::None => sqlx::Executor::fetch(&mut *conn, sql),
                 MySqlArgs::Some(a) => sqlx::query_with(sql, a).fetch(&mut *conn),
             };
-            let out = collect_rows(&mut stream, max_rows, mysql_value_to_json).await?;
+            let out = collect_rows(&mut stream, max_rows, mysql_value_to_json, columns).await?;
             drop(stream);
             Ok(out)
         }
@@ -655,6 +658,7 @@ async fn run_mysql(
     }
 }
 
+#[allow(deprecated)]
 async fn run_postgres(
     conn: &mut sqlx::PgConnection,
     sql: &str,
@@ -662,26 +666,46 @@ async fn run_postgres(
     max_rows: Option<u64>,
     args: PgArgs,
 ) -> Result<RawResult, AppError> {
-    match kind {
-        StmtKind::Rows => {
-            let mut stream = match args {
-                PgArgs::None => sqlx::Executor::fetch(&mut *conn, sql),
-                PgArgs::Some(a) => sqlx::query_with(sql, a).fetch(&mut *conn),
-            };
-            let out = collect_rows(&mut stream, max_rows, pg_value_to_json).await?;
-            drop(stream);
-            Ok(out)
-        }
-        StmtKind::Execute => {
-            let res = match args {
-                PgArgs::None => sqlx::Executor::execute(&mut *conn, sql).await,
-                PgArgs::Some(a) => sqlx::query_with(sql, a).execute(&mut *conn).await,
+    // Describe result-bearing statements before execution, including zero-row
+    // RETURNING. Never issue a preflight for ROLLBACK in an aborted transaction.
+    let may_return = kind == StmtKind::Rows || sql.split(|c: char| !c.is_ascii_alphabetic())
+        .any(|word| word.eq_ignore_ascii_case("RETURNING"));
+    let mut columns: Vec<String> = if may_return {
+        conn.describe(sql).await.map_err(|e| AppError::from_sqlx("获取结果列失败", e))?
+            .columns().iter().map(|c| c.name().to_string()).collect()
+    } else { vec![] };
+    let mut stream = match args {
+        PgArgs::None => sqlx::Executor::fetch_many(&mut *conn, sql),
+        PgArgs::Some(a) => sqlx::query_with(sql, a).fetch_many(&mut *conn),
+    };
+    let mut rows = vec![];
+    let mut affected = 0;
+    let mut bytes = 0;
+    let mut truncated = false;
+    // Drain completion messages so DML RETURNING reports the actual affected
+    // count and leaves the session ready, even when display rows are capped.
+    while let Some(item) = stream.next().await {
+        match item.map_err(|e| AppError::from_sqlx("查询失败", e))? {
+            Either::Left(done) => affected += done.rows_affected(),
+            Either::Right(row) => {
+                if columns.is_empty() {
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                }
+                if truncated || max_rows.is_some_and(|m| rows.len() as u64 >= m) {
+                    truncated = true;
+                    continue;
+                }
+                let values: Vec<_> = (0..row.columns().len()).map(|i| pg_value_to_json(&row, i)).collect();
+                bytes += serde_json::to_vec(&values).map_or(0, |v| v.len());
+                if bytes > MAX_RESULT_BYTES { truncated = true; continue; }
+                rows.push(values);
             }
-            .map_err(|e| AppError::from_sqlx("执行失败", e))?;
-            Ok((vec![], vec![], res.rows_affected(), false))
         }
     }
+    Ok((columns, rows, affected, truncated))
 }
+
+const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stream rows from `stream`, stopping after `max_rows` rows.
 /// Returns (columns, rows, rows_returned, truncated).
@@ -689,13 +713,14 @@ async fn collect_rows<S, R, F>(
     stream: &mut S,
     max_rows: Option<u64>,
     to_json: F,
+    mut columns: Vec<String>,
 ) -> Result<RawResult, AppError>
 where
     S: futures::Stream<Item = Result<R, sqlx::Error>> + Unpin,
     R: Row,
     F: Fn(&R, usize) -> serde_json::Value,
 {
-    let mut columns: Vec<String> = vec![];
+    let mut bytes = 0;
     let mut rows: Vec<Vec<serde_json::Value>> = vec![];
     let mut truncated = false;
 
@@ -711,7 +736,10 @@ where
             }
         }
         let n = row.columns().len();
-        rows.push((0..n).map(|i| to_json(&row, i)).collect());
+        let values: Vec<_> = (0..n).map(|i| to_json(&row, i)).collect();
+        bytes += serde_json::to_vec(&values).map_or(0, |v| v.len());
+        if bytes > MAX_RESULT_BYTES { truncated = true; break; }
+        rows.push(values);
     }
 
     let affected = rows.len() as u64;

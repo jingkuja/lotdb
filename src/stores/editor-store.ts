@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 
 interface EditorStore {
   /** tabId → SQL content */
@@ -8,7 +9,7 @@ interface EditorStore {
   removeContent: (tabId: string) => void;
 }
 
-export const useEditorStore = create<EditorStore>((set, get) => ({
+export const useEditorStore = create<EditorStore>()(persist((set, get) => ({
   contents: {},
   setContent: (tabId, content) =>
     set((s) => ({ contents: { ...s.contents, [tabId]: content } })),
@@ -19,4 +20,4 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       delete next[tabId];
       return { contents: next };
     }),
-}));
+}), { name: "lotdb-editor-drafts" }));

@@ -24,7 +24,7 @@ impl SshTunnel {
         // 1. Connect to SSH server
         let config = Arc::new(client::Config::default());
         let addr = format!("{}:{}", ssh.host, ssh.port);
-        let mut session = client::connect(config, addr.as_str(), TunnelHandler)
+        let mut session = client::connect(config, addr.as_str(), TunnelHandler { host: ssh.host.clone(), port: ssh.port, fingerprint: ssh.host_key_fingerprint.clone() })
             .await
             .map_err(|e| format!("SSH 连接失败: {e}"))?;
 
@@ -133,17 +133,25 @@ async fn forward_connection(
     Ok(())
 }
 
-/// Minimal SSH client handler — accepts all server keys.
-/// TODO: verify against known_hosts in a future iteration.
-pub struct TunnelHandler;
+/// Host authentication happens before database/SSH credentials are sent.
+pub struct TunnelHandler {
+    host: String,
+    port: u16,
+    fingerprint: Option<String>,
+}
 
 impl client::Handler for TunnelHandler {
-    type Error = russh::Error;
-
-    async fn check_server_key(
-        &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
-    ) -> Result<bool, Self::Error> {
-        Ok(true)
+    type Error = anyhow::Error;
+    async fn check_server_key(&mut self, key: &russh::keys::ssh_key::PublicKey) -> Result<bool, Self::Error> {
+        let actual = key.fingerprint(russh::keys::ssh_key::HashAlg::Sha256).to_string();
+        if let Some(expected) = self.fingerprint.as_deref().filter(|s| !s.trim().is_empty()) {
+            if expected.trim() == actual { return Ok(true); }
+            anyhow::bail!("SSH 主机指纹不匹配，已拒绝连接。服务器指纹：{actual}");
+        }
+        match russh::keys::check_known_hosts(&self.host, self.port, key) {
+            Ok(true) => Ok(true),
+            Ok(false) => anyhow::bail!("未知 SSH 主机，已拒绝连接。请先校验并记录 known_hosts，或在连接设置中填写已确认的指纹：{actual}"),
+            Err(error) => anyhow::bail!("SSH 主机密钥校验失败：{error}。服务器指纹：{actual}"),
+        }
     }
 }
