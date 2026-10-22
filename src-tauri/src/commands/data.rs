@@ -467,6 +467,30 @@ pub struct RowCheck {
     pub original: Vec<serde_json::Value>,
 }
 
+/// Compare a freshly read row with the snapshot the grid sent back.
+///
+/// The snapshot made a round trip through JavaScript, where `10.0` becomes
+/// `10`; serde_json treats those as different numbers, so numbers are compared
+/// by value instead of by representation.
+fn same_row(actual: &[serde_json::Value], original: &[serde_json::Value]) -> bool {
+    actual.len() == original.len() && actual.iter().zip(original).all(|(a, b)| same_value(a, b))
+}
+
+fn same_value(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => match (x.as_i64(), y.as_i64()) {
+            (Some(x), Some(y)) => x == y,
+            _ => match (x.as_u64(), y.as_u64()) {
+                (Some(x), Some(y)) => x == y,
+                _ => x.as_f64() == y.as_f64(),
+            },
+        },
+        (Value::Array(x), Value::Array(y)) => same_row(x, y),
+        _ => a == b,
+    }
+}
+
 /// Execute multiple SQL statements inside a single transaction.
 /// Returns the total number of rows affected.
 #[tauri::command]
@@ -532,7 +556,7 @@ pub async fn execute_checked_statements_impl(
                         .map(|i| mysql_value_to_json(row, i))
                         .collect::<Vec<_>>()
                 });
-                if actual.as_ref() != Some(&check.original) {
+                if !actual.is_some_and(|row| same_row(&row, &check.original)) {
                     return Err(AppError::sql("数据已被其他操作修改或删除，本次提交已回滚。请先保存草稿，再刷新数据并重新编辑。"));
                 }
             }
@@ -580,7 +604,7 @@ pub async fn execute_checked_statements_impl(
                         .map(|i| pg_value_to_json(row, i))
                         .collect::<Vec<_>>()
                 });
-                if actual.as_ref() != Some(&check.original) {
+                if !actual.is_some_and(|row| same_row(&row, &check.original)) {
                     return Err(AppError::sql("数据已被其他操作修改或删除，本次提交已回滚。请先保存草稿，再刷新数据并重新编辑。"));
                 }
             }
@@ -687,6 +711,22 @@ mod tests {
         assert_eq!(quote_ident_mysql("norm"), "`norm`");
         assert_eq!(quote_ident_pg("q\"uote"), "\"q\"\"uote\"");
         assert_eq!(quote_ident_pg("norm"), "\"norm\"");
+    }
+
+    #[test]
+    fn row_check_ignores_float_representation() {
+        use serde_json::json;
+        // Backend reads DOUBLE 10 as 10.0; JS sends it back as 10.
+        assert!(same_row(
+            &[json!(1), json!(10.0), json!("a")],
+            &[json!(1), json!(10), json!("a")]
+        ));
+        assert!(same_row(&[json!(0.1)], &[json!(0.1)]));
+        assert!(same_row(&[json!(u64::MAX)], &[json!(u64::MAX)]));
+        assert!(!same_row(&[json!(10.5)], &[json!(10)]));
+        assert!(!same_row(&[json!("10")], &[json!(10)]));
+        assert!(!same_row(&[json!(null)], &[json!(0)]));
+        assert!(!same_row(&[json!(1)], &[json!(1), json!(2)]));
     }
 
     #[test]

@@ -1186,3 +1186,321 @@ async fn verify_optimizations(
         query(format!("DROP TABLE {table}")).await;
     }
 }
+
+// ─── 2026-10-22 review P0 regressions ─────────────────────────────
+
+/// Round-trips a grid row through JSON text the way the Tauri IPC does
+/// (JavaScript turns `10.0` into `10`).
+fn ipc_roundtrip(row: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    row.iter()
+        .map(|v| match v.as_f64() {
+            Some(f) if v.is_f64() && f.fract() == 0.0 && f.abs() < 9e15 => {
+                serde_json::json!(f as i64)
+            }
+            _ => v.clone(),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn mysql_p0_regressions() {
+    use lotdb_lib::commands::data::{
+        execute_checked_statements_impl, get_table_page_impl, RowCheck,
+    };
+    use lotdb_lib::commands::transfer::export_table_data_impl;
+    let Some(mut cfg) = mysql_config() else {
+        return;
+    };
+    cfg.id = "p0-mysql".into();
+    let pools = PoolManager::new();
+    let reg = registry();
+    pools.open(&cfg).await.unwrap();
+    let q = |sql: &'static str| {
+        let (pools, reg) = (&pools, &reg);
+        async move {
+            run_query(pools, reg, "p0-mysql", sql, None, None)
+                .await
+                .unwrap()
+        }
+    };
+    q("DROP DATABASE IF EXISTS lotdb_p0").await;
+    q("CREATE DATABASE lotdb_p0").await;
+    q(
+        "CREATE TABLE lotdb_p0.v (id INT PRIMARY KEY, code VARCHAR(20) COLLATE utf8mb4_bin, \
+       y YEAR, ok TINYINT(1), ts TIMESTAMP NULL, zero DATETIME NULL, dur TIME, price DOUBLE, \
+       raw VARBINARY(4))",
+    )
+    .await;
+    // Zero dates need a permissive sql_mode; each run_query is its own
+    // session, so pin one session for both statements.
+    for sql in [
+        "SET SESSION sql_mode = ''",
+        "INSERT INTO lotdb_p0.v VALUES (1, 'Abc', 2024, 2, '2026-10-22 12:00:00', \
+         '0000-00-00 00:00:00', '-838:59:59', 10, X'00FF0102')",
+    ] {
+        lotdb_lib::commands::query::run_session_query(
+            &pools,
+            &reg,
+            "p0-mysql",
+            sql,
+            &[],
+            None,
+            None,
+            Some("seed"),
+        )
+        .await
+        .unwrap();
+    }
+    reg.close_sessions("p0-mysql");
+
+    // Session behaves like the mysql CLI: server time zone, `||` means OR.
+    let s = q("SELECT @@session.time_zone = @@global.time_zone, 1 || 0").await;
+    // Both are BIGINT expressions, which LotDB renders as strings.
+    assert_eq!(
+        s.rows[0],
+        vec![serde_json::json!("1"), serde_json::json!("1")]
+    );
+
+    let expected = [
+        serde_json::json!(1),
+        serde_json::json!("Abc"),
+        serde_json::json!(2024),
+        serde_json::json!(2),
+        serde_json::json!("2026-10-22 12:00:00"),
+        serde_json::json!("0000-00-00 00:00:00"),
+        serde_json::json!("-838:59:59"),
+        serde_json::json!(10.0),
+        serde_json::json!("\\x00ff0102"),
+    ];
+    // Text protocol (SQL editor) and binary protocol (grid) agree.
+    let text = q("SELECT * FROM lotdb_p0.v").await;
+    assert_eq!(text.rows[0], expected);
+    let page = get_table_page_impl(
+        &pools,
+        "p0-mysql",
+        "lotdb_p0",
+        None,
+        "v",
+        10,
+        0,
+        None,
+        None,
+        &[],
+        false,
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.rows[0], expected);
+
+    // Editing a row whose DOUBLE holds a whole number is not a false conflict.
+    let changed = execute_checked_statements_impl(
+        &pools,
+        "p0-mysql",
+        Some("lotdb_p0"),
+        &["UPDATE `lotdb_p0`.`v` SET `code` = 'Abd' WHERE `id` = 1".into()],
+        &[RowCheck {
+            sql: "SELECT * FROM `lotdb_p0`.`v` WHERE `id` = 1 FOR UPDATE".into(),
+            original: ipc_roundtrip(&page.rows[0]),
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(changed, 1);
+
+    // Exports carry the real values, never a placeholder.
+    let path = std::env::temp_dir().join("lotdb_p0_mysql.csv");
+    export_table_data_impl(
+        None,
+        &pools,
+        "p0-mysql".into(),
+        "lotdb_p0".into(),
+        None,
+        "v".into(),
+        "csv".into(),
+        vec![],
+        None,
+        0,
+        path.to_string_lossy().into(),
+    )
+    .await
+    .unwrap();
+    let csv = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        csv.contains("2026-10-22 12:00:00") && csv.contains("\"Abd\""),
+        "{csv}"
+    );
+    assert!(!csv.contains("不支持的类型"), "{csv}");
+    // A WHERE fragment can't smuggle in a second statement.
+    let err = export_table_data_impl(
+        None,
+        &pools,
+        "p0-mysql".into(),
+        "lotdb_p0".into(),
+        None,
+        "v".into(),
+        "csv".into(),
+        vec![],
+        Some("1=1; DROP TABLE lotdb_p0.v".into()),
+        0,
+        path.to_string_lossy().into(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("多条语句"), "{err}");
+    let _ = std::fs::remove_file(&path);
+
+    // Passwords with URL-reserved characters connect.
+    q("DROP USER IF EXISTS 'lotdb_p0_pw'@'%'").await;
+    q("CREATE USER 'lotdb_p0_pw'@'%' IDENTIFIED BY 'p#a/s?s%41@:w'").await;
+    let mut special = cfg.clone();
+    special.id = "p0-mysql-pw".into();
+    special.user = "lotdb_p0_pw".into();
+    special.password = "p#a/s?s%41@:w".into();
+    pools.open(&special).await.unwrap();
+    pools.close(&special.id).await;
+    q("DROP USER 'lotdb_p0_pw'@'%'").await;
+
+    q("DROP DATABASE lotdb_p0").await;
+    pools.close("p0-mysql").await;
+}
+
+#[tokio::test]
+async fn pg_p0_regressions() {
+    use lotdb_lib::commands::data::{
+        execute_checked_statements_impl, get_table_page_impl, RowCheck,
+    };
+    use lotdb_lib::commands::transfer::{export_table_data_impl, transfer_table_data_impl};
+    let Some(mut cfg) = pg_config() else {
+        return;
+    };
+    cfg.id = "p0-pg".into();
+    let db = cfg.database.clone().unwrap();
+    let pools = PoolManager::new();
+    let reg = registry();
+    pools.open(&cfg).await.unwrap();
+    let q = |sql: &'static str| {
+        let (pools, reg) = (&pools, &reg);
+        async move {
+            run_query(pools, reg, "p0-pg", sql, None, None)
+                .await
+                .unwrap()
+        }
+    };
+    q("DROP TABLE IF EXISTS lotdb_p0_v, lotdb_p0_t").await;
+    q("DROP TYPE IF EXISTS lotdb_p0_mood").await;
+    q("CREATE TYPE lotdb_p0_mood AS ENUM ('happy', 'sad')").await;
+    q(
+        "CREATE TABLE lotdb_p0_v (id int PRIMARY KEY, m lotdb_p0_mood, ip inet, net cidr, \
+       d interval, tz timetz, price float8, pt point)",
+    )
+    .await;
+    q(
+        "CREATE TABLE lotdb_p0_t (id int PRIMARY KEY, m text, ip text, net text, d text, \
+       tz text, price float8, pt text)",
+    )
+    .await;
+    q(
+        "INSERT INTO lotdb_p0_v VALUES (1, 'happy', '10.0.0.1', '10.1.0.0/16', \
+       '1 day 02:03:04.5', '12:00:00+08', 10, '(1,2)')",
+    )
+    .await;
+
+    let text = q("SELECT * FROM lotdb_p0_v").await;
+    assert_eq!(text.rows[0][1], "happy");
+    assert_eq!(text.rows[0][2], "10.0.0.1");
+    assert_eq!(text.rows[0][3], "10.1.0.0/16");
+    assert_eq!(text.rows[0][4], "1 day 02:03:04.5");
+    assert_eq!(text.rows[0][7], "(1,2)");
+    let page = get_table_page_impl(
+        &pools,
+        "p0-pg",
+        &db,
+        Some("public"),
+        "lotdb_p0_v",
+        10,
+        0,
+        None,
+        None,
+        &[],
+        false,
+        &[],
+    )
+    .await
+    .unwrap();
+    for col in 1..=4 {
+        assert_eq!(page.rows[0][col], text.rows[0][col], "column {col}");
+    }
+    assert_eq!(page.rows[0][5], "12:00:00+08:00");
+
+    let changed = execute_checked_statements_impl(
+        &pools,
+        "p0-pg",
+        Some(&db),
+        &["UPDATE \"public\".\"lotdb_p0_v\" SET \"ip\" = '10.0.0.2' WHERE \"id\" = 1".into()],
+        &[RowCheck {
+            sql: "SELECT * FROM \"public\".\"lotdb_p0_v\" WHERE \"id\" = 1 FOR UPDATE".into(),
+            original: ipc_roundtrip(&page.rows[0]),
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(changed, 1);
+
+    // Transfer and export move real values.
+    let r = transfer_table_data_impl(
+        None,
+        &pools,
+        "p0-pg".into(),
+        db.clone(),
+        Some("public".into()),
+        "lotdb_p0_v".into(),
+        "p0-pg".into(),
+        db.clone(),
+        Some("public".into()),
+        "lotdb_p0_t".into(),
+        vec![],
+        false,
+        None,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.rows_transferred, r.error_message), (1, None));
+    let moved = q("SELECT m, ip, d, pt FROM lotdb_p0_t").await;
+    assert_eq!(
+        moved.rows[0],
+        vec![
+            serde_json::json!("happy"),
+            serde_json::json!("10.0.0.2"),
+            serde_json::json!("1 day 02:03:04.5"),
+            serde_json::json!("(1,2)"),
+        ]
+    );
+    let path = std::env::temp_dir().join("lotdb_p0_pg.csv");
+    export_table_data_impl(
+        None,
+        &pools,
+        "p0-pg".into(),
+        db.clone(),
+        Some("public".into()),
+        "lotdb_p0_v".into(),
+        "csv".into(),
+        vec![],
+        None,
+        0,
+        path.to_string_lossy().into(),
+    )
+    .await
+    .unwrap();
+    let csv = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        csv.contains("\"happy\"") && !csv.contains("不支持的类型"),
+        "{csv}"
+    );
+    let _ = std::fs::remove_file(&path);
+
+    q("DROP TABLE lotdb_p0_v, lotdb_p0_t").await;
+    q("DROP TYPE lotdb_p0_mood").await;
+    pools.close("p0-pg").await;
+}

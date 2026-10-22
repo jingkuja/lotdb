@@ -6,7 +6,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
     MySqlPool, PgPool,
 };
-use std::{str::FromStr, time::Duration};
+use std::time::Duration;
 
 /// A live connection — pool plus an optional SSH tunnel keeping it alive.
 pub struct ActiveConnection {
@@ -128,7 +128,6 @@ impl PoolManager {
             entry.effective_port,
             &config,
         )
-        .map_err(|e| format!("PG 连接配置错误: {e}"))?
         .database(database);
 
         let readonly = config.readonly;
@@ -235,8 +234,7 @@ async fn build_connection(config: &ConnectionConfig) -> Result<ActiveConnection,
     let readonly = config.readonly;
     let pool = match &config.db_type {
         DbType::MySQL => {
-            let opts = build_mysql_opts(&config.user, &config.password, &host, port, config)
-                .map_err(|e| format!("MySQL 连接配置错误: {e}"))?;
+            let opts = build_mysql_opts(&config.user, &config.password, &host, port, config);
             let p = MySqlPoolOptions::new()
                 .after_connect(move |conn, _| {
                     Box::pin(async move {
@@ -256,8 +254,7 @@ async fn build_connection(config: &ConnectionConfig) -> Result<ActiveConnection,
             DbPool::MySQL(p)
         }
         DbType::Postgres => {
-            let opts = build_pg_opts(&config.user, &config.password, &host, port, config)
-                .map_err(|e| format!("PostgreSQL 连接配置错误: {e}"))?;
+            let opts = build_pg_opts(&config.user, &config.password, &host, port, config);
             let p = PgPoolOptions::new()
                 .after_connect(move |conn, _| {
                     Box::pin(async move {
@@ -286,22 +283,32 @@ async fn build_connection(config: &ConnectionConfig) -> Result<ActiveConnection,
     })
 }
 
+/// MySQL options built field by field: credentials are never pasted into a
+/// URL, so passwords containing `#`, `/`, `?`, `%` or `@` work verbatim.
+///
+/// sqlx's MySQL defaults are tuned for applications, not a general client:
+/// they force `time_zone='+00:00'` (NOW()/TIMESTAMP shift away from the
+/// server zone) and add `PIPES_AS_CONCAT` to sql_mode (`a || b` stops meaning
+/// OR). Both are turned off so sessions behave like the mysql CLI.
 fn build_mysql_opts(
     user: &str,
     password: &str,
     host: &str,
     port: u16,
     config: &ConnectionConfig,
-) -> Result<MySqlConnectOptions, String> {
-    let url = format!(
-        "mysql://{}:{}@{}:{}/{}",
-        user,
-        password,
-        host,
-        port,
-        config.database.as_deref().unwrap_or(""),
-    );
-    let mut opts = MySqlConnectOptions::from_str(&url).map_err(|e| format!("URL 解析失败: {e}"))?;
+) -> MySqlConnectOptions {
+    let mut opts = MySqlConnectOptions::new()
+        .host(host)
+        .port(port)
+        .username(user)
+        .timezone(None)
+        .pipes_as_concat(false);
+    if !password.is_empty() {
+        opts = opts.password(password);
+    }
+    if let Some(db) = config.database.as_deref().filter(|d| !d.is_empty()) {
+        opts = opts.database(db);
+    }
 
     if let Some(ssl) = ssl_if_enabled(&config.ssl) {
         opts = opts.ssl_mode(if ssl.ca_path.is_some() || ssl.client_cert_path.is_some() {
@@ -323,25 +330,31 @@ fn build_mysql_opts(
         opts = opts.ssl_mode(MySqlSslMode::Preferred);
     }
 
-    Ok(opts)
+    opts
 }
 
+/// PostgreSQL options built field by field (see [`build_mysql_opts`]).
 fn build_pg_opts(
     user: &str,
     password: &str,
     host: &str,
     port: u16,
     config: &ConnectionConfig,
-) -> Result<PgConnectOptions, String> {
-    let url = format!(
-        "postgres://{}:{}@{}:{}/{}",
-        user,
-        password,
-        host,
-        port,
-        config.database.as_deref().unwrap_or("postgres"),
-    );
-    let mut opts = PgConnectOptions::from_str(&url).map_err(|e| format!("URL 解析失败: {e}"))?;
+) -> PgConnectOptions {
+    let mut opts = PgConnectOptions::new_without_pgpass()
+        .host(host)
+        .port(port)
+        .username(user)
+        .database(
+            config
+                .database
+                .as_deref()
+                .filter(|d| !d.is_empty())
+                .unwrap_or("postgres"),
+        );
+    if !password.is_empty() {
+        opts = opts.password(password);
+    }
 
     if let Some(ssl) = ssl_if_enabled(&config.ssl) {
         opts = opts.ssl_mode(if ssl.ca_path.is_some() {
@@ -361,7 +374,7 @@ fn build_pg_opts(
         }
     }
 
-    Ok(opts)
+    opts
 }
 
 /// Return the SSL config only when it's enabled.
