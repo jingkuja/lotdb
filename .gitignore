@@ -1,9 +1,13 @@
 # Dependencies
 node_modules/
+.pnpm-store/
 
 # Build output
 dist/
 src-tauri/target/
+
+# TypeScript incremental build info
+*.tsbuildinfo
 
 # Environment
 .env
