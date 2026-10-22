@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { alertDialog } from "@/stores/app-dialog-store";
 import { Upload, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import {
   Dialog,
@@ -44,7 +45,7 @@ export function RestoreDialog({
 
   const handleRestore = useCallback(async () => {
     if (!filePath.trim()) {
-      alert("请选择备份文件");
+      await alertDialog("请先填写备份文件路径");
       return;
     }
     setRunning(true);

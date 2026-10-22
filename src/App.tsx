@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppLayout } from "@/components/layout/app-layout";
+import { AppDialogHost } from "@/components/layout/app-dialog-host";
 import { TaskStatusBar } from "@/components/transfer/task-status-bar";
 import { useTheme } from "@/hooks/use-theme";
 import { useWorkspaceStore } from "@/stores/workspace-store";
@@ -39,6 +40,7 @@ function App() {
           <RecentTracker />
           <AppLayout />
           <TaskStatusBar />
+          <AppDialogHost />
         </TooltipProvider>
       </ThemeProvider>
     </QueryClientProvider>

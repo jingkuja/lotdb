@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { confirmDialog } from "@/stores/app-dialog-store";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -81,7 +82,14 @@ export function ObjectDdlTab({
   };
 
   const handleDropTrigger = async () => {
-    if (!confirm(`确定要删除触发器 "${name}" 吗？`)) return;
+    if (
+      !(await confirmDialog(`确定要删除触发器 "${name}" 吗？`, {
+        title: "删除触发器",
+        confirmLabel: "删除",
+        destructive: true,
+      }))
+    )
+      return;
     setDropping(true);
     setDropError(null);
     try {

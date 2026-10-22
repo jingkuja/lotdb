@@ -46,7 +46,7 @@ export function useGlobalShortcuts({ onShowShortcuts, onShowSearch }: Options) {
       // ── Cmd+W — close active tab ─────────────────────────────────
       if (mod && !e.shiftKey && !e.altKey && e.key === "w") {
         e.preventDefault();
-        if (activeTabId) removeTab(activeTabId);
+        if (activeTabId) void removeTab(activeTabId);
         return;
       }
 

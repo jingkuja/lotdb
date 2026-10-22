@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { alertDialog } from "@/stores/app-dialog-store";
 import {
   ArrowRight,
   Loader2,
@@ -394,7 +395,7 @@ export function DataTransferDialog({
       setMapping(autoMap);
       setStep("mapping");
     } catch (e) {
-      alert(`加载列失败: ${e}`);
+      await alertDialog(String(e), { title: "加载列失败" });
     } finally {
       setLoadingCols(false);
     }
@@ -406,7 +407,7 @@ export function DataTransferDialog({
       .filter((m): m is ColumnMap => m.tgt !== null);
 
     if (colMapping.length === 0) {
-      alert("至少需要映射一列");
+      await alertDialog("至少需要映射一列");
       return;
     }
 

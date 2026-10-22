@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { confirmDialog, promptDialog } from "@/stores/app-dialog-store";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -66,16 +67,25 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
     });
   };
 
-  const handleAddValue = (name: string) => {
-    const label = window.prompt(`向枚举 "${name}" 添加新值：`);
+  const handleAddValue = async (name: string) => {
+    const label = await promptDialog(`向枚举 "${name}" 添加新值：`, "", {
+      title: "添加枚举值",
+    });
     if (!label?.trim()) return;
     void withBusy(`add:${name}`, async () => {
       await addEnumValue(connectionId, database, schema, name, label.trim());
     });
   };
 
-  const handleDrop = (name: string) => {
-    if (!confirm(`确定要删除枚举类型 "${name}" 吗？`)) return;
+  const handleDrop = async (name: string) => {
+    if (
+      !(await confirmDialog(`确定要删除枚举类型 "${name}" 吗？`, {
+        title: "删除枚举类型",
+        confirmLabel: "删除",
+        destructive: true,
+      }))
+    )
+      return;
     void withBusy(`drop:${name}`, async () => {
       try {
         await dropEnumType(connectionId, database, schema, name, false);
@@ -83,9 +93,10 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
         const msg = String(e);
         if (
           msg.includes("dependent objects") &&
-          confirm(
+          (await confirmDialog(
             `枚举 "${name}" 正被其他对象使用。\n强制级联删除（CASCADE）将同时删除依赖列，确定吗？`,
-          )
+            { title: "级联删除", confirmLabel: "级联删除", destructive: true },
+          ))
         ) {
           await dropEnumType(connectionId, database, schema, name, true);
         } else {
@@ -165,7 +176,7 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
                     className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                     title="添加枚举值"
                     disabled={busy !== null}
-                    onClick={() => handleAddValue(e.name)}
+                    onClick={() => void handleAddValue(e.name)}
                   >
                     {busy === `add:${e.name}` ? (
                       <Loader2 className="size-3 animate-spin" />
@@ -177,7 +188,7 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
                     className="rounded p-1 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
                     title="删除枚举类型"
                     disabled={busy !== null}
-                    onClick={() => handleDrop(e.name)}
+                    onClick={() => void handleDrop(e.name)}
                   >
                     {busy === `drop:${e.name}` ? (
                       <Loader2 className="size-3 animate-spin" />

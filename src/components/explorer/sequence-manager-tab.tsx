@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { alertDialog, confirmDialog, promptDialog } from "@/stores/app-dialog-store";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -95,20 +96,32 @@ export function SequenceManagerTab({
     });
   };
 
-  const handleRestart = (name: string) => {
-    const input = window.prompt(
+  const handleRestart = async (name: string) => {
+    const input = await promptDialog(
       `重置序列 "${name}" 到指定值（留空则回到 START 值）：`,
       "",
+      { title: "重置序列" },
     );
     if (input === null) return;
+    if (input.trim() && !/^-?\d+$/.test(input.trim())) {
+      await alertDialog("请输入整数", { title: "重置序列" });
+      return;
+    }
     void withBusy(`restart:${name}`, async () => {
       const v = input.trim();
       await restartSequence(connectionId, database, schema, name, v ? Number(v) : null);
     });
   };
 
-  const handleDrop = (name: string) => {
-    if (!confirm(`确定要删除序列 "${name}" 吗？`)) return;
+  const handleDrop = async (name: string) => {
+    if (
+      !(await confirmDialog(`确定要删除序列 "${name}" 吗？`, {
+        title: "删除序列",
+        confirmLabel: "删除",
+        destructive: true,
+      }))
+    )
+      return;
     void withBusy(`drop:${name}`, async () => {
       await dropSequence(connectionId, database, schema, name);
     });
@@ -209,7 +222,7 @@ export function SequenceManagerTab({
                         className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                         title="重置（RESTART）"
                         disabled={busy !== null}
-                        onClick={() => handleRestart(s.name)}
+                        onClick={() => void handleRestart(s.name)}
                       >
                         {busy === `restart:${s.name}` ? (
                           <Loader2 className="size-3 animate-spin" />
@@ -221,7 +234,7 @@ export function SequenceManagerTab({
                         className="rounded p-1 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
                         title="删除"
                         disabled={busy !== null}
-                        onClick={() => handleDrop(s.name)}
+                        onClick={() => void handleDrop(s.name)}
                       >
                         {busy === `drop:${s.name}` ? (
                           <Loader2 className="size-3 animate-spin" />

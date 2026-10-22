@@ -1,4 +1,5 @@
 import { flushDrafts } from "@/stores/editor-store";
+import { confirmDialog } from "@/stores/app-dialog-store";
 import { pendingWorkspaceMessages } from "@/lib/workspace-guards";
 import { useState, useCallback, useEffect } from "react";
 import { useWorkspaceStore } from "@/stores/workspace-store";
@@ -38,8 +39,13 @@ export function AppLayout() {
               if (messages.length) {
                 event.preventDefault();
                 if (
-                  window.confirm(
+                  await confirmDialog(
                     messages.join("\n") + "\n退出将丢弃未提交变更，确定退出？",
+                    {
+                      title: "退出 LotDB",
+                      confirmLabel: "退出",
+                      destructive: true,
+                    },
                   )
                 )
                   await getCurrentWindow().destroy();

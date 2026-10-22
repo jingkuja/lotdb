@@ -90,7 +90,7 @@ function TabItem({ tab }: { tab: Tab }) {
         className="ml-1 shrink-0 rounded p-0.5 opacity-0 hover:bg-accent group-hover:opacity-100 focus-visible:opacity-100"
         onClick={(e) => {
           e.stopPropagation();
-          removeTab(tab.id);
+          void removeTab(tab.id);
         }}
       >
         <X className="size-3" />

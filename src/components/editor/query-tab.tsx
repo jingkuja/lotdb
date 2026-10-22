@@ -47,6 +47,7 @@ import { usePreferencesStore } from "@/stores/preferences-store";
 import { detectParams, type SqlParam } from "@/lib/sql-params";
 import { splitStatements } from "@/lib/split-statements";
 import { formatDbError, isConnectionError } from "@/lib/error";
+import { confirmDialog } from "@/stores/app-dialog-store";
 import type { DatabaseType } from "@/types/database";
 
 interface QueryTabProps {
@@ -154,9 +155,10 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
     if (running || explaining || contextBusy) return;
     if (
       sessionReady.current &&
-      !window.confirm(
+      !(await confirmDialog(
         "切换数据库或 schema 将结束当前会话，并回滚未提交事务。确认切换？",
-      )
+        { title: "切换查询上下文", confirmLabel: "切换" },
+      ))
     )
       return;
     setContextBusy(true);
@@ -375,7 +377,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   );
 
   const runQuery = useCallback(
-    (sqlToRun: string) => {
+    async (sqlToRun: string) => {
       if (currentExecutionRef.current || contextBusy) return;
       const trimmed = sqlToRun.trim();
       if (!trimmed) return;
@@ -384,11 +386,14 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       if (
         confirmDml &&
         stmts.some(needsWriteConfirmation) &&
-        !window.confirm(
-          `即将在 ${conn?.name ?? connectionId} 执行可能修改数据或结构的 SQL（${stmts.length} 条）。\n${trimmed.slice(0, 1200)}\n确认执行？`,
-        )
+        !(await confirmDialog(
+          `即将在 ${conn?.name ?? connectionId} 执行可能修改数据或结构的 SQL（${stmts.length} 条）。\n\n${trimmed.slice(0, 1200)}`,
+          { title: "确认执行", confirmLabel: "执行", destructive: true },
+        ))
       )
         return;
+      // The dialog is async: another run may have started meanwhile.
+      if (currentExecutionRef.current) return;
 
       // Multi-statement scripts run sequentially with one result tab each.
       // Parameter binding is only supported for single-statement runs.
@@ -428,7 +433,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const handleRun = () => {
     setResultMode("query");
     const sql = editorRef.current?.getSelection() ?? "";
-    runQuery(sql);
+    void runQuery(sql);
   };
 
   const handleExplain = useCallback(
@@ -440,9 +445,14 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         analyze &&
         confirmDml &&
         needsWriteConfirmation(sql) &&
-        !window.confirm("ANALYZE 将实际执行该 SQL，可能修改数据。确认执行？")
+        !(await confirmDialog("ANALYZE 将实际执行该 SQL，可能修改数据。确认执行？", {
+          title: "确认 EXPLAIN ANALYZE",
+          confirmLabel: "执行",
+          destructive: true,
+        }))
       )
         return;
+      if (currentExecutionRef.current) return;
       const executionId = newExecutionId();
       currentExecutionRef.current = executionId;
       cancelRequestedRef.current = false;
@@ -530,7 +540,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const handleHistoryExecute = useCallback(
     (sql: string) => {
       editorRef.current?.setValue(sql);
-      runQuery(sql);
+      void runQuery(sql);
     },
     [runQuery],
   );
@@ -555,7 +565,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
   const handleSnippetExecute = useCallback(
     (sql: string) => {
       editorRef.current?.setValue(sql);
-      runQuery(sql);
+      void runQuery(sql);
     },
     [runQuery],
   );
@@ -618,7 +628,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           disabled={running || explaining}
           onClick={() => {
             setResultMode("query");
-            runQuery(editorRef.current?.getValue() ?? "");
+            void runQuery(editorRef.current?.getValue() ?? "");
           }}
         >
           执行全部
@@ -734,7 +744,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           variant="ghost"
           className="h-7 text-xs"
           disabled={running || explaining || contextBusy}
-          onClick={() => runQuery("COMMIT")}
+          onClick={() => void runQuery("COMMIT")}
         >
           提交事务
         </Button>
@@ -743,7 +753,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           variant="ghost"
           className="h-7 text-xs"
           disabled={running || explaining || contextBusy}
-          onClick={() => runQuery("ROLLBACK")}
+          onClick={() => void runQuery("ROLLBACK")}
         >
           回滚事务
         </Button>

@@ -42,6 +42,7 @@ import { BackupDialog } from "@/components/transfer/backup-dialog";
 import { RestoreDialog } from "@/components/transfer/restore-dialog";
 import { CreateDatabaseDialog } from "@/components/admin/create-database-dialog";
 import { dropDatabase } from "@/services/tauri-commands";
+import { alertDialog, confirmDialog } from "@/stores/app-dialog-store";
 import { useQueryClient } from "@tanstack/react-query";
 import { useConnections } from "@/hooks/use-connections";
 
@@ -368,7 +369,14 @@ function TriggersCategory({
   };
 
   const handleDelete = async (name: string, table: string) => {
-    if (!confirm(`确定要删除触发器 "${name}" 吗？`)) return;
+    if (
+      !(await confirmDialog(`确定要删除触发器 "${name}" 吗？`, {
+        title: "删除触发器",
+        confirmLabel: "删除",
+        destructive: true,
+      }))
+    )
+      return;
     setDeleting(name);
     try {
       await dropTrigger(connectionId, database, schema, table, name);
@@ -376,7 +384,7 @@ function TriggersCategory({
         queryKey: ["triggers", connectionId, database],
       });
     } catch (err) {
-      alert(String(err));
+      await alertDialog(String(err), { title: "删除失败" });
     } finally {
       setDeleting(null);
     }
@@ -657,13 +665,20 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
 
   const handleDrop = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm(`确定要删除数据库 "${database}" 吗？此操作不可撤销！`)) return;
+    if (
+      !(await confirmDialog(`确定要删除数据库 "${database}" 吗？此操作不可撤销！`, {
+        title: "删除数据库",
+        confirmLabel: "删除",
+        destructive: true,
+      }))
+    )
+      return;
     setDropping(true);
     try {
       await dropDatabase(connectionId, database);
       queryClient.invalidateQueries({ queryKey: ["databases", connectionId] });
     } catch (err) {
-      alert(String(err));
+      await alertDialog(String(err), { title: "删除失败" });
     } finally {
       setDropping(false);
     }

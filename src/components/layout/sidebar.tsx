@@ -55,6 +55,11 @@ import {
 } from "@/services/tauri-commands";
 import type { ConnectionConfig } from "@/types/database";
 import { cn } from "@/lib/utils";
+import {
+  alertDialog,
+  confirmDialog,
+  promptDialog,
+} from "@/stores/app-dialog-store";
 
 const THEME_CYCLE: ThemeMode[] = ["light", "dark", "system"];
 const THEME_ICONS: Record<ThemeMode, React.ElementType> = {
@@ -162,31 +167,42 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
   };
 
   const handleNewGroup = async () => {
-    const name = window.prompt("新建分组，输入分组名称：");
+    const name = await promptDialog("输入分组名称：", "", {
+      title: "新建分组",
+    });
     if (!name?.trim()) return;
     try {
       await createGroupMutation.mutateAsync(name.trim());
     } catch (e) {
-      alert(String(e));
+      await alertDialog(String(e), { title: "新建分组失败" });
     }
   };
 
   const handleRenameGroup = async (id: string, current: string) => {
-    const name = window.prompt("重命名分组：", current);
+    const name = await promptDialog("输入新的分组名称：", current, {
+      title: "重命名分组",
+    });
     if (!name?.trim() || name.trim() === current) return;
     try {
       await renameGroupMutation.mutateAsync({ id, name: name.trim() });
     } catch (e) {
-      alert(String(e));
+      await alertDialog(String(e), { title: "重命名分组失败" });
     }
   };
 
   const handleDeleteGroup = async (id: string, name: string) => {
-    if (!confirm(`删除分组 "${name}"？组内连接将变为未分组。`)) return;
+    if (
+      !(await confirmDialog(`删除分组 "${name}"？组内连接将变为未分组。`, {
+        title: "删除分组",
+        confirmLabel: "删除",
+        destructive: true,
+      }))
+    )
+      return;
     try {
       await deleteGroupMutation.mutateAsync(id);
     } catch (e) {
-      alert(String(e));
+      await alertDialog(String(e), { title: "删除分组失败" });
     }
   };
 
@@ -212,9 +228,10 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
       .flatMap((tab) => pendingWorkspaceMessages(tab.id));
     if (
       messages.length &&
-      !window.confirm(
+      !(await confirmDialog(
         messages.join("\n") + "\n仍要断开连接？未提交事务将回滚。",
-      )
+        { title: "断开连接", confirmLabel: "断开" },
+      ))
     )
       return;
     await closeConnection(id);
@@ -254,7 +271,17 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
     }
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (conn: ConnectionConfig) => {
+    const { id } = conn;
+    const confirmed = await confirmDialog(
+      `删除连接 "${conn.name}"？保存在钥匙串中的密码也会一并删除，此操作不可撤销。`,
+      { title: "删除连接", confirmLabel: "删除", destructive: true },
+    );
+    if (!confirmed) return;
+    if (openPoolIds.has(id)) {
+      await closeConnection(id).catch(() => {});
+      markPoolClosed(id);
+    }
     deleteMutation.mutate(id);
     if (activeConnectionId === id) setActiveConnection(null);
     setExpandedIds((prev) => {
@@ -538,7 +565,7 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
                         title="删除"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleDelete(conn.id);
+                          void handleDelete(conn);
                         }}
                       >
                         <Trash2 className="size-3" />

@@ -1,4 +1,5 @@
 import { useTabActive } from "@/hooks/use-tab-active";
+import { alertDialog } from "@/stores/app-dialog-store";
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Loader2,
@@ -322,7 +323,7 @@ function BoundProcessRow({
       await killHandler(proc.id, type);
       onKilled();
     } catch (e) {
-      alert(String(e));
+      await alertDialog(String(e), { title: "终止失败" });
     } finally {
       setKilling(null);
     }

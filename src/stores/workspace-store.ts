@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { pendingWorkspaceMessages } from "@/lib/workspace-guards";
+import { confirmDialog } from "./app-dialog-store";
 import { useEditorStore } from "./editor-store";
 
 export interface Tab {
@@ -29,7 +30,8 @@ interface WorkspaceState {
   activeTabId: string | null;
   sidebarWidth: number;
   addTab: (tab: Tab) => void;
-  removeTab: (id: string) => void;
+  /** Resolves false when the user keeps the tab open. */
+  removeTab: (id: string) => Promise<boolean>;
   setActiveTab: (id: string) => void;
   setSidebarWidth: (width: number) => void;
 }
@@ -58,7 +60,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           tabs: [...state.tabs, tab],
           activeTabId: tab.id,
         })),
-      removeTab: (id) => {
+      removeTab: async (id) => {
         const messages = pendingWorkspaceMessages(id);
         const tab = get().tabs.find((t) => t.id === id);
         if (
@@ -68,9 +70,12 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           messages.push("关闭将删除此查询草稿。保留标签页可在下次启动时恢复。");
         if (
           messages.length &&
-          !window.confirm(messages.join("\n") + "\n仍要关闭？")
+          !(await confirmDialog(messages.join("\n") + "\n仍要关闭？", {
+            title: "关闭标签页",
+            confirmLabel: "关闭",
+          }))
         )
-          return;
+          return false;
         useEditorStore.getState().removeContent(id);
         set((state) => {
           const tabs = state.tabs.filter((t) => t.id !== id);
@@ -82,6 +87,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
                 : state.activeTabId,
           };
         });
+        return true;
       },
       setActiveTab: (id) => set({ activeTabId: id }),
       setSidebarWidth: (width) => set({ sidebarWidth: width }),

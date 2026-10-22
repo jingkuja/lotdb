@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import { alertDialog } from "@/stores/app-dialog-store";
 import { Download, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { downloadDir, join } from "@tauri-apps/api/path";
 import {
@@ -61,7 +62,7 @@ export function BackupDialog({
 
   const handleBackup = useCallback(async () => {
     if (!filePath.trim()) {
-      alert("请选择备份文件路径");
+      await alertDialog("请先填写备份文件路径");
       return;
     }
     setRunning(true);

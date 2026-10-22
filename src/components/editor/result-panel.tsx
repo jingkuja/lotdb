@@ -16,6 +16,7 @@ import {
   Unplug,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { promptDialog } from "@/stores/app-dialog-store";
 import type { QueryResult } from "@/services/tauri-commands";
 
 /** One statement's outcome inside a multi-statement run. */
@@ -172,10 +173,13 @@ function ResultGrid({ result }: { result: QueryResult }) {
         await downloadDir(),
         `query_${Date.now()}.csv`,
       );
-      const path = window.prompt(
-        "导出当前已加载结果为 CSV，输入保存路径：",
-        defaultPath,
-      );
+      const path = (
+        await promptDialog(
+          `导出当前已加载的 ${result.rows.length} 行为 CSV，输入保存路径（文件已存在时不会覆盖）：`,
+          defaultPath,
+          { title: "导出 CSV" },
+        )
+      )?.trim();
       if (!path) return;
       await exportQueryResult(result.columns, result.rows, path);
       setMessage(`已导出 ${result.rows.length} 行：${path}`);

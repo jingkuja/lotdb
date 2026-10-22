@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo } from "react";
+import { alertDialog, confirmDialog } from "@/stores/app-dialog-store";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Loader2,
@@ -165,9 +166,10 @@ function UserList({
     const label =
       dbType === "mysql" ? `${user.username}@${user.host}` : user.username;
     if (
-      !confirm(
+      !(await confirmDialog(
         `确定要删除${dbType === "mysql" ? "用户" : "角色"} "${label}" 吗？`,
-      )
+        { title: "删除用户", confirmLabel: "删除", destructive: true },
+      ))
     )
       return;
     const key = `${user.username}@${user.host}`;
@@ -176,7 +178,7 @@ function UserList({
       await dropUser(connectionId, user.username, user.host);
       onRefresh();
     } catch (err) {
-      alert(String(err));
+      await alertDialog(String(err), { title: "操作失败" });
     } finally {
       setDropping(null);
     }
@@ -308,20 +310,27 @@ function DbPrivRow({
       await grantPrivilege(connectionId, username, host, dbName);
       onRefresh();
     } catch (err) {
-      alert(String(err));
+      await alertDialog(String(err), { title: "操作失败" });
     } finally {
       setLoading(null);
     }
   };
 
   const handleRevoke = async () => {
-    if (!confirm(`撤销 ${username} 对数据库 "${dbName}" 的权限？`)) return;
+    if (
+      !(await confirmDialog(`撤销 ${username} 对数据库 "${dbName}" 的权限？`, {
+        title: "撤销权限",
+        confirmLabel: "撤销",
+        destructive: true,
+      }))
+    )
+      return;
     setLoading("revoke");
     try {
       await revokePrivilege(connectionId, username, host, dbName);
       onRefresh();
     } catch (err) {
-      alert(String(err));
+      await alertDialog(String(err), { title: "操作失败" });
     } finally {
       setLoading(null);
     }
