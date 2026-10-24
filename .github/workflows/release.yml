@@ -4,7 +4,7 @@ name: Release
 # package.json) to build a draft GitHub Release with the macOS DMG.
 #
 # Signing and notarization need these repository secrets (see
-# docs/打包上线方案.md §7–8). Without them the job still runs, but the DMG is
+# docs/LotDB-技术架构与上线说明书.md, part 3 §6–7). Without them the job still runs, but the DMG is
 # unsigned and Gatekeeper will block it on other Macs.
 #   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
 #   APPLE_CERTIFICATE_PASSWORD  password of that .p12

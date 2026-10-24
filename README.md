@@ -1,4 +1,4 @@
-Check out this lightweight DB tool I built with vibe coding! It’s usable now, supports MySQL & PostgreSQL, and is fully extensible. See plan.md for the full story.
+Check out this lightweight DB tool I built with vibe coding! It’s usable now, supports MySQL & PostgreSQL, and is fully extensible. See [docs/LotDB-技术架构与上线说明书.md](docs/LotDB-技术架构与上线说明书.md) for the architecture, feature spec and build/release guide.
 
 ## macOS 打包
 
