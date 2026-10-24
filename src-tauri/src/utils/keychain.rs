@@ -130,6 +130,11 @@ pub fn delete_password(connection_id: &str) {
     imp::delete_password(connection_id);
 }
 
+/// Keychain account for a connection's SSH secret (password or key passphrase).
+pub fn ssh_account(connection_id: &str) -> String {
+    format!("{connection_id}:ssh")
+}
+
 /// Keychain APIs are sync and may present a macOS auth dialog. Run them
 /// off the async runtime so a stalled dialog cannot freeze IPC.
 pub async fn load_password_async(connection_id: String) -> Result<String, String> {

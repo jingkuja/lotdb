@@ -11,6 +11,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(PoolManager::new())
         .manage(QueryRegistry::default())
         .manage(commands::transfer::TransferRegistry::default())
@@ -42,6 +43,7 @@ pub fn run() {
             commands::connection::delete_connection,
             commands::connection::test_connection,
             commands::connection::import_connections,
+            commands::connection::export_connections,
             // Pool management + query execution
             commands::query::open_connection,
             commands::query::close_connection,

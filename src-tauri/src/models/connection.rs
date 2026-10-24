@@ -43,6 +43,35 @@ pub struct SshConfig {
     pub passphrase: Option<String>,
 }
 
+impl SshConfig {
+    /// The credential this auth type uses: the password, or the key passphrase.
+    pub fn secret(&self) -> Option<&str> {
+        let secret = if self.auth_type == "key" {
+            &self.passphrase
+        } else {
+            &self.password
+        };
+        secret.as_deref().filter(|s| !s.is_empty())
+    }
+
+    pub fn set_secret(&mut self, secret: String) {
+        if self.auth_type == "key" {
+            self.passphrase = Some(secret);
+        } else {
+            self.password = Some(secret);
+        }
+    }
+
+    /// Copy without credentials, for SQLite and for the frontend.
+    pub fn without_secrets(&self) -> Self {
+        SshConfig {
+            password: None,
+            passphrase: None,
+            ..self.clone()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SslConfig {

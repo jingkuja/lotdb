@@ -7,7 +7,8 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Download, Upload, Check, AlertCircle, Loader2 } from "lucide-react";
-import { getConnections, importConnections } from "@/services/tauri-commands";
+import { save } from "@tauri-apps/plugin-dialog";
+import { exportConnections, importConnections } from "@/services/tauri-commands";
 import type { ConnectionConfig } from "@/types/database";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -27,6 +28,7 @@ export function ImportExportConnectionsDialog({
   // Export state
   const [exporting, setExporting] = useState(false);
   const [exportDone, setExportDone] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   // Import state
   const [preview, setPreview] = useState<ConnectionConfig[] | null>(null);
@@ -36,24 +38,22 @@ export function ImportExportConnectionsDialog({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
 
+  // `<a download>` is cancelled by the Tauri webview, so pick the path with
+  // the native save panel and let the backend write the file.
   const handleExport = async () => {
+    setExportError(null);
+    const filePath = await save({
+      defaultPath: "lotdb-connections.json",
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!filePath) return;
     setExporting(true);
     try {
-      const conns = await getConnections();
-      // Strip passwords before export
-      const sanitized = conns.map((c) => ({ ...c, password: "" }));
-      const json = JSON.stringify(sanitized, null, 2);
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "lotdb-connections.json";
-      a.click();
-      URL.revokeObjectURL(url);
+      await exportConnections(filePath);
       setExportDone(true);
       setTimeout(() => setExportDone(false), 2000);
     } catch (e) {
-      console.error(e);
+      setExportError(String(e));
     } finally {
       setExporting(false);
     }
@@ -131,7 +131,7 @@ export function ImportExportConnectionsDialog({
         {tab === "export" && (
           <div className="flex flex-col gap-4 py-2">
             <p className="text-xs text-muted-foreground">
-              将所有连接配置导出为 JSON 文件。密码不会包含在导出文件中。
+              将所有连接配置导出为 JSON 文件。数据库密码和 SSH 密码/口令不会包含在导出文件中。
             </p>
             <Button onClick={handleExport} disabled={exporting} className="gap-2 self-start">
               {exporting ? (
@@ -143,6 +143,12 @@ export function ImportExportConnectionsDialog({
               )}
               {exportDone ? "已导出" : "导出连接配置"}
             </Button>
+            {exportError && (
+              <div className="flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
+                {exportError}
+              </div>
+            )}
           </div>
         )}
 

@@ -1,4 +1,5 @@
 use crate::db::pool::{DbPool, PoolManager};
+use crate::utils::sql::{quote_ident_mysql, quote_ident_pg, string_literal};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -13,26 +14,19 @@ pub async fn create_database(
     collation: Option<String>,
 ) -> Result<(), String> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    if !db_name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err("数据库名称只能包含字母、数字、下划线和连字符".to_string());
+    if db_name.trim().is_empty() {
+        return Err("数据库名称不能为空".to_string());
     }
+    let pool = main_pool(&pools, &connection_id)?;
 
-    match &entry.pool {
+    match &pool {
         DbPool::MySQL(pool) => {
-            let mut sql = format!("CREATE DATABASE `{db_name}`");
-            if let Some(cs) = &charset {
-                sql.push_str(&format!(" CHARACTER SET {cs}"));
+            let mut sql = format!("CREATE DATABASE {}", quote_ident_mysql(&db_name));
+            if let Some(cs) = charset.as_deref().filter(|s| !s.is_empty()) {
+                sql.push_str(&format!(" CHARACTER SET {}", charset_name(cs)?));
             }
-            if let Some(co) = &collation {
-                sql.push_str(&format!(" COLLATE {co}"));
+            if let Some(co) = collation.as_deref().filter(|s| !s.is_empty()) {
+                sql.push_str(&format!(" COLLATE {}", charset_name(co)?));
             }
             sqlx::query(&sql)
                 .execute(pool)
@@ -40,7 +34,7 @@ pub async fn create_database(
                 .map_err(|e| format!("创建数据库失败: {e}"))?;
         }
         DbPool::Postgres(pool) => {
-            sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+            sqlx::query(&format!("CREATE DATABASE {}", quote_ident_pg(&db_name)))
                 .execute(pool)
                 .await
                 .map_err(|e| format!("创建数据库失败: {e}"))?;
@@ -48,6 +42,56 @@ pub async fn create_database(
     }
 
     Ok(())
+}
+
+/// Charset and collation names are keywords-like identifiers, not quotable
+/// in every position; accept only the characters real names use.
+fn charset_name(name: &str) -> Result<&str, String> {
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        Ok(name)
+    } else {
+        Err(format!("无效的字符集或排序规则: {name}"))
+    }
+}
+
+/// Clone the connection's main pool so no DashMap guard is held across await.
+fn main_pool(pools: &PoolManager, connection_id: &str) -> Result<DbPool, String> {
+    pools
+        .pools
+        .get(connection_id)
+        .map(|entry| entry.pool.clone())
+        .ok_or_else(|| format!("连接 {connection_id} 未打开"))
+}
+
+/// `user`@`host` with both parts quoted; an empty host means any host.
+fn mysql_account(username: &str, host: &str) -> String {
+    let host = if host.is_empty() { "%" } else { host };
+    format!(
+        "{}@{}",
+        quote_ident_mysql(username),
+        quote_ident_mysql(host)
+    )
+}
+
+/// A MySQL string literal for statements that only accept a plain literal
+/// (`IDENTIFIED BY`). Whether a backslash escapes depends on the session's
+/// NO_BACKSLASH_ESCAPES, so ask the very connection that will run it.
+async fn mysql_plain_literal(
+    conn: &mut sqlx::MySqlConnection,
+    value: &str,
+) -> Result<String, String> {
+    let sql_mode: String = sqlx::query_scalar("SELECT CAST(@@SESSION.sql_mode AS CHAR)")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut escaped = value.replace('\'', "''");
+    if !sql_mode
+        .to_ascii_uppercase()
+        .contains("NO_BACKSLASH_ESCAPES")
+    {
+        escaped = escaped.replace('\\', "\\\\");
+    }
+    Ok(format!("'{escaped}'"))
 }
 
 // ─── Drop database ────────────────────────────────────────────────
@@ -58,28 +102,28 @@ pub async fn drop_database(
     connection_id: String,
     db_name: String,
 ) -> Result<(), String> {
+    drop_database_impl(&pools, connection_id, db_name).await
+}
+
+pub async fn drop_database_impl(
+    pools: &PoolManager,
+    connection_id: String,
+    db_name: String,
+) -> Result<(), String> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+    let pool = main_pool(pools, &connection_id)?;
 
-    if !db_name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err("数据库名称包含非法字符".to_string());
-    }
-
-    match &entry.pool {
+    match &pool {
         DbPool::MySQL(pool) => {
-            sqlx::query(&format!("DROP DATABASE `{db_name}`"))
+            sqlx::query(&format!("DROP DATABASE {}", quote_ident_mysql(&db_name)))
                 .execute(pool)
                 .await
                 .map_err(|e| format!("删除数据库失败: {e}"))?;
         }
         DbPool::Postgres(pool) => {
-            sqlx::query(&format!("DROP DATABASE \"{db_name}\""))
+            // Our own cached pool for that database would block the DROP.
+            pools.close_database_pool(&connection_id, &db_name).await;
+            sqlx::query(&format!("DROP DATABASE {}", quote_ident_pg(&db_name)))
                 .execute(pool)
                 .await
                 .map_err(|e| format!("删除数据库失败: {e}"))?;
@@ -181,7 +225,7 @@ pub async fn get_user_grants(
         DbPool::MySQL(pool) => {
             // SHOW GRANTS returns rows like:
             // GRANT SELECT, INSERT ON `mydb`.* TO `user`@`host`
-            let sql = format!("SHOW GRANTS FOR `{username}`@`{host}`");
+            let sql = format!("SHOW GRANTS FOR {}", mysql_account(&username, &host));
             let rows: Vec<(String,)> = sqlx::query_as(&sql)
                 .fetch_all(pool)
                 .await
@@ -263,30 +307,43 @@ pub async fn create_user(
     host: String,
     password: String,
 ) -> Result<(), String> {
-    pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+    create_user_impl(&pools, connection_id, username, host, password).await
+}
 
-    match &entry.pool {
+pub async fn create_user_impl(
+    pools: &PoolManager,
+    connection_id: String,
+    username: String,
+    host: String,
+    password: String,
+) -> Result<(), String> {
+    pools.ensure_writable(&connection_id)?;
+    let pool = main_pool(pools, &connection_id)?;
+
+    match &pool {
         DbPool::MySQL(pool) => {
-            let h = if host.is_empty() { "%" } else { &host };
-            let sql = format!("CREATE USER `{username}`@`{h}` IDENTIFIED BY '{password}'");
-            sqlx::query(&sql)
-                .execute(pool)
+            let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
+            let literal = mysql_plain_literal(&mut conn, &password).await?;
+            let sql = format!(
+                "CREATE USER {} IDENTIFIED BY {literal}",
+                mysql_account(&username, &host)
+            );
+            sqlx::Executor::execute(&mut *conn, sql.as_str())
                 .await
                 .map_err(|e| format!("创建用户失败: {e}"))?;
         }
         DbPool::Postgres(pool) => {
             // PG: CREATE ROLE with LOGIN and PASSWORD
+            let role = quote_ident_pg(&username);
             let sql = if password.is_empty() {
-                format!("CREATE ROLE \"{username}\" WITH LOGIN")
+                format!("CREATE ROLE {role} WITH LOGIN")
             } else {
-                format!("CREATE ROLE \"{username}\" WITH LOGIN PASSWORD '{password}'")
+                format!(
+                    "CREATE ROLE {role} WITH LOGIN PASSWORD {}",
+                    string_literal(&password, false)
+                )
             };
-            sqlx::query(&sql)
-                .execute(pool)
+            sqlx::Executor::execute(pool, sql.as_str())
                 .await
                 .map_err(|e| format!("创建角色失败: {e}"))?;
         }
@@ -312,14 +369,13 @@ pub async fn drop_user(
 
     match &entry.pool {
         DbPool::MySQL(pool) => {
-            let h = if host.is_empty() { "%" } else { &host };
-            sqlx::query(&format!("DROP USER `{username}`@`{h}`"))
+            sqlx::query(&format!("DROP USER {}", mysql_account(&username, &host)))
                 .execute(pool)
                 .await
                 .map_err(|e| format!("删除用户失败: {e}"))?;
         }
         DbPool::Postgres(pool) => {
-            sqlx::query(&format!("DROP ROLE \"{username}\""))
+            sqlx::query(&format!("DROP ROLE {}", quote_ident_pg(&username)))
                 .execute(pool)
                 .await
                 .map_err(|e| format!("删除角色失败: {e}"))?;
@@ -347,9 +403,10 @@ pub async fn grant_privilege(
 
     match &entry.pool {
         DbPool::MySQL(pool) => {
-            let h = if host.is_empty() { "%" } else { &host };
             sqlx::query(&format!(
-                "GRANT ALL PRIVILEGES ON `{database}`.* TO `{username}`@`{h}`"
+                "GRANT ALL PRIVILEGES ON {}.* TO {}",
+                quote_ident_mysql(&database),
+                mysql_account(&username, &host)
             ))
             .execute(pool)
             .await
@@ -361,7 +418,9 @@ pub async fn grant_privilege(
         }
         DbPool::Postgres(pool) => {
             sqlx::query(&format!(
-                "GRANT CONNECT ON DATABASE \"{database}\" TO \"{username}\""
+                "GRANT CONNECT ON DATABASE {} TO {}",
+                quote_ident_pg(&database),
+                quote_ident_pg(&username)
             ))
             .execute(pool)
             .await
@@ -388,9 +447,10 @@ pub async fn revoke_privilege(
 
     match &entry.pool {
         DbPool::MySQL(pool) => {
-            let h = if host.is_empty() { "%" } else { &host };
             sqlx::query(&format!(
-                "REVOKE ALL PRIVILEGES ON `{database}`.* FROM `{username}`@`{h}`"
+                "REVOKE ALL PRIVILEGES ON {}.* FROM {}",
+                quote_ident_mysql(&database),
+                mysql_account(&username, &host)
             ))
             .execute(pool)
             .await
@@ -402,7 +462,9 @@ pub async fn revoke_privilege(
         }
         DbPool::Postgres(pool) => {
             sqlx::query(&format!(
-                "REVOKE CONNECT ON DATABASE \"{database}\" FROM \"{username}\""
+                "REVOKE CONNECT ON DATABASE {} FROM {}",
+                quote_ident_pg(&database),
+                quote_ident_pg(&username)
             ))
             .execute(pool)
             .await
@@ -458,6 +520,13 @@ pub async fn list_processes(
     pools: State<'_, PoolManager>,
     connection_id: String,
 ) -> Result<Vec<ProcessInfo>, String> {
+    list_processes_impl(&pools, connection_id).await
+}
+
+pub async fn list_processes_impl(
+    pools: &PoolManager,
+    connection_id: String,
+) -> Result<Vec<ProcessInfo>, String> {
     let entry = pools
         .pools
         .get(&connection_id)
@@ -467,7 +536,8 @@ pub async fn list_processes(
         DbPool::MySQL(pool) => {
             // id, user, host, db, command, time, state, info
             let rows: Vec<MysqlProcessRow> = sqlx::query_as(
-                "SELECT id, user, host, db, command, time, state, info \
+                // ID is BIGINT UNSIGNED and TIME is INT; cast so both decode as i64.
+                "SELECT CAST(id AS SIGNED), user, host, db, command, CAST(time AS SIGNED), state, info \
                      FROM information_schema.PROCESSLIST \
                      ORDER BY time DESC",
             )
@@ -651,12 +721,16 @@ pub async fn get_table_sizes(
     database: String,
     schema: Option<String>,
 ) -> Result<Vec<TableSizeInfo>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
+    get_table_sizes_impl(&pools, connection_id, database, schema).await
+}
 
-    match &entry.pool {
+pub async fn get_table_sizes_impl(
+    pools: &PoolManager,
+    connection_id: String,
+    database: String,
+    schema: Option<String>,
+) -> Result<Vec<TableSizeInfo>, String> {
+    match &main_pool(pools, &connection_id)? {
         DbPool::MySQL(pool) => {
             let rows: Vec<(String, i64, i64, Option<i64>)> = sqlx::query_as(
                 "SELECT table_name, \
@@ -685,31 +759,41 @@ pub async fn get_table_sizes(
                 )
                 .collect())
         }
-        DbPool::Postgres(pool) => {
+        DbPool::Postgres(_) => {
+            // Sizes are per database: query the one the user selected.
+            let pool = pools
+                .pg_pool_for_database(&connection_id, &database)
+                .await?;
             let schema_filter = schema.as_deref().unwrap_or("public");
-            let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
-                "SELECT tablename, \
-                        pg_relation_size(schemaname||'.'||tablename)::bigint, \
-                        pg_indexes_size(schemaname||'.'||tablename)::bigint, \
-                        pg_total_relation_size(schemaname||'.'||tablename)::bigint \
-                 FROM pg_tables \
-                 WHERE schemaname = $1 \
+            // By OID, so mixed-case or quoted table names need no quoting.
+            let rows: Vec<(String, i64, i64, i64, i64)> = sqlx::query_as(
+                "SELECT c.relname::text, \
+                        pg_relation_size(c.oid)::bigint, \
+                        pg_indexes_size(c.oid)::bigint, \
+                        pg_total_relation_size(c.oid)::bigint, \
+                        c.reltuples::bigint \
+                 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') \
                  ORDER BY 4 DESC",
             )
             .bind(schema_filter)
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .map_err(|e| format!("查询表大小失败: {e}"))?;
 
             Ok(rows
                 .into_iter()
                 .map(
-                    |(table_name, data_bytes, index_bytes, total_bytes)| TableSizeInfo {
-                        table_name,
-                        data_bytes,
-                        index_bytes,
-                        total_bytes,
-                        row_count: None,
+                    |(table_name, data_bytes, index_bytes, total_bytes, reltuples)| {
+                        TableSizeInfo {
+                            table_name,
+                            data_bytes,
+                            index_bytes,
+                            total_bytes,
+                            // -1 means never vacuumed/analyzed: unknown.
+                            row_count: (reltuples >= 0).then_some(reltuples),
+                        }
                     },
                 )
                 .collect())

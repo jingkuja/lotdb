@@ -1504,3 +1504,538 @@ async fn pg_p0_regressions() {
     q("DROP TYPE lotdb_p0_mood").await;
     pools.close("p0-pg").await;
 }
+
+// ─── P1 regressions (2026-10-22 review, section 2) ────────────────
+
+/// Session-pinned query helper for the P1 tests.
+async fn session_sql(
+    pools: &PoolManager,
+    reg: &QueryRegistry,
+    id: &str,
+    session: &str,
+    sql: &str,
+    max_rows: Option<u64>,
+) -> Result<lotdb_lib::commands::query::QueryResult, String> {
+    lotdb_lib::commands::query::run_session_query(
+        pools,
+        reg,
+        id,
+        sql,
+        &[],
+        max_rows,
+        None,
+        Some(session),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Import: batches, all-or-nothing with "empty table first", mapping
+/// checked before the table is touched, bad rows isolated in append mode.
+async fn p1_import(pools: &PoolManager, reg: &QueryRegistry, id: &str, db: &str, mysql: bool) {
+    use lotdb_lib::commands::transfer::import_table_data_impl;
+    let q = |sql: String| async move {
+        session_sql(pools, reg, id, "p1-import", &sql, Some(0))
+            .await
+            .unwrap()
+    };
+    let table = if mysql {
+        format!("`{db}`.lotdb_p1_imp")
+    } else {
+        "lotdb_p1_imp".to_string()
+    };
+    let count = || async {
+        q(format!("SELECT COUNT(*) FROM {table}")).await.rows[0][0]
+            .to_string()
+            .trim_matches('"')
+            .to_string()
+    };
+    q(format!("DROP TABLE IF EXISTS {table}")).await;
+    q(format!(
+        "CREATE TABLE {table} (id INT PRIMARY KEY, name VARCHAR(20) NOT NULL)"
+    ))
+    .await;
+    q(format!("INSERT INTO {table} VALUES (1, 'keep')")).await;
+
+    let dir = std::env::temp_dir().join(format!("lotdb-p1-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, body: String| {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path.to_string_lossy().to_string()
+    };
+    let import = |path: String, truncate: bool, mapping: Vec<Option<String>>| async move {
+        import_table_data_impl(
+            None,
+            pools,
+            id.into(),
+            db.into(),
+            None,
+            "lotdb_p1_imp".into(),
+            path,
+            "csv".into(),
+            true,
+            truncate,
+            mapping,
+        )
+        .await
+    };
+
+    // 1200 rows go in as several multi-row batches.
+    let mut big = String::from("id,name\n");
+    for i in 2..=1201 {
+        big.push_str(&format!("{i},n{i}\n"));
+    }
+    let big = write("big.csv", big);
+    let r = import(big.clone(), false, vec![]).await.unwrap();
+    assert_eq!((r.rows_imported, r.rows_failed), (1200, 0), "{r:?}");
+    assert_eq!(count().await, "1201");
+
+    // A wrong mapping fails before the table is emptied.
+    let err = import(
+        big.clone(),
+        true,
+        vec![Some("id".into()), Some("nope".into())],
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("nope"), "{err}");
+    assert_eq!(count().await, "1201");
+
+    // With "empty first", a failing row rolls everything back.
+    let dup = write("dup.csv", "id,name\n7,a\n7,b\n".into());
+    let err = import(dup, true, vec![]).await.unwrap_err();
+    assert!(err.contains("已回滚"), "{err}");
+    assert_eq!(count().await, "1201");
+
+    // Without it, only the bad row is lost.
+    let bad = write("bad.csv", "id,name\n5000,a\n5001,\n5002,c\n".into());
+    let r = import(bad, false, vec![]).await.unwrap();
+    assert_eq!((r.rows_imported, r.rows_failed), (2, 1), "{r:?}");
+    assert!(
+        r.error_message.as_deref().unwrap_or("").contains("第 2 行"),
+        "{r:?}"
+    );
+
+    // And "empty first" that succeeds replaces the contents.
+    let small = write("small.csv", "id,name\n1,x\n2,y\n".into());
+    let r = import(small, true, vec![]).await.unwrap();
+    assert_eq!(r.rows_imported, 2, "{r:?}");
+    assert_eq!(count().await, "2");
+
+    q(format!("DROP TABLE {table}")).await;
+    reg.close_sessions(id);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A capped result stops the server instead of draining the rest, and the
+/// session (including an open transaction) stays usable.
+async fn p1_row_cap(pools: &PoolManager, reg: &QueryRegistry, id: &str, mysql: bool) {
+    // Effectively endless (10^9 rows): without an early stop this never returns.
+    let endless = if mysql {
+        session_sql(
+            pools,
+            reg,
+            id,
+            "cap",
+            "DROP TABLE IF EXISTS lotdb_p1_seq",
+            None,
+        )
+        .await
+        .unwrap();
+        session_sql(
+            pools,
+            reg,
+            id,
+            "cap",
+            "CREATE TABLE lotdb_p1_seq (n INT) AS WITH RECURSIVE s(n) AS \
+             (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000) SELECT n FROM s",
+            None,
+        )
+        .await
+        .unwrap();
+        "SELECT 1 FROM lotdb_p1_seq a, lotdb_p1_seq b, lotdb_p1_seq c"
+    } else {
+        "SELECT generate_series(1, 1000000000)"
+    };
+    let start = std::time::Instant::now();
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        session_sql(pools, reg, id, "cap", endless, Some(10)),
+    )
+    .await
+    .expect("capped query must not read the whole result")
+    .unwrap();
+    assert!(r.truncated);
+    assert_eq!(r.rows.len(), 10);
+    eprintln!("capped query returned in {:?}", start.elapsed());
+    let one = session_sql(pools, reg, id, "cap", "SELECT 7", None)
+        .await
+        .unwrap();
+    assert_eq!(one.rows[0][0].to_string().trim_matches('"'), "7");
+
+    // Result just one row over the cap: the stop must not hit the next
+    // statement, which runs long enough to be killed if it did.
+    let three = if mysql {
+        "SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3"
+    } else {
+        "SELECT generate_series(1, 3)"
+    };
+    let next = if mysql {
+        "SELECT SLEEP(0.3), 5"
+    } else {
+        "SELECT pg_sleep(0.3)::text, 5"
+    };
+    for _ in 0..3 {
+        let r = session_sql(pools, reg, id, "cap", three, Some(2))
+            .await
+            .unwrap();
+        assert!(r.truncated);
+        let r = session_sql(pools, reg, id, "cap", next, None)
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][1].to_string().trim_matches('"'), "5");
+    }
+
+    // Inside a transaction: earlier work survives and COMMIT succeeds.
+    let table = "lotdb_p1_cap";
+    session_sql(
+        pools,
+        reg,
+        id,
+        "cap",
+        &format!("DROP TABLE IF EXISTS {table}"),
+        None,
+    )
+    .await
+    .unwrap();
+    session_sql(
+        pools,
+        reg,
+        id,
+        "cap",
+        &format!("CREATE TABLE {table} (id INT)"),
+        None,
+    )
+    .await
+    .unwrap();
+    for sql in [
+        "BEGIN".to_string(),
+        format!("INSERT INTO {table} VALUES (1)"),
+    ] {
+        session_sql(pools, reg, id, "cap", &sql, None)
+            .await
+            .unwrap();
+    }
+    let r = session_sql(pools, reg, id, "cap", endless, Some(5))
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), 5);
+    session_sql(pools, reg, id, "cap", "COMMIT", None)
+        .await
+        .unwrap();
+    let r = session_sql(
+        pools,
+        reg,
+        id,
+        "cap",
+        &format!("SELECT COUNT(*) FROM {table}"),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.rows[0][0].to_string().trim_matches('"'), "1");
+    session_sql(pools, reg, id, "cap", &format!("DROP TABLE {table}"), None)
+        .await
+        .unwrap();
+    if mysql {
+        session_sql(pools, reg, id, "cap", "DROP TABLE lotdb_p1_seq", None)
+            .await
+            .unwrap();
+    }
+    reg.close_sessions(id);
+}
+
+#[tokio::test]
+async fn mysql_p1_regressions() {
+    use lotdb_lib::commands::admin::{create_user_impl, list_processes_impl};
+    let Some(mut cfg) = mysql_config() else {
+        return;
+    };
+    cfg.id = "p1-mysql".into();
+    let pools = PoolManager::new();
+    let reg = registry();
+    pools.open(&cfg).await.unwrap();
+    let q = |sql: &'static str| {
+        let (pools, reg) = (&pools, &reg);
+        async move {
+            run_query(pools, reg, "p1-mysql", sql, None, None)
+                .await
+                .unwrap()
+        }
+    };
+    q("DROP DATABASE IF EXISTS lotdb_p1").await;
+    q("CREATE DATABASE lotdb_p1").await;
+
+    p1_import(&pools, &reg, "p1-mysql", "lotdb_p1", true).await;
+    lotdb_lib::commands::query::configure_session_impl(
+        &pools,
+        &reg,
+        "p1-mysql",
+        "cap",
+        Some("lotdb_p1"),
+        None,
+    )
+    .await
+    .unwrap();
+    p1_row_cap(&pools, &reg, "p1-mysql", true).await;
+
+    // PROCESSLIST.ID is BIGINT UNSIGNED.
+    let procs = list_processes_impl(&pools, "p1-mysql".into())
+        .await
+        .unwrap();
+    assert!(procs.iter().any(|p| p.id > 0));
+
+    // Quotes, backslashes and `#` reach the server exactly as typed.
+    let (user, password) = ("lotdb p1'u", r#"p'a\b"c#"#);
+    run_query(
+        &pools,
+        &reg,
+        "p1-mysql",
+        "DROP USER IF EXISTS 'lotdb p1''u'@'%'",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    create_user_impl(
+        &pools,
+        "p1-mysql".into(),
+        user.into(),
+        String::new(),
+        password.into(),
+    )
+    .await
+    .unwrap();
+    let mut login = cfg.clone();
+    login.id = "p1-mysql-login".into();
+    login.user = user.into();
+    login.password = password.into();
+    pools.open(&login).await.unwrap();
+    pools.close(&login.id).await;
+    q("DROP USER 'lotdb p1''u'@'%'").await;
+
+    q("DROP DATABASE lotdb_p1").await;
+    pools.close("p1-mysql").await;
+}
+
+#[tokio::test]
+async fn pg_p1_regressions() {
+    use lotdb_lib::commands::admin::{create_user_impl, drop_database_impl, get_table_sizes_impl};
+    use lotdb_lib::commands::query::configure_session_impl;
+    use lotdb_lib::commands::schema::get_table_foreign_keys_impl;
+    let Some(mut cfg) = pg_config() else {
+        return;
+    };
+    cfg.id = "p1-pg".into();
+    let db = cfg.database.clone().unwrap();
+    let pools = PoolManager::new();
+    let reg = registry();
+    pools.open(&cfg).await.unwrap();
+    let q = |sql: &'static str| {
+        let (pools, reg) = (&pools, &reg);
+        async move {
+            run_query(pools, reg, "p1-pg", sql, None, None)
+                .await
+                .unwrap()
+        }
+    };
+
+    p1_import(&pools, &reg, "p1-pg", &db, false).await;
+    p1_row_cap(&pools, &reg, "p1-pg", false).await;
+
+    // Mixed-case table names, and sizes come from the selected database.
+    q("DROP TABLE IF EXISTS \"LotdbP1User\"").await;
+    q("CREATE TABLE \"LotdbP1User\" (id int)").await;
+    let sizes = get_table_sizes_impl(&pools, "p1-pg".into(), db.clone(), Some("public".into()))
+        .await
+        .unwrap();
+    assert!(sizes.iter().any(|t| t.table_name == "LotdbP1User"));
+    q("DROP TABLE \"LotdbP1User\"").await;
+
+    q("DROP DATABASE IF EXISTS lotdb_p1_other").await;
+    q("CREATE DATABASE lotdb_p1_other").await;
+    let other = pools
+        .pg_pool_for_database("p1-pg", "lotdb_p1_other")
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE only_here (id int)")
+        .execute(&other)
+        .await
+        .unwrap();
+    let sizes = get_table_sizes_impl(
+        &pools,
+        "p1-pg".into(),
+        "lotdb_p1_other".into(),
+        Some("public".into()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sizes
+            .iter()
+            .map(|t| t.table_name.as_str())
+            .collect::<Vec<_>>(),
+        ["only_here"]
+    );
+    // LotDB's own cached pool for that database must not block the DROP.
+    drop_database_impl(&pools, "p1-pg".into(), "lotdb_p1_other".into())
+        .await
+        .unwrap();
+
+    // Composite foreign keys pair columns by position.
+    q("DROP TABLE IF EXISTS lotdb_p1_child, lotdb_p1_parent").await;
+    q("CREATE TABLE lotdb_p1_parent (a int, b int, PRIMARY KEY (a, b))").await;
+    q("CREATE TABLE lotdb_p1_child (x int, y int, \
+       FOREIGN KEY (x, y) REFERENCES lotdb_p1_parent (a, b))")
+    .await;
+    let fks = get_table_foreign_keys_impl(
+        &pools,
+        "p1-pg".into(),
+        db.clone(),
+        Some("public".into()),
+        "lotdb_p1_child".into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fks.len(), 1);
+    assert_eq!(fks[0].columns, ["x", "y"]);
+    assert_eq!(fks[0].ref_columns, ["a", "b"]);
+    q("DROP TABLE lotdb_p1_child, lotdb_p1_parent").await;
+
+    // Switching schema keeps `public` on the search path.
+    q("DROP SCHEMA IF EXISTS lotdb_p1_s CASCADE").await;
+    q("CREATE SCHEMA lotdb_p1_s").await;
+    q("CREATE OR REPLACE FUNCTION public.lotdb_p1_fn() RETURNS int LANGUAGE sql AS 'SELECT 42'")
+        .await;
+    configure_session_impl(&pools, &reg, "p1-pg", "sp", None, Some("lotdb_p1_s"))
+        .await
+        .unwrap();
+    let r = session_sql(&pools, &reg, "p1-pg", "sp", "SELECT lotdb_p1_fn()", None)
+        .await
+        .unwrap();
+    assert_eq!(r.rows[0][0], 42);
+    let r = session_sql(&pools, &reg, "p1-pg", "sp", "SHOW search_path", None)
+        .await
+        .unwrap();
+    assert!(
+        r.rows[0][0].as_str().unwrap().starts_with("lotdb_p1_s"),
+        "{:?}",
+        r.rows
+    );
+    reg.close_sessions("p1-pg");
+    q("DROP FUNCTION public.lotdb_p1_fn()").await;
+    q("DROP SCHEMA lotdb_p1_s").await;
+
+    // Role passwords with quotes and backslashes.
+    let (user, password) = ("lotdb_p1_role", r"p'a\b");
+    q("DROP ROLE IF EXISTS lotdb_p1_role").await;
+    create_user_impl(
+        &pools,
+        "p1-pg".into(),
+        user.into(),
+        String::new(),
+        password.into(),
+    )
+    .await
+    .unwrap();
+    let mut login = cfg.clone();
+    login.id = "p1-pg-login".into();
+    login.user = user.into();
+    login.password = password.into();
+    pools.open(&login).await.unwrap();
+    pools.close(&login.id).await;
+    q("DROP ROLE lotdb_p1_role").await;
+
+    pools.close("p1-pg").await;
+}
+
+/// SSH tunnels: closing a connection frees the local port, and encrypted
+/// private keys work with a passphrase. Gated by:
+///   LOTDB_TEST_SSH=host:port            (SSH server)
+///   LOTDB_TEST_SSH_FINGERPRINT=SHA256:… (its host key)
+///   LOTDB_TEST_SSH_USER / _PASSWORD / _KEY / _PASSPHRASE
+///   LOTDB_TEST_SSH_DB_HOST=host:port    (PG as seen from the SSH server)
+#[tokio::test]
+async fn ssh_tunnel_lifecycle() {
+    use lotdb_lib::models::connection::SshConfig;
+    let (Some(mut cfg), Ok(ssh)) = (pg_config(), std::env::var("LOTDB_TEST_SSH")) else {
+        return;
+    };
+    let env = |k: &str| std::env::var(format!("LOTDB_TEST_SSH_{k}")).unwrap();
+    let (ssh_host, ssh_port) = ssh.split_once(':').unwrap();
+    let db_host = env("DB_HOST");
+    let (db_host, db_port) = db_host.split_once(':').unwrap();
+    cfg.id = "p1-ssh".into();
+    cfg.host = db_host.into();
+    cfg.port = db_port.parse().unwrap();
+    let base = SshConfig {
+        host_key_fingerprint: Some(env("FINGERPRINT")),
+        host: ssh_host.into(),
+        port: ssh_port.parse().unwrap(),
+        user: env("USER"),
+        auth_type: "password".into(),
+        password: Some(env("PASSWORD")),
+        private_key_path: None,
+        passphrase: None,
+    };
+    let key = SshConfig {
+        auth_type: "key".into(),
+        password: None,
+        private_key_path: Some(env("KEY")),
+        passphrase: Some(env("PASSPHRASE")),
+        ..base.clone()
+    };
+    let pools = PoolManager::new();
+    let reg = registry();
+
+    for ssh in [base, key.clone()] {
+        cfg.ssh = Some(ssh);
+        pools.open(&cfg).await.unwrap();
+        let port = pools.pools.get("p1-ssh").unwrap().effective_port;
+        let r = run_query(&pools, &reg, "p1-ssh", "SELECT 1", None, None)
+            .await
+            .unwrap();
+        assert_eq!(r.rows[0][0], 1);
+        reg.close_sessions("p1-ssh");
+        pools.close("p1-ssh").await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
+            "tunnel port {port} must be closed after disconnect"
+        );
+    }
+
+    // "Test connection" builds and drops a connection the same way.
+    cfg.ssh = Some(key.clone());
+    let conn = lotdb_lib::db::pool::build_connection_pub(&cfg)
+        .await
+        .unwrap();
+    let port = conn.effective_port;
+    conn.pool.close().await;
+    drop(conn);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .is_err());
+
+    // An encrypted key without its passphrase says so.
+    cfg.ssh = Some(SshConfig {
+        passphrase: None,
+        ..key
+    });
+    let err = pools.open(&cfg).await.unwrap_err();
+    assert!(err.contains("口令"), "{err}");
+}

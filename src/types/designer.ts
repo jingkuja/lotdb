@@ -12,6 +12,21 @@ export interface DesignerColumn {
   isUnique: boolean;
   unsigned: boolean; // MySQL only
   comment: string;
+  /**
+   * MySQL attributes the designer does not edit (collation, generated
+   * expression, ON UPDATE, …). Carried along so that MODIFY COLUMN, which
+   * restates the whole column, does not silently drop them.
+   */
+  mysqlExtras?: MysqlColumnExtras;
+}
+
+export interface MysqlColumnExtras {
+  /** `CHARACTER SET x COLLATE y` — only applies while the type is textual. */
+  charset: string;
+  /** `GENERATED ALWAYS AS (expr) VIRTUAL|STORED` */
+  generated: string;
+  /** `ON UPDATE CURRENT_TIMESTAMP`, `SRID n`, `/*!80023 INVISIBLE *\/` */
+  attributes: string;
 }
 
 export type IndexType = "INDEX" | "UNIQUE" | "FULLTEXT" | "SPATIAL";

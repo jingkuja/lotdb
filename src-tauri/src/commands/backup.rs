@@ -1,9 +1,13 @@
-use crate::db::pool::PoolManager;
-use crate::utils::keychain;
+use crate::commands::transfer::{TransferControl, TransferRegistry};
+use crate::db::pool::{DbPool, PoolManager};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
-use std::process::Command;
-use tauri::State;
+use std::io::Write;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tauri::{Emitter, State};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // ─── Result types ─────────────────────────────────────────────────
 
@@ -20,6 +24,17 @@ pub struct BackupResult {
 pub struct RestoreResult {
     pub rows_affected: u64,
     pub stderr_output: String,
+}
+
+/// Emitted about twice a second while a dump/restore runs. For a backup
+/// `done` is the bytes written so far and `total` is 0 (unknown); for a
+/// restore it is the bytes of the dump file fed to the client.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupProgress {
+    task_id: String,
+    done: u64,
+    total: u64,
 }
 
 // ─── helpers ──────────────────────────────────────────────────────
@@ -63,19 +78,174 @@ fn which_path(name: &str) -> Result<std::path::PathBuf, ()> {
     Err(())
 }
 
-// ─── Fetch connection config from SQLite ──────────────────────────
-
-#[derive(sqlx::FromRow)]
-struct ConnRow {
+/// Effective host/port (SSH tunnels resolve to 127.0.0.1:<local port>),
+/// credentials and the main pool of an open connection. Credentials come from
+/// memory — they were loaded from Keychain when the connection was opened.
+struct ConnTarget {
+    host: String,
+    port: u16,
     user: String,
+    password: String,
+    pool: DbPool,
 }
 
-async fn get_conn_row(sqlite: &SqlitePool, connection_id: &str) -> Result<ConnRow, String> {
-    sqlx::query_as::<_, ConnRow>("SELECT user FROM connections WHERE id = ?")
-        .bind(connection_id)
-        .fetch_one(sqlite)
-        .await
-        .map_err(|e| format!("查询连接配置失败: {e}"))
+fn conn_target(pools: &PoolManager, connection_id: &str) -> Result<ConnTarget, String> {
+    let (host, port, pool) = {
+        let entry = pools
+            .pools
+            .get(connection_id)
+            .ok_or_else(|| format!("连接 {connection_id} 未打开，请先连接"))?;
+        (
+            entry.effective_host.clone(),
+            entry.effective_port,
+            entry.pool.clone(),
+        )
+    };
+    let (user, password) = pools
+        .credentials(connection_id)
+        .ok_or_else(|| format!("连接 {connection_id} 未打开，请先连接"))?;
+    Ok(ConnTarget {
+        host,
+        port,
+        user,
+        password,
+        pool,
+    })
+}
+
+/// mysql / mysqldump read credentials from a 0600 option file passed with
+/// `--defaults-extra-file`, so the password never shows up in `ps` (argv)
+/// and does not rely on the deprecated MYSQL_PWD. Deleted on drop.
+struct MySqlOptionFile(std::path::PathBuf);
+
+impl MySqlOptionFile {
+    fn create(user: &str, password: &str) -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!("lotdb-{}.cnf", uuid::Uuid::new_v4()));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts
+            .open(&path)
+            .map_err(|e| format!("创建临时凭据文件失败: {e}"))?;
+        let guard = MySqlOptionFile(path);
+        let mut content = format!("[client]\nuser={}\n", option_value(user));
+        if !password.is_empty() {
+            content.push_str(&format!("password={}\n", option_value(password)));
+        }
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("写入临时凭据文件失败: {e}"))?;
+        Ok(guard)
+    }
+
+    /// Must be the first argument on the command line.
+    fn arg(&self) -> String {
+        format!("--defaults-extra-file={}", self.0.display())
+    }
+}
+
+impl Drop for MySqlOptionFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Double-quoted option-file value; `#` inside quotes is not a comment.
+fn option_value(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
+}
+
+/// Run a CLI tool without blocking the async runtime. The child is killed
+/// when the task is cancelled. `stdin_file` is streamed into the child so a
+/// restore can report how much of the dump has been sent; `output_file` is
+/// polled for size so a backup can report bytes written.
+async fn run_tool(
+    app: &tauri::AppHandle,
+    task_id: &str,
+    control: &TransferControl,
+    mut cmd: tokio::process::Command,
+    stdin_file: Option<&str>,
+    output_file: Option<&str>,
+) -> Result<(std::process::ExitStatus, String), String> {
+    cmd.kill_on_drop(true)
+        .stderr(Stdio::piped())
+        .stdin(if stdin_file.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    let mut child = cmd.spawn().map_err(|e| format!("启动外部工具失败: {e}"))?;
+
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf).await;
+        buf
+    });
+
+    let sent = Arc::new(AtomicU64::new(0));
+    let mut total = 0;
+    if let Some(path) = stdin_file {
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| format!("打开备份文件失败: {e}"))?;
+        total = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let sent = sent.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = match file.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                // The client exits early on errors (ON_ERROR_STOP); stop feeding.
+                if stdin.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+                sent.fetch_add(n as u64, Ordering::Relaxed);
+            }
+            // Dropping stdin sends EOF.
+        });
+    }
+
+    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    let status = loop {
+        if control.cancelled.load(Ordering::Acquire) {
+            let _ = child.kill().await;
+            return Err("已取消".into());
+        }
+        tokio::select! {
+            status = child.wait() => break status.map_err(|e| format!("等待外部工具失败: {e}"))?,
+            _ = control.notify.notified() => {
+                let _ = child.kill().await;
+                return Err("已取消".into());
+            }
+            _ = tick.tick() => {
+                let done = match output_file {
+                    Some(path) => tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0),
+                    None => sent.load(Ordering::Relaxed),
+                };
+                let _ = app.emit(
+                    "backup-progress",
+                    BackupProgress { task_id: task_id.to_owned(), done, total },
+                );
+            }
+        }
+    };
+    let stderr = stderr_task.await.unwrap_or_default();
+    Ok((status, stderr))
+}
+
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or(-1)
 }
 
 // ─── Backup command ───────────────────────────────────────────────
@@ -87,10 +257,14 @@ async fn get_conn_row(sqlite: &SqlitePool, connection_id: &str) -> Result<ConnRo
 /// - `no_data`: dump schema only (--no-data / --schema-only)
 /// - `no_schema`: dump data only (--no-create-info / --data-only)
 /// - `tables`: optional list of specific tables; empty = all
+/// - `task_id`: pass the same id to `cancel_transfer` to stop the dump
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn backup_database(
+    app: tauri::AppHandle,
     pools: State<'_, PoolManager>,
-    sqlite: State<'_, SqlitePool>,
+    registry: State<'_, TransferRegistry>,
+    task_id: Option<String>,
     connection_id: String,
     database: String,
     file_path: String,
@@ -98,38 +272,37 @@ pub async fn backup_database(
     no_schema: bool,
     tables: Vec<String>,
 ) -> Result<BackupResult, String> {
-    // Get effective host/port from active pool (handles SSH tunnels)
-    let (eff_host, eff_port, db_kind) = {
-        let entry = pools
-            .pools
-            .get(&connection_id)
-            .ok_or_else(|| format!("连接 {connection_id} 未打开，请先连接"))?;
-        (
-            entry.effective_host.clone(),
-            entry.effective_port,
-            entry.pool.db_type().to_string(),
-        )
-    };
-
-    // Get user + password from SQLite + Keychain
-    let row = get_conn_row(&sqlite, &connection_id).await?;
-    let password = keychain::load_password(&connection_id).unwrap_or_default();
+    let target = conn_target(&pools, &connection_id)?;
 
     // Ensure parent directory exists
     if let Some(parent) = std::path::Path::new(&file_path).parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
     }
 
-    let output = match db_kind.as_str() {
-        "mysql" => run_mysqldump(
-            &eff_host, eff_port, &row.user, &password, &database, &file_path, no_data, no_schema,
-            &tables,
-        )?,
-        _ => run_pg_dump(
-            &eff_host, eff_port, &row.user, &password, &database, &file_path, no_data, no_schema,
-            &tables,
-        )?,
+    let task_id = task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let control = registry.register(&task_id)?;
+    let result = match &target.pool {
+        DbPool::MySQL(_) => {
+            run_mysqldump(
+                &app, &task_id, &control, &target, &database, &file_path, no_data, no_schema,
+                &tables,
+            )
+            .await
+        }
+        DbPool::Postgres(_) => {
+            run_pg_dump(
+                &app, &task_id, &control, &target, &database, &file_path, no_data, no_schema,
+                &tables,
+            )
+            .await
+        }
     };
+    registry.finish(&task_id);
+    // A cancelled or failed dump leaves a truncated file behind; remove it
+    // so it cannot be mistaken for a usable backup later.
+    let output = result.inspect_err(|_| {
+        let _ = std::fs::remove_file(&file_path);
+    })?;
 
     let size_bytes = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
 
@@ -141,11 +314,11 @@ pub async fn backup_database(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_mysqldump(
-    host: &str,
-    port: u16,
-    user: &str,
-    password: &str,
+async fn run_mysqldump(
+    app: &tauri::AppHandle,
+    task_id: &str,
+    control: &TransferControl,
+    target: &ConnTarget,
     database: &str,
     file_path: &str,
     no_data: bool,
@@ -153,15 +326,12 @@ fn run_mysqldump(
     tables: &[String],
 ) -> Result<String, String> {
     let tool = find_tool("mysqldump")?;
-    let mut cmd = Command::new(&tool);
+    let options = MySqlOptionFile::create(&target.user, &target.password)?;
+    let mut cmd = tokio::process::Command::new(&tool);
 
-    cmd.arg(format!("-h{host}"))
-        .arg(format!("-P{port}"))
-        .arg(format!("-u{user}"));
-
-    if !password.is_empty() {
-        cmd.arg(format!("-p{password}"));
-    }
+    cmd.arg(options.arg())
+        .arg(format!("-h{}", target.host))
+        .arg(format!("-P{}", target.port));
 
     // Useful defaults
     cmd.arg("--single-transaction")
@@ -186,16 +356,12 @@ fn run_mysqldump(
     let file = std::fs::File::create(file_path).map_err(|e| format!("创建备份文件失败: {e}"))?;
     cmd.stdout(file);
 
-    let out = cmd
-        .output()
-        .map_err(|e| format!("启动 mysqldump 失败: {e}"))?;
+    let (status, stderr) = run_tool(app, task_id, control, cmd, None, Some(file_path)).await?;
 
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-
-    if !out.status.success() {
+    if !status.success() {
         return Err(format!(
             "mysqldump 失败 (exit {}): {}",
-            out.status.code().unwrap_or(-1),
+            exit_code(status),
             stderr
         ));
     }
@@ -204,11 +370,11 @@ fn run_mysqldump(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_pg_dump(
-    host: &str,
-    port: u16,
-    user: &str,
-    password: &str,
+async fn run_pg_dump(
+    app: &tauri::AppHandle,
+    task_id: &str,
+    control: &TransferControl,
+    target: &ConnTarget,
     database: &str,
     file_path: &str,
     no_data: bool,
@@ -216,19 +382,20 @@ fn run_pg_dump(
     tables: &[String],
 ) -> Result<String, String> {
     let tool = find_tool("pg_dump")?;
-    let mut cmd = Command::new(&tool);
+    let mut cmd = tokio::process::Command::new(&tool);
 
     cmd.arg("-h")
-        .arg(host)
+        .arg(&target.host)
         .arg("-p")
-        .arg(port.to_string())
+        .arg(target.port.to_string())
         .arg("-U")
-        .arg(user)
+        .arg(&target.user)
         .arg("-d")
         .arg(database)
         .arg("-f")
         .arg(file_path)
-        .arg("--no-password"); // password via env var PGPASSWORD
+        .arg("--no-password") // password via env var PGPASSWORD
+        .stdout(Stdio::null());
 
     if no_data {
         cmd.arg("--schema-only");
@@ -241,20 +408,16 @@ fn run_pg_dump(
         cmd.arg("-t").arg(t);
     }
 
-    if !password.is_empty() {
-        cmd.env("PGPASSWORD", password);
+    if !target.password.is_empty() {
+        cmd.env("PGPASSWORD", &target.password);
     }
 
-    let out = cmd
-        .output()
-        .map_err(|e| format!("启动 pg_dump 失败: {e}"))?;
+    let (status, stderr) = run_tool(app, task_id, control, cmd, None, Some(file_path)).await?;
 
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-
-    if !out.status.success() {
+    if !status.success() {
         return Err(format!(
             "pg_dump 失败 (exit {}): {}",
-            out.status.code().unwrap_or(-1),
+            exit_code(status),
             stderr
         ));
     }
@@ -269,101 +432,78 @@ fn run_pg_dump(
 /// - `database`: target database name
 /// - `file_path`: absolute path to the .sql dump file
 /// - `create_db`: run CREATE DATABASE IF NOT EXISTS before restoring (MySQL only)
+/// - `task_id`: pass the same id to `cancel_transfer` to stop the restore
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_database(
+    app: tauri::AppHandle,
     pools: State<'_, PoolManager>,
-    sqlite: State<'_, SqlitePool>,
+    registry: State<'_, TransferRegistry>,
+    task_id: Option<String>,
     connection_id: String,
     database: String,
     file_path: String,
     create_db: bool,
 ) -> Result<RestoreResult, String> {
     pools.ensure_writable(&connection_id)?;
-    let (eff_host, eff_port, db_kind) = {
-        let entry = pools
-            .pools
-            .get(&connection_id)
-            .ok_or_else(|| format!("连接 {connection_id} 未打开，请先连接"))?;
-        (
-            entry.effective_host.clone(),
-            entry.effective_port,
-            entry.pool.db_type().to_string(),
-        )
-    };
-
-    let row = get_conn_row(&sqlite, &connection_id).await?;
-    let password = keychain::load_password(&connection_id).unwrap_or_default();
+    let target = conn_target(&pools, &connection_id)?;
 
     // Verify file exists
     if !std::path::Path::new(&file_path).exists() {
         return Err(format!("文件不存在: {file_path}"));
     }
 
-    let stderr = match db_kind.as_str() {
-        "mysql" => run_mysql_restore(
-            &eff_host, eff_port, &row.user, &password, &database, &file_path, create_db,
-        )?,
-        _ => run_psql_restore(
-            &eff_host, eff_port, &row.user, &password, &database, &file_path,
-        )?,
+    let task_id = task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let control = registry.register(&task_id)?;
+    let result = match &target.pool {
+        DbPool::MySQL(pool) => {
+            if create_db {
+                let sql = format!(
+                    "CREATE DATABASE IF NOT EXISTS {}",
+                    crate::utils::sql::quote_ident_mysql(&database)
+                );
+                if let Err(e) = sqlx::query(&sql).execute(pool).await {
+                    registry.finish(&task_id);
+                    return Err(format!("创建数据库失败: {e}"));
+                }
+            }
+            run_mysql_restore(&app, &task_id, &control, &target, &database, &file_path).await
+        }
+        DbPool::Postgres(_) => {
+            run_psql_restore(&app, &task_id, &control, &target, &database, &file_path).await
+        }
     };
+    registry.finish(&task_id);
 
     Ok(RestoreResult {
         rows_affected: 0, // CLI tools don't reliably report this
-        stderr_output: stderr,
+        stderr_output: result?,
     })
 }
 
-fn run_mysql_restore(
-    host: &str,
-    port: u16,
-    user: &str,
-    password: &str,
+async fn run_mysql_restore(
+    app: &tauri::AppHandle,
+    task_id: &str,
+    control: &TransferControl,
+    target: &ConnTarget,
     database: &str,
     file_path: &str,
-    create_db: bool,
 ) -> Result<String, String> {
-    // Optionally create the database first
-    if create_db {
-        let tool = find_tool("mysql")?;
-        let mut cmd = Command::new(&tool);
-        cmd.arg(format!("-h{host}"))
-            .arg(format!("-P{port}"))
-            .arg(format!("-u{user}"));
-        if !password.is_empty() {
-            cmd.arg(format!("-p{password}"));
-        }
-        cmd.arg("-e")
-            .arg(format!("CREATE DATABASE IF NOT EXISTS `{database}`"));
-        let out = cmd.output().map_err(|e| format!("启动 mysql 失败: {e}"))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            return Err(format!("创建数据库失败: {stderr}"));
-        }
-    }
-
     let tool = find_tool("mysql")?;
-    let mut cmd = Command::new(&tool);
-    cmd.arg(format!("-h{host}"))
-        .arg(format!("-P{port}"))
-        .arg(format!("-u{user}"));
-    if !password.is_empty() {
-        cmd.arg(format!("-p{password}"));
-    }
-    cmd.arg(database);
+    let options = MySqlOptionFile::create(&target.user, &target.password)?;
+    let mut cmd = tokio::process::Command::new(&tool);
+    cmd.arg(options.arg())
+        .arg(format!("-h{}", target.host))
+        .arg(format!("-P{}", target.port))
+        .arg(database)
+        .stdout(Stdio::null());
 
-    // Feed file via stdin
-    let file = std::fs::File::open(file_path).map_err(|e| format!("打开备份文件失败: {e}"))?;
-    cmd.stdin(file);
+    let (status, stderr) = run_tool(app, task_id, control, cmd, Some(file_path), None).await?;
 
-    let out = cmd.output().map_err(|e| format!("启动 mysql 失败: {e}"))?;
-
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-
-    if !out.status.success() {
+    if !status.success() {
         return Err(format!(
             "mysql 恢复失败 (exit {}): {}",
-            out.status.code().unwrap_or(-1),
+            exit_code(status),
             stderr
         ));
     }
@@ -371,40 +511,76 @@ fn run_mysql_restore(
     Ok(stderr)
 }
 
-fn run_psql_restore(
-    host: &str,
-    port: u16,
-    user: &str,
-    password: &str,
+async fn run_psql_restore(
+    app: &tauri::AppHandle,
+    task_id: &str,
+    control: &TransferControl,
+    target: &ConnTarget,
     database: &str,
     file_path: &str,
 ) -> Result<String, String> {
     let tool = find_tool("psql")?;
-    let mut cmd = Command::new(&tool);
+    let mut cmd = tokio::process::Command::new(&tool);
 
+    // Stop at the first error inside one transaction: a failed restore rolls
+    // back completely instead of leaving a half-restored database. -X skips
+    // ~/.psqlrc so user settings cannot change the behavior.
     cmd.arg("-h")
-        .arg(host)
+        .arg(&target.host)
         .arg("-p")
-        .arg(port.to_string())
+        .arg(target.port.to_string())
         .arg("-U")
-        .arg(user)
+        .arg(&target.user)
         .arg("-d")
         .arg(database)
-        .arg("-f")
-        .arg(file_path)
-        .arg("--no-password");
+        .arg("-X")
+        .arg("-v")
+        .arg("ON_ERROR_STOP=1")
+        .arg("--single-transaction")
+        .arg("--no-password")
+        .stdout(Stdio::null());
 
-    if !password.is_empty() {
-        cmd.env("PGPASSWORD", password);
+    if !target.password.is_empty() {
+        cmd.env("PGPASSWORD", &target.password);
     }
 
-    let out = cmd.output().map_err(|e| format!("启动 psql 失败: {e}"))?;
+    let (status, stderr) = run_tool(app, task_id, control, cmd, Some(file_path), None).await?;
 
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-
-    // psql exits non-zero on SQL errors but still restores partial data;
-    // treat as success but surface stderr.
-    let _ = out.status;
+    if !status.success() {
+        return Err(format!(
+            "psql 恢复失败，已回滚 (exit {}): {}",
+            exit_code(status),
+            stderr
+        ));
+    }
 
     Ok(stderr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn option_values_survive_special_characters() {
+        assert_eq!(option_value(r#"p#a"s\w"#), r#""p#a\"s\\w""#);
+        assert_eq!(option_value("a\nb"), r#""a\nb""#);
+    }
+
+    #[test]
+    fn option_file_is_private_and_removed() {
+        let file = MySqlOptionFile::create("root", "secret").unwrap();
+        let path = file.0.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("password=\"secret\""));
+        drop(file);
+        assert!(!path.exists());
+    }
 }

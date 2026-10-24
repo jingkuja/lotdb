@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { restoreDatabase } from "@/services/tauri-commands";
+import { formatBytes, useCliTask } from "@/hooks/use-cli-task";
 
 interface RestoreDialogProps {
   open: boolean;
@@ -32,6 +33,8 @@ export function RestoreDialog({
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stderr, setStderr] = useState("");
+  const task = useCliTask();
+  const runTask = task.run;
 
   const resetState = () => {
     setRunning(false);
@@ -52,7 +55,9 @@ export function RestoreDialog({
     setDone(false);
     setError(null);
     try {
-      const res = await restoreDatabase(connectionId, database, filePath, createDb);
+      const res = await runTask((taskId) =>
+        restoreDatabase(connectionId, database, filePath, createDb, taskId),
+      );
       setStderr(res.stderrOutput);
       setDone(true);
     } catch (e) {
@@ -61,7 +66,7 @@ export function RestoreDialog({
     } finally {
       setRunning(false);
     }
-  }, [connectionId, database, filePath, createDb]);
+  }, [connectionId, database, filePath, createDb, runTask]);
 
   return (
     <Dialog
@@ -111,13 +116,27 @@ export function RestoreDialog({
             </div>
 
             <p className="text-[11px] text-muted-foreground">
-              使用 mysql / psql 执行恢复，需要本机已安装对应 CLI 工具。
+              使用 mysql / psql 执行恢复，需要本机已安装对应 CLI 工具。PostgreSQL
+              在单个事务中执行，遇错即停止并整体回滚。
             </p>
 
+            {running && task.progress && task.progress.total > 0 && (
+              <p className="text-xs text-muted-foreground">
+                已发送 {formatBytes(task.progress.done)} / {formatBytes(task.progress.total)}（
+                {Math.round((task.progress.done / task.progress.total) * 100)}%）
+              </p>
+            )}
+
             <DialogFooter>
-              <Button variant="outline" onClick={() => onOpenChange(false)} disabled={running}>
-                取消
-              </Button>
+              {running ? (
+                <Button variant="outline" onClick={task.cancel} disabled={task.cancelling}>
+                  {task.cancelling ? "正在取消…" : "取消恢复"}
+                </Button>
+              ) : (
+                <Button variant="outline" onClick={() => onOpenChange(false)}>
+                  取消
+                </Button>
+              )}
               <Button
                 variant="destructive"
                 onClick={handleRestore}

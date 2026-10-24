@@ -187,6 +187,196 @@ pub struct ColumnDef {
     pub is_primary_key: bool,
     pub comment: Option<String>,
     pub extra: Option<String>,
+    /// MySQL: the column as SHOW CREATE TABLE prints it, for regenerating a
+    /// full column definition (MODIFY COLUMN) without losing attributes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mysql_definition: Option<MysqlColumnSql>,
+}
+
+/// Pieces of a MySQL column definition, each ready to paste into DDL.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MysqlColumnSql {
+    /// DEFAULT expression, quoted as the server prints it (`'abc'`,
+    /// `CURRENT_TIMESTAMP`, `(uuid())`); empty when there is none or NULL.
+    pub default_sql: String,
+    /// `CHARACTER SET x COLLATE y`, bound to textual types.
+    pub charset: String,
+    /// `GENERATED ALWAYS AS (expr) VIRTUAL|STORED`.
+    pub generated: String,
+    /// Everything else: `ON UPDATE CURRENT_TIMESTAMP`, `SRID n`, `/*!80023 INVISIBLE */`.
+    pub attributes: String,
+}
+
+/// Split one SHOW CREATE TABLE line into whitespace-separated tokens,
+/// keeping quoted strings, parenthesised groups and comments whole.
+fn ddl_tokens(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut tokens = vec![];
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut depth = 0usize;
+        while i < chars.len() && (depth > 0 || !chars[i].is_whitespace()) {
+            match chars[i] {
+                q @ ('\'' | '"' | '`') => {
+                    i += 1;
+                    while i < chars.len() {
+                        if chars[i] == '\\' && q != '`' {
+                            i += 2;
+                            continue;
+                        }
+                        if chars[i] == q {
+                            if chars.get(i + 1) == Some(&q) {
+                                i += 2;
+                                continue;
+                            }
+                            break;
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                '/' if depth == 0 && chars.get(i + 1) == Some(&'*') => {
+                    while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                        i += 1;
+                    }
+                    i += 2;
+                }
+                '(' => {
+                    depth += 1;
+                    i += 1;
+                }
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+        tokens.push(chars[start..i.min(chars.len())].iter().collect());
+    }
+    tokens
+}
+
+/// Column definitions from SHOW CREATE TABLE output, keyed by column name.
+fn parse_mysql_create_columns(create: &str) -> std::collections::HashMap<String, MysqlColumnSql> {
+    let mut out = std::collections::HashMap::new();
+    for line in create.lines() {
+        let Some(rest) = line.trim_start().strip_prefix('`') else {
+            continue;
+        };
+        // `name` with doubled backticks inside.
+        let mut name = String::new();
+        let mut chars = rest.char_indices().peekable();
+        let mut end = None;
+        while let Some((idx, c)) = chars.next() {
+            if c == '`' {
+                if chars.peek().map(|(_, n)| *n) == Some('`') {
+                    chars.next();
+                    name.push('`');
+                    continue;
+                }
+                end = Some(idx + 1);
+                break;
+            }
+            name.push(c);
+        }
+        let Some(end) = end else { continue };
+        let body = rest[end..].trim().trim_end_matches(',');
+        let tokens = ddl_tokens(body);
+        let upper = |i: usize| {
+            tokens
+                .get(i)
+                .map(|t| t.to_ascii_uppercase())
+                .unwrap_or_default()
+        };
+        let is_attr = |t: &str| {
+            matches!(
+                t,
+                "CHARACTER"
+                    | "COLLATE"
+                    | "GENERATED"
+                    | "NOT"
+                    | "NULL"
+                    | "DEFAULT"
+                    | "ON"
+                    | "AUTO_INCREMENT"
+                    | "COMMENT"
+                    | "SRID"
+                    | "VISIBLE"
+                    | "INVISIBLE"
+            ) || t.starts_with("/*")
+        };
+        let mut col = MysqlColumnSql::default();
+        let push = |field: &mut String, part: &str| {
+            if !field.is_empty() {
+                field.push(' ');
+            }
+            field.push_str(part);
+        };
+        // The data type comes first; LotDB reads it from COLUMN_TYPE.
+        let mut i = 0;
+        while i < tokens.len() && !is_attr(&upper(i)) {
+            i += 1;
+        }
+        while i < tokens.len() {
+            match upper(i).as_str() {
+                "CHARACTER" => {
+                    push(
+                        &mut col.charset,
+                        &tokens[i..(i + 3).min(tokens.len())].join(" "),
+                    );
+                    i += 3;
+                }
+                "COLLATE" => {
+                    push(
+                        &mut col.charset,
+                        &tokens[i..(i + 2).min(tokens.len())].join(" "),
+                    );
+                    i += 2;
+                }
+                "GENERATED" => {
+                    let start = i;
+                    while i < tokens.len() {
+                        let t = upper(i);
+                        i += 1;
+                        if t == "VIRTUAL" || t == "STORED" {
+                            break;
+                        }
+                    }
+                    col.generated = tokens[start..i].join(" ");
+                }
+                "NOT" => i += 2,
+                "NULL" | "AUTO_INCREMENT" => i += 1,
+                "COMMENT" => i += 2,
+                "DEFAULT" => {
+                    let value = tokens.get(i + 1).cloned().unwrap_or_default();
+                    if !value.eq_ignore_ascii_case("NULL") {
+                        col.default_sql = value;
+                    }
+                    i += 2;
+                }
+                "ON" => {
+                    push(
+                        &mut col.attributes,
+                        &tokens[i..(i + 3).min(tokens.len())].join(" "),
+                    );
+                    i += 3;
+                }
+                _ => {
+                    push(&mut col.attributes, &tokens[i]);
+                    i += 1;
+                }
+            }
+        }
+        out.insert(name, col);
+    }
+    out
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -250,6 +440,20 @@ pub async fn get_table_columns(
                 column_comment: String,
             }
 
+            // Best effort: views and odd output simply go without it.
+            let create: Option<String> = sqlx::query(&format!(
+                "SHOW CREATE TABLE {}",
+                crate::utils::sql::qualified_mysql(&database, &table)
+            ))
+            .fetch_one(pool)
+            .await
+            .ok()
+            .and_then(|row| sqlx::Row::try_get::<String, _>(&row, 1).ok());
+            let mut definitions = create
+                .as_deref()
+                .map(parse_mysql_create_columns)
+                .unwrap_or_default();
+
             let rows: Vec<MysqlCol> = sqlx::query_as(
                 "SELECT COLUMN_NAME as column_name, CAST(COLUMN_TYPE AS CHAR) as column_type, \
                  IS_NULLABLE as is_nullable, CAST(COLUMN_DEFAULT AS CHAR) as column_default, \
@@ -268,6 +472,7 @@ pub async fn get_table_columns(
                 .into_iter()
                 .map(|r| ColumnDef {
                     is_primary_key: pk_set.contains(&r.column_name),
+                    mysql_definition: definitions.remove(&r.column_name),
                     name: r.column_name,
                     data_type: r.column_type,
                     nullable: r.is_nullable == "YES",
@@ -344,6 +549,7 @@ pub async fn get_table_columns(
                     is_primary_key: r.is_primary_key,
                     comment: r.comment,
                     extra: None,
+                    mysql_definition: None,
                 })
                 .collect())
         }
@@ -479,6 +685,16 @@ pub async fn get_table_foreign_keys(
     schema: Option<String>,
     table: String,
 ) -> Result<Vec<ForeignKeyDef>, String> {
+    get_table_foreign_keys_impl(&pools, connection_id, database, schema, table).await
+}
+
+pub async fn get_table_foreign_keys_impl(
+    pools: &PoolManager,
+    connection_id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+) -> Result<Vec<ForeignKeyDef>, String> {
     let entry = pools
         .pools
         .get(&connection_id)
@@ -563,12 +779,12 @@ pub async fn get_table_foreign_keys(
                  JOIN pg_class t ON t.oid = c.conrelid \
                  JOIN pg_namespace n ON n.oid = t.relnamespace \
                  JOIN pg_class tf ON tf.oid = c.confrelid \
-                 JOIN pg_attribute a ON a.attrelid = c.conrelid \
-                   AND a.attnum = ANY(c.conkey) \
-                 JOIN pg_attribute af ON af.attrelid = c.confrelid \
-                   AND af.attnum = ANY(c.confkey) \
+                 CROSS JOIN LATERAL unnest(c.conkey, c.confkey) \
+                   WITH ORDINALITY AS k(attnum, ref_attnum, pos) \
+                 JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
+                 JOIN pg_attribute af ON af.attrelid = c.confrelid AND af.attnum = k.ref_attnum \
                  WHERE c.contype = 'f' AND n.nspname = $1 AND t.relname = $2 \
-                 ORDER BY c.conname, a.attnum",
+                 ORDER BY c.conname, k.pos",
             )
             .bind(schema_name)
             .bind(&table)
@@ -862,6 +1078,37 @@ pub async fn get_completion_schema(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_mysql_column_definitions() {
+        let create = "CREATE TABLE `t` (\n  `id` int unsigned NOT NULL AUTO_INCREMENT,\n  \
+            `code` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT 'a b''c' COMMENT 'x, y',\n  \
+            `ts` timestamp(3) NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),\n  \
+            `total` int GENERATED ALWAYS AS ((`id` * 2)) STORED,\n  \
+            `u` char(36) DEFAULT (uuid()) /*!80023 INVISIBLE */,\n  \
+            `we``ird` int DEFAULT NULL,\n  \
+            PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
+        let cols = parse_mysql_create_columns(create);
+        assert_eq!(cols.len(), 6);
+        assert_eq!(cols["id"], MysqlColumnSql::default());
+        assert_eq!(
+            cols["code"],
+            MysqlColumnSql {
+                default_sql: "'a b''c'".into(),
+                charset: "CHARACTER SET utf8mb4 COLLATE utf8mb4_bin".into(),
+                ..Default::default()
+            }
+        );
+        assert_eq!(cols["ts"].default_sql, "CURRENT_TIMESTAMP(3)");
+        assert_eq!(cols["ts"].attributes, "ON UPDATE CURRENT_TIMESTAMP(3)");
+        assert_eq!(
+            cols["total"].generated,
+            "GENERATED ALWAYS AS ((`id` * 2)) STORED"
+        );
+        assert_eq!(cols["u"].default_sql, "(uuid())");
+        assert_eq!(cols["u"].attributes, "/*!80023 INVISIBLE */");
+        assert_eq!(cols["we`ird"].default_sql, "");
+    }
 
     #[test]
     fn pg_action_code_maps_all_actions() {

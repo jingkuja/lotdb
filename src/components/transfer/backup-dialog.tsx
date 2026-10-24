@@ -13,12 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { backupDatabase } from "@/services/tauri-commands";
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
+import { formatBytes, useCliTask } from "@/hooks/use-cli-task";
 
 interface BackupDialogProps {
   open: boolean;
@@ -41,6 +36,8 @@ export function BackupDialog({
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ size: number; stderr: string } | null>(null);
+  const task = useCliTask();
+  const runTask = task.run;
 
   // Pre-fill with downloads dir on open
   useEffect(() => {
@@ -69,13 +66,16 @@ export function BackupDialog({
     setDone(false);
     setError(null);
     try {
-      const res = await backupDatabase(
-        connectionId,
-        database,
-        filePath,
-        contentMode === "schema",
-        contentMode === "data",
-        [],
+      const res = await runTask((taskId) =>
+        backupDatabase(
+          connectionId,
+          database,
+          filePath,
+          contentMode === "schema",
+          contentMode === "data",
+          [],
+          taskId,
+        ),
       );
       setResult({ size: res.sizeBytes, stderr: res.stderrOutput });
       setDone(true);
@@ -85,7 +85,7 @@ export function BackupDialog({
     } finally {
       setRunning(false);
     }
-  }, [connectionId, database, filePath, contentMode]);
+  }, [connectionId, database, filePath, contentMode, runTask]);
 
   return (
     <Dialog
@@ -151,10 +151,22 @@ export function BackupDialog({
               使用 mysqldump / pg_dump 执行备份，需要本机已安装对应 CLI 工具。
             </p>
 
+            {running && (
+              <p className="text-xs text-muted-foreground">
+                已写入 {formatBytes(task.progress?.done ?? 0)}
+              </p>
+            )}
+
             <DialogFooter>
-              <Button variant="outline" onClick={() => onOpenChange(false)} disabled={running}>
-                取消
-              </Button>
+              {running ? (
+                <Button variant="outline" onClick={task.cancel} disabled={task.cancelling}>
+                  {task.cancelling ? "正在取消…" : "取消备份"}
+                </Button>
+              ) : (
+                <Button variant="outline" onClick={() => onOpenChange(false)}>
+                  取消
+                </Button>
+              )}
               <Button onClick={handleBackup} disabled={running || !filePath}>
                 {running ? (
                   <><Loader2 className="size-3.5 mr-1.5 animate-spin" />备份中…</>

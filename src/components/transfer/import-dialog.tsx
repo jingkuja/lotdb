@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Upload, Loader2, CheckCircle2, AlertCircle, FileText, ChevronRight } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   Dialog,
   DialogContent,
@@ -12,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import {
+  cancelTransfer,
   importTableData,
   previewImportFile,
   type ImportFormat,
@@ -132,8 +134,9 @@ export function ImportDialog({
 
   // ── Progress ──────────────────────────────────────────────────
   const [progress, setProgress] = useState<ImportProgressEvent | null>(null);
+  const importIdRef = useRef<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
   // Track mounted state to safely update dialog state after potential close
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -165,12 +168,17 @@ export function ImportDialog({
     if (filePath) setFormat(detectFormat(filePath));
   }, [filePath]);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const path = (file as unknown as { path?: string }).path ?? file.name;
-    setFilePath(path);
-    e.target.value = "";
+  // `<input type="file">` only exposes the bare file name in the Tauri
+  // webview, so the native open panel is the only way to get a full path.
+  const handleBrowse = async () => {
+    const path = await openFileDialog({
+      multiple: false,
+      directory: false,
+      filters: [
+        { name: "数据文件", extensions: ["csv", "tsv", "txt", "json", "sql"] },
+      ],
+    });
+    if (typeof path === "string") setFilePath(path);
   };
 
   // ── Parse file → go to mapping step ──────────────────────────
@@ -214,10 +222,12 @@ export function ImportDialog({
       errorMessage: null,
     });
 
+    importIdRef.current = taskId;
     if (mountedRef.current) {
       setStatus("importing");
       setImportResult(null);
       setProgress(null);
+      setCancelling(false);
     }
 
     // Subscribe to progress events
@@ -245,6 +255,7 @@ export function ImportDialog({
         hasHeader,
         truncateFirst,
         colMapping,
+        taskId,
       );
       updateTask(taskId, { status: "done", rowsDone: res.rowsImported, progress: 100 });
       if (mountedRef.current) {
@@ -260,7 +271,18 @@ export function ImportDialog({
         setStatus("error");
       }
     } finally {
+      importIdRef.current = null;
       unlisten();
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!importIdRef.current) return;
+    setCancelling(true);
+    try {
+      await cancelTransfer(importIdRef.current);
+    } catch {
+      setCancelling(false);
     }
   };
 
@@ -301,19 +323,12 @@ export function ImportDialog({
                     size="sm"
                     variant="outline"
                     className="h-7 gap-1 text-xs"
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={handleBrowse}
                   >
                     <FileText className="size-3" />
                     浏览
                   </Button>
                 </div>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  accept=".csv,.tsv,.txt,.json,.sql"
-                  onChange={handleFileSelect}
-                />
               </div>
 
               {/* Format */}
@@ -532,14 +547,31 @@ export function ImportDialog({
                   />
                   <span>
                     导入前清空表{" "}
-                    <span className="text-destructive">（TRUNCATE — 不可撤销）</span>
+                    <span className="text-muted-foreground">
+                      {format === "sql"
+                        ? "（TRUNCATE，不可撤销）"
+                        : "（与导入在同一事务中，失败或取消时恢复原数据）"}
+                    </span>
                   </span>
                 </label>
               </div>
 
               {/* Progress bar */}
               {status === "importing" && (
-                <ImportProgressBar progress={progress} />
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <ImportProgressBar progress={progress} />
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    disabled={cancelling}
+                    onClick={handleCancel}
+                  >
+                    {cancelling ? "正在取消…" : "取消导入"}
+                  </Button>
+                </div>
               )}
 
               {/* Import error */}

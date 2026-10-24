@@ -72,6 +72,7 @@ export function ConnectionDialog({
   const [sshKeyPath, setSshKeyPath] = useState(
     initial?.ssh?.privateKeyPath ?? "",
   );
+  const [sshPassphrase, setSshPassphrase] = useState("");
 
   // SSL
   const [sslEnabled, setSslEnabled] = useState(initial?.ssl?.enabled ?? false);
@@ -115,6 +116,8 @@ export function ConnectionDialog({
             sshAuthType === "password" ? sshPassword || undefined : undefined,
           privateKeyPath:
             sshAuthType === "key" ? sshKeyPath || undefined : undefined,
+          passphrase:
+            sshAuthType === "key" ? sshPassphrase || undefined : undefined,
         }
       : undefined,
     ssl: {
@@ -200,6 +203,7 @@ export function ConnectionDialog({
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                placeholder={isEdit ? "留空则保持不变" : undefined}
               />
 
               <Label>数据库</Label>
@@ -306,6 +310,7 @@ export function ConnectionDialog({
                       type="password"
                       value={sshPassword}
                       onChange={(e) => setSshPassword(e.target.value)}
+                      placeholder={isEdit ? "留空则保持不变" : undefined}
                     />
                   </>
                 ) : (
@@ -315,6 +320,15 @@ export function ConnectionDialog({
                       value={sshKeyPath}
                       onChange={(e) => setSshKeyPath(e.target.value)}
                       placeholder="/Users/you/.ssh/id_rsa"
+                    />
+                    <Label>私钥口令</Label>
+                    <Input
+                      type="password"
+                      value={sshPassphrase}
+                      onChange={(e) => setSshPassphrase(e.target.value)}
+                      placeholder={
+                        isEdit ? "留空则保持不变" : "私钥未加密时留空"
+                      }
                     />
                   </>
                 )}

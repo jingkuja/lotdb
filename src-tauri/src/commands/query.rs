@@ -2,7 +2,6 @@ use crate::db::pool::PoolManager;
 use crate::db::value::{mysql_value_to_json, pg_value_to_json};
 use crate::error::AppError;
 use crate::models::connection::ConnectionConfig;
-use crate::utils::keychain;
 use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -204,13 +203,7 @@ pub async fn open_connection(
     registry: State<'_, QueryRegistry>,
     mut config: ConnectionConfig,
 ) -> Result<(), AppError> {
-    // Load password from Keychain if not provided (off the async runtime —
-    // a sync SecItem call can deadlock the IPC loop inside a packaged .app).
-    if config.password.is_empty() {
-        config.password = keychain::load_password_async(config.id.clone())
-            .await
-            .unwrap_or_default();
-    }
+    crate::commands::connection::load_secrets(&mut config).await;
     registry.close_sessions(&config.id);
     pools.open(&config).await.map_err(AppError::connection)
 }
@@ -449,7 +442,7 @@ pub async fn run_session_query(
     };
     let mut session = slot.lock().await;
     if session.is_none() {
-        *session = Some(match pool {
+        *session = Some(match pool.clone() {
             crate::db::pool::DbPool::MySQL(p) => {
                 let mut conn = p
                     .acquire()
@@ -492,6 +485,11 @@ pub async fn run_session_query(
                     .map_err(|e| AppError::from_sqlx("开启只读事务失败", e))?;
             }
             let result = run_mysql(conn, sql, kind, max_rows, args).await;
+            // Rows past the cap are still on their way; stop the server
+            // instead of reading (and discarding) the rest of the table.
+            if let (Ok((_, _, _, true)), crate::db::pool::DbPool::MySQL(p)) = (&result, &pool) {
+                stop_mysql_result(conn, p, pid).await?;
+            }
             if readonly {
                 sqlx::Executor::execute(&mut *conn, "ROLLBACK")
                     .await
@@ -519,7 +517,11 @@ pub async fn run_session_query(
                     .await
                     .map_err(|e| AppError::from_sqlx("开启只读事务失败", e))?;
             }
-            let result = run_postgres(conn, sql, kind, max_rows, args).await;
+            let canceller = match &pool {
+                crate::db::pool::DbPool::Postgres(p) => Some((p, pid)),
+                crate::db::pool::DbPool::MySQL(_) => None,
+            };
+            let result = run_postgres(conn, sql, kind, max_rows, args, canceller, readonly).await;
             if readonly {
                 sqlx::Executor::execute(&mut *conn, "ROLLBACK")
                     .await
@@ -669,6 +671,40 @@ async fn run_mysql(
     }
 }
 
+/// Abandon the rest of a MySQL result set. sqlx would otherwise read every
+/// remaining row before the next command. KILL QUERY ends only the statement
+/// (the session and any open transaction survive); the ping then consumes
+/// the leftover packets and the "interrupted" error they end with.
+async fn stop_mysql_result(
+    conn: &mut sqlx::MySqlConnection,
+    pool: &sqlx::MySqlPool,
+    pid: u64,
+) -> Result<(), AppError> {
+    sqlx::query(&format!("KILL QUERY {pid}"))
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::from_sqlx("停止剩余结果失败", e))?;
+    let _ = sqlx::Connection::ping(&mut *conn).await;
+    sqlx::Connection::ping(&mut *conn)
+        .await
+        .map_err(|e| AppError::from_sqlx("会话恢复失败", e))
+}
+
+/// Whether the session is inside a transaction block. Outside one every
+/// statement is its own transaction, so its start time equals the statement
+/// start time. Sent over the simple protocol (no arguments) so both
+/// timestamps come from the same message.
+async fn pg_in_transaction(conn: &mut sqlx::PgConnection) -> Result<bool, AppError> {
+    // A bare &str (not sqlx::query) is what selects the simple protocol.
+    let row = sqlx::Executor::fetch_one(&mut *conn, "SELECT now() <> statement_timestamp()")
+        .await
+        .map_err(|e| AppError::from_sqlx("查询事务状态失败", e))?;
+    row.try_get(0)
+        .map_err(|e| AppError::from_sqlx("查询事务状态失败", e))
+}
+
+const ROW_CAP_SAVEPOINT: &str = "lotdb_row_cap";
+
 #[allow(deprecated)]
 async fn run_postgres(
     conn: &mut sqlx::PgConnection,
@@ -676,6 +712,8 @@ async fn run_postgres(
     kind: StmtKind,
     max_rows: Option<u64>,
     args: PgArgs,
+    canceller: Option<(&sqlx::PgPool, u64)>,
+    own_transaction: bool,
 ) -> Result<RawResult, AppError> {
     // Describe result-bearing statements before execution, including zero-row
     // RETURNING. Never issue a preflight for ROLLBACK in an aborted transaction.
@@ -694,6 +732,29 @@ async fn run_postgres(
     } else {
         vec![]
     };
+
+    // Once a capped query has enough rows, send a cancel request so the
+    // server stops producing rows we would only throw away. DML is never
+    // cancelled: it has to finish to report its affected count. A cancelled
+    // statement aborts the surrounding transaction, so inside a user's
+    // transaction it runs under a savepoint that is rolled back afterwards.
+    // `own_transaction` is the read-only wrapper, which is rolled back anyway.
+    let canceller = canceller.filter(|_| kind == StmtKind::Rows && max_rows.is_some());
+    let mut savepoint = false;
+    if canceller.is_some() && !own_transaction && pg_in_transaction(conn).await? {
+        match sqlx::Executor::execute(
+            &mut *conn,
+            format!("SAVEPOINT {ROW_CAP_SAVEPOINT}").as_str(),
+        )
+        .await
+        {
+            Ok(_) => savepoint = true,
+            // 25P01: not in a transaction after all; nothing to protect.
+            Err(e) if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("25P01") => {}
+            Err(e) => return Err(AppError::from_sqlx("创建保存点失败", e)),
+        }
+    }
+
     let mut stream = match args {
         PgArgs::None => sqlx::Executor::fetch_many(&mut *conn, sql),
         PgArgs::Some(a) => sqlx::query_with(sql, a).fetch_many(&mut *conn),
@@ -702,32 +763,80 @@ async fn run_postgres(
     let mut affected = 0;
     let mut bytes = 0;
     let mut truncated = false;
+    let mut cancelled = false;
+    let mut failure = None;
     // Drain completion messages so DML RETURNING reports the actual affected
     // count and leaves the session ready, even when display rows are capped.
     while let Some(item) = stream.next().await {
-        match item.map_err(|e| AppError::from_sqlx("查询失败", e))? {
+        let item = match item {
+            Ok(item) => item,
+            // Our own cancel request: the expected end of a capped result.
+            Err(e) if cancelled && is_pg_query_canceled(&e) => break,
+            Err(e) => {
+                failure = Some(AppError::from_sqlx("查询失败", e));
+                break;
+            }
+        };
+        match item {
             Either::Left(done) => affected += done.rows_affected(),
             Either::Right(row) => {
                 if columns.is_empty() {
                     columns = row.columns().iter().map(|c| c.name().to_string()).collect();
                 }
-                if truncated || max_rows.is_some_and(|m| rows.len() as u64 >= m) {
-                    truncated = true;
-                    continue;
+                if !truncated {
+                    if max_rows.is_some_and(|m| rows.len() as u64 >= m) {
+                        truncated = true;
+                    } else {
+                        let values: Vec<_> = (0..row.columns().len())
+                            .map(|i| pg_value_to_json(&row, i))
+                            .collect();
+                        bytes += serde_json::to_vec(&values).map_or(0, |v| v.len());
+                        if bytes > MAX_RESULT_BYTES {
+                            truncated = true;
+                        } else {
+                            rows.push(values);
+                        }
+                    }
                 }
-                let values: Vec<_> = (0..row.columns().len())
-                    .map(|i| pg_value_to_json(&row, i))
-                    .collect();
-                bytes += serde_json::to_vec(&values).map_or(0, |v| v.len());
-                if bytes > MAX_RESULT_BYTES {
-                    truncated = true;
-                    continue;
+                if truncated && !cancelled {
+                    if let Some((pool, pid)) = canceller {
+                        cancelled = sqlx::query("SELECT pg_cancel_backend($1)")
+                            .bind(pid as i32)
+                            .execute(pool)
+                            .await
+                            .is_ok();
+                    }
                 }
-                rows.push(values);
             }
         }
     }
+    drop(stream);
+
+    if savepoint {
+        // Roll back only if the statement did not finish cleanly; otherwise
+        // just release, keeping any effects of the query.
+        let finish = if cancelled || failure.is_some() {
+            format!(
+                "ROLLBACK TO SAVEPOINT {ROW_CAP_SAVEPOINT}; RELEASE SAVEPOINT {ROW_CAP_SAVEPOINT}"
+            )
+        } else {
+            format!("RELEASE SAVEPOINT {ROW_CAP_SAVEPOINT}")
+        };
+        sqlx::Executor::execute(&mut *conn, finish.as_str())
+            .await
+            .map_err(|e| AppError::from_sqlx("释放保存点失败", e))?;
+    }
+    if let Some(e) = failure {
+        return Err(e);
+    }
     Ok((columns, rows, affected, truncated))
+}
+
+/// SQLSTATE 57014: canceling statement due to user request.
+fn is_pg_query_canceled(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .and_then(|d| d.code())
+        .is_some_and(|c| c == "57014")
 }
 
 const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
@@ -994,13 +1103,14 @@ pub async fn configure_session_impl(
                 .map_err(|e| AppError::from_sqlx("获取会话失败", e))?
                 .detach();
             if let Some(schema) = schema.filter(|s| !s.is_empty()) {
-                conn.execute(
-                    format!(
-                        "SET search_path TO {}",
-                        crate::utils::sql::quote_ident_pg(schema)
-                    )
-                    .as_str(),
+                // Prepend instead of replace: extension functions and types
+                // usually live in `public` and must stay resolvable.
+                sqlx::query(
+                    "SELECT set_config('search_path', \
+                     quote_ident($1) || ', ' || current_setting('search_path'), false)",
                 )
+                .bind(schema)
+                .execute(&mut conn)
                 .await
                 .map_err(|e| AppError::from_sqlx("切换 schema 失败", e))?;
             }

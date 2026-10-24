@@ -84,6 +84,13 @@ impl PoolManager {
         self.pg_sub_pools.retain(|k, _| !k.starts_with(&prefix));
     }
 
+    /// Close the cached PG sub-pool for `database`, e.g. before dropping it.
+    pub async fn close_database_pool(&self, id: &str, database: &str) {
+        if let Some((_, pool)) = self.pg_sub_pools.remove(&format!("{id}::{database}")) {
+            pool.close().await;
+        }
+    }
+
     /// For PostgreSQL: return (or lazily build) a PgPool connected to `database`.
     /// Caches sub-pools so repeated calls are cheap.
     pub async fn pg_pool_for_database(&self, id: &str, database: &str) -> Result<PgPool, String> {
@@ -170,6 +177,13 @@ impl PoolManager {
             return Err("该连接为只读模式，已拦截数据或结构变更".into());
         }
         Ok(())
+    }
+
+    /// (user, password) of an open connection, as loaded when it was opened.
+    pub fn credentials(&self, id: &str) -> Option<(String, String)> {
+        self.configs
+            .get(id)
+            .map(|c| (c.user.clone(), c.password.clone()))
     }
 
     /// Whether this connection blocks DML/DDL (readonly mode).

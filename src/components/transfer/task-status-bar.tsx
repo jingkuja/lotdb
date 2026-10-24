@@ -71,7 +71,8 @@ function TaskRow({ task }: { task: BgTask }) {
           {cancelError}
         </span>
       )}
-      {task.status === "running" && task.kind === "transfer" && (
+      {task.status === "running" &&
+        (task.kind === "transfer" || task.kind === "import") && (
         <button
           disabled={cancelling}
           className="text-xs text-destructive"

@@ -43,6 +43,8 @@ function defaultClause(col: DesignerColumn): string {
   return ` DEFAULT ${col.defaultValue}`;
 }
 
+const MYSQL_TEXTUAL = /CHAR|TEXT|ENUM|SET/i;
+
 /** Full column definition line (without trailing comma). */
 function colDef(col: DesignerColumn, dbType: DatabaseType): string {
   const name = q(col.name, dbType);
@@ -55,7 +57,14 @@ function colDef(col: DesignerColumn, dbType: DatabaseType): string {
     col.comment && dbType === "mysql"
       ? ` COMMENT '${col.comment.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
       : "";
-  return `  ${name} ${type} ${nullability}${autoInc}${def}${comment}`;
+  // Attributes the designer does not edit, in the positions MySQL requires:
+  // charset/collation and the generation expression right after the type.
+  const extras = dbType === "mysql" ? col.mysqlExtras : undefined;
+  const charset =
+    extras?.charset && MYSQL_TEXTUAL.test(col.type) ? ` ${extras.charset}` : "";
+  const generated = extras?.generated ? ` ${extras.generated}` : "";
+  const attributes = extras?.attributes ? ` ${extras.attributes}` : "";
+  return `  ${name} ${type}${charset}${generated} ${nullability}${autoInc}${def}${attributes}${comment}`;
 }
 
 /** PK column list as a parenthesised, quoted, comma-separated string. */
@@ -196,8 +205,44 @@ function colChanged(a: DesignerColumn, b: DesignerColumn): boolean {
     a.isAutoIncrement !== b.isAutoIncrement ||
     a.isUnique !== b.isUnique ||
     a.unsigned !== b.unsigned ||
-    a.comment !== b.comment
+    a.comment !== b.comment ||
+    JSON.stringify(a.mysqlExtras ?? null) !==
+      JSON.stringify(b.mysqlExtras ?? null)
   );
+}
+
+/**
+ * Pair each current column with its original. The designer keeps a column's
+ * `id` across edits, so a renamed column is still the same column (and must
+ * become RENAME, not DROP + ADD, which would lose its data). States loaded
+ * separately (schema compare) have unrelated ids and fall back to names.
+ */
+function pairColumns(
+  original: DesignerColumn[],
+  current: DesignerColumn[],
+): Map<string, DesignerColumn> {
+  const pairs = new Map<string, DesignerColumn>(); // current id → original
+  const used = new Set<DesignerColumn>();
+  const origById = new Map(original.map((c) => [c.id, c]));
+  for (const col of current) {
+    const orig = origById.get(col.id);
+    if (orig && orig.name && col.name) {
+      pairs.set(col.id, orig);
+      used.add(orig);
+    }
+  }
+  const origByName = new Map(
+    original.filter((c) => !used.has(c) && c.name).map((c) => [c.name, c]),
+  );
+  for (const col of current) {
+    if (pairs.has(col.id) || !col.name) continue;
+    const orig = origByName.get(col.name);
+    if (orig) {
+      pairs.set(col.id, orig);
+      origByName.delete(col.name);
+    }
+  }
+  return pairs;
 }
 
 /**
@@ -228,39 +273,68 @@ export function generateAlterTable(
   const tref2 = tableRef(currName, dbType, schema); // after rename
 
   // ── Column changes ────────────────────────────────────────────
-  const origColMap = new Map(original.columns.map((c) => [c.name, c]));
-  const currColMap = new Map(current.columns.map((c) => [c.name, c]));
+  const pairs = pairColumns(original.columns, current.columns);
+  const paired = new Set(pairs.values());
+  /** Original column name → its new name, for renamed columns. */
+  const renamed = new Map<string, string>();
+  for (const col of current.columns) {
+    const orig = pairs.get(col.id);
+    if (orig && orig.name !== col.name) renamed.set(orig.name, col.name);
+  }
+  const currentNames = new Set(current.columns.map((c) => c.name));
+  /**
+   * Index / FK column lists still name a column by its old name until the
+   * user re-picks it; resolve those (but never a name that a current column
+   * actually has) so references follow the rename.
+   */
+  const resolve = (cols: string[]) =>
+    cols.map((c) =>
+      renamed.has(c) && !currentNames.has(c) ? renamed.get(c)! : c,
+    );
+  const resolveOrig = (cols: string[]) =>
+    cols.map((c) => renamed.get(c) ?? c);
 
-  // Dropped columns (in original, not in current)
+  // Dropped columns (no counterpart in current)
   for (const col of original.columns) {
-    if (!currColMap.has(col.name) && col.name) {
-      if (dbType === "mysql") {
-        stmts.push(
-          `ALTER TABLE ${tref2} DROP COLUMN ${q(col.name, dbType)};`,
-        );
-      } else {
-        stmts.push(
-          `ALTER TABLE ${tref2} DROP COLUMN ${q(col.name, dbType)};`,
-        );
-      }
+    if (col.name && !paired.has(col)) {
+      stmts.push(`ALTER TABLE ${tref2} DROP COLUMN ${q(col.name, dbType)};`);
     }
   }
 
-  // Added columns (in current, not in original)
+  // Renamed columns. RENAME COLUMN keeps the data and every attribute.
+  // A swap (a→b, b→a) would collide mid-way, so go through temporary names.
+  const renames = [...renamed.entries()];
+  const collides = renames.some(([, to]) => renamed.has(to));
+  const renameStmt = (from: string, to: string) =>
+    `ALTER TABLE ${tref2} RENAME COLUMN ${q(from, dbType)} TO ${q(to, dbType)};`;
+  if (collides) {
+    renames.forEach(([from], i) =>
+      stmts.push(renameStmt(from, `__lotdb_tmp_${i}`)),
+    );
+    renames.forEach(([, to], i) =>
+      stmts.push(renameStmt(`__lotdb_tmp_${i}`, to)),
+    );
+  } else {
+    for (const [from, to] of renames) stmts.push(renameStmt(from, to));
+  }
+
+  // Added columns (no counterpart in original)
   for (const col of current.columns) {
-    if (!origColMap.has(col.name) && col.name) {
+    if (col.name && !pairs.has(col.id)) {
       const def = colDef(col, dbType).trim();
       stmts.push(`ALTER TABLE ${tref2} ADD COLUMN ${def};`);
     }
   }
 
-  // Modified columns (in both)
+  // Modified columns (paired; already carry their new name)
   for (const col of current.columns) {
-    const orig = origColMap.get(col.name);
+    const orig = pairs.get(col.id);
     if (!orig || !col.name) continue;
     if (!colChanged(orig, col)) continue;
 
     if (dbType === "mysql") {
+      // MODIFY restates the whole column; colDef includes mysqlExtras so
+      // collation, generated expressions and ON UPDATE survive.
       stmts.push(
         `ALTER TABLE ${tref2} MODIFY COLUMN ${colDef(col, dbType).trim()};`,
       );
@@ -297,9 +371,10 @@ export function generateAlterTable(
   }
 
   // ── PK change ────────────────────────────────────────────────
-  const origPk = original.columns
-    .filter((c) => c.isPrimaryKey)
-    .map((c) => c.name)
+  // Compared under the new names: renaming a key column is not a PK change.
+  const origPk = resolveOrig(
+    original.columns.filter((c) => c.isPrimaryKey).map((c) => c.name),
+  )
     .sort()
     .join(",");
   const currPk = current.columns
@@ -335,8 +410,14 @@ export function generateAlterTable(
   }
 
   // ── Index changes ────────────────────────────────────────────
-  const origIdxMap = new Map(original.indexes.map((i) => [i.name, i]));
-  const currIdxMap = new Map(current.indexes.map((i) => [i.name, i]));
+  const origIdxMap = new Map(
+    original.indexes.map((i) => [i.name, { ...i, columns: resolveOrig(i.columns) }]),
+  );
+  const currIndexes = current.indexes.map((i) => ({
+    ...i,
+    columns: resolve(i.columns),
+  }));
+  const currIdxMap = new Map(currIndexes.map((i) => [i.name, i]));
 
   // Dropped indexes
   for (const idx of original.indexes) {
@@ -352,7 +433,7 @@ export function generateAlterTable(
   }
 
   // Added indexes
-  for (const idx of current.indexes) {
+  for (const idx of currIndexes) {
     if (!origIdxMap.has(idx.name) && idx.name && idx.columns.length > 0) {
       if (dbType === "mysql") {
         stmts.push(
@@ -371,7 +452,7 @@ export function generateAlterTable(
   }
 
   // Modified indexes (drop + recreate)
-  for (const idx of current.indexes) {
+  for (const idx of currIndexes) {
     const orig = origIdxMap.get(idx.name);
     if (!orig || !idx.name || idx.columns.length === 0) continue;
     const changed =
@@ -397,8 +478,14 @@ export function generateAlterTable(
   }
 
   // ── FK changes ───────────────────────────────────────────────
-  const origFkMap = new Map(original.foreignKeys.map((f) => [f.name, f]));
-  const currFkMap = new Map(current.foreignKeys.map((f) => [f.name, f]));
+  const origFkMap = new Map(
+    original.foreignKeys.map((f) => [f.name, { ...f, columns: resolveOrig(f.columns) }]),
+  );
+  const currForeignKeys = current.foreignKeys.map((f) => ({
+    ...f,
+    columns: resolve(f.columns),
+  }));
+  const currFkMap = new Map(currForeignKeys.map((f) => [f.name, f]));
 
   // Dropped FKs
   for (const fk of original.foreignKeys) {
@@ -416,7 +503,7 @@ export function generateAlterTable(
   }
 
   // Added FKs
-  for (const fk of current.foreignKeys) {
+  for (const fk of currForeignKeys) {
     if (
       !origFkMap.has(fk.name) &&
       fk.name &&
@@ -430,7 +517,7 @@ export function generateAlterTable(
   }
 
   // Modified FKs (drop + re-add)
-  for (const fk of current.foreignKeys) {
+  for (const fk of currForeignKeys) {
     const orig = origFkMap.get(fk.name);
     if (!orig || !fk.name || !fk.refTable || fk.columns.length === 0) continue;
     const changed =

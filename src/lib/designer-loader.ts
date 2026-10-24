@@ -115,18 +115,32 @@ function toDesignerColumn(def: ColumnDef, dbType: DatabaseType): DesignerColumn 
       ? def.extra === "auto_increment"
       : baseType === "SERIAL" || baseType === "BIGSERIAL";
 
+  // information_schema reports MySQL defaults unquoted (`abc`, not `'abc'`),
+  // but the designer's default is an SQL expression; prefer the server's own
+  // rendering from SHOW CREATE TABLE.
+  const mysqlDef = dbType === "mysql" ? def.mysqlDefinition : undefined;
+
   return {
     id: nextId(),
     name: def.name,
     type: baseType,
     length,
     nullable: def.nullable,
-    defaultValue: def.defaultValue ?? "",
+    defaultValue: mysqlDef ? mysqlDef.defaultSql : (def.defaultValue ?? ""),
     isPrimaryKey: def.isPrimaryKey,
     isAutoIncrement,
     isUnique: false, // derived from indexes below
     unsigned,
     comment: def.comment ?? "",
+    ...(mysqlDef && (mysqlDef.charset || mysqlDef.generated || mysqlDef.attributes)
+      ? {
+          mysqlExtras: {
+            charset: mysqlDef.charset,
+            generated: mysqlDef.generated,
+            attributes: mysqlDef.attributes,
+          },
+        }
+      : {}),
   };
 }
 

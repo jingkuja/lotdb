@@ -134,6 +134,20 @@ export interface ColumnDef {
   isPrimaryKey: boolean;
   comment: string | null;
   extra: string | null;
+  /** MySQL: the column as SHOW CREATE TABLE prints it. */
+  mysqlDefinition?: MysqlColumnSql;
+}
+
+/** Pieces of a MySQL column definition, each ready to paste into DDL. */
+export interface MysqlColumnSql {
+  /** DEFAULT expression as the server prints it; "" for none/NULL. */
+  defaultSql: string;
+  /** `CHARACTER SET x COLLATE y` */
+  charset: string;
+  /** `GENERATED ALWAYS AS (expr) VIRTUAL|STORED` */
+  generated: string;
+  /** `ON UPDATE …`, `SRID n`, `/*!80023 INVISIBLE *\/` */
+  attributes: string;
 }
 
 export interface IndexDef {
@@ -763,8 +777,11 @@ export async function importTableData(
   hasHeader: boolean,
   truncateFirst: boolean,
   columnMapping: (string | null)[],
+  /** Pass the same id to `cancelTransfer` to stop the import. */
+  importId?: string,
 ): Promise<ImportResult> {
   return invoke<ImportResult>("import_table_data", {
+    importId,
     connectionId,
     database,
     schema,
@@ -1016,8 +1033,11 @@ export async function backupDatabase(
   noData: boolean,
   noSchema: boolean,
   tables: string[],
+  /** Pass the same id to `cancelTransfer` to stop the dump. */
+  taskId?: string,
 ): Promise<BackupResult> {
   return invoke<BackupResult>("backup_database", {
+    taskId,
     connectionId,
     database,
     filePath,
@@ -1032,8 +1052,11 @@ export async function restoreDatabase(
   database: string,
   filePath: string,
   createDb: boolean,
+  /** Pass the same id to `cancelTransfer` to stop the restore. */
+  taskId?: string,
 ): Promise<RestoreResult> {
   return invoke<RestoreResult>("restore_database", {
+    taskId,
     connectionId,
     database,
     filePath,
@@ -1078,6 +1101,11 @@ export async function transferTableData(
 export interface ImportConnectionsResult {
   imported: number;
   skipped: number;
+}
+
+/** Write saved connections (without any secrets) to a JSON file. */
+export async function exportConnections(filePath: string): Promise<number> {
+  return invoke<number>("export_connections", { filePath });
 }
 
 export async function importConnections(
