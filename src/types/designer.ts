@@ -30,9 +30,22 @@ export interface MysqlColumnExtras {
 }
 
 export type IndexType = "INDEX" | "UNIQUE" | "FULLTEXT" | "SPATIAL";
-export type IndexMethod = "BTREE" | "HASH" | "FULLTEXT" | "SPATIAL" | "GIN" | "GIST" | "BRIN" | "SPGIST";
+export type IndexMethod =
+  | "BTREE"
+  | "HASH"
+  | "FULLTEXT"
+  | "SPATIAL"
+  | "GIN"
+  | "GIST"
+  | "BRIN"
+  | "SPGIST";
 
-export type FKAction = "NO ACTION" | "RESTRICT" | "CASCADE" | "SET NULL" | "SET DEFAULT";
+export type FKAction =
+  | "NO ACTION"
+  | "RESTRICT"
+  | "CASCADE"
+  | "SET NULL"
+  | "SET DEFAULT";
 
 export interface DesignerForeignKey {
   id: string;
@@ -52,7 +65,7 @@ export interface DesignerIndex {
   id: string;
   name: string;
   type: IndexType;
-  columns: string[];   // ordered list of column names
+  columns: string[]; // ordered list of column names
   method: IndexMethod;
   comment: string;
 }
@@ -66,7 +79,14 @@ export interface DesignerState {
 }
 
 export function emptyIndex(id: string): DesignerIndex {
-  return { id, name: "", type: "INDEX", columns: [], method: "BTREE", comment: "" };
+  return {
+    id,
+    name: "",
+    type: "INDEX",
+    columns: [],
+    method: "BTREE",
+    comment: "",
+  };
 }
 
 export function emptyForeignKey(id: string): DesignerForeignKey {
@@ -98,5 +118,11 @@ export function emptyColumn(id: string): DesignerColumn {
 }
 
 export function emptyState(): DesignerState {
-  return { tableName: "", tableComment: "", columns: [], indexes: [], foreignKeys: [] };
+  return {
+    tableName: "",
+    tableComment: "",
+    columns: [],
+    indexes: [],
+    foreignKeys: [],
+  };
 }

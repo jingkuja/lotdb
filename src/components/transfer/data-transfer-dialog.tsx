@@ -28,6 +28,7 @@ import {
 } from "@/services/tauri-commands";
 import type { ConnectionConfig } from "@/types/database";
 import { useTaskStore, newTaskId } from "@/stores/task-store";
+import { formatDbError } from "@/lib/error";
 
 // ─── Progress helpers ─────────────────────────────────────────────
 
@@ -395,7 +396,7 @@ export function DataTransferDialog({
       setMapping(autoMap);
       setStep("mapping");
     } catch (e) {
-      await alertDialog(String(e), { title: "加载列失败" });
+      await alertDialog(formatDbError(e), { title: "加载列失败" });
     } finally {
       setLoadingCols(false);
     }
@@ -484,7 +485,7 @@ export function DataTransferDialog({
         setStep("done");
       }
     } catch (e) {
-      const msg = String(e);
+      const msg = formatDbError(e);
       updateTask(taskId, { status: "error", errorMessage: msg });
       if (mountedRef.current) {
         setResultError(msg);
@@ -682,7 +683,7 @@ export function DataTransferDialog({
                       await cancelTransfer(transferIdRef.current);
                     } catch (error) {
                       setCancelling(false);
-                      setResultError(String(error));
+                      setResultError(formatDbError(error));
                     }
                   }
                 }}

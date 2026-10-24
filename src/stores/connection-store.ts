@@ -1,39 +1,25 @@
 import { create } from "zustand";
-import type { ConnectionConfig, ConnectionGroup } from "@/types/database";
 
+/**
+ * Client-side connection state. Saved connections and groups live in React
+ * Query (useConnections / useGroups); this store only tracks which pools are
+ * open in the backend and which connection is selected.
+ */
 interface ConnectionState {
-  connections: ConnectionConfig[];
-  groups: ConnectionGroup[];
   activeConnectionId: string | null;
   openPoolIds: Set<string>;
+  /** Bumped on every (re)open, so sessions tied to an old pool are rebuilt. */
   generations: Record<string, number>;
   setActiveConnection: (id: string | null) => void;
-  addConnection: (connection: ConnectionConfig) => void;
-  removeConnection: (id: string) => void;
-  updateConnection: (id: string, config: Partial<ConnectionConfig>) => void;
   markPoolOpen: (id: string) => void;
   markPoolClosed: (id: string) => void;
 }
 
 export const useConnectionStore = create<ConnectionState>((set) => ({
-  connections: [],
-  groups: [],
   activeConnectionId: null,
   openPoolIds: new Set(),
   generations: {},
   setActiveConnection: (id) => set({ activeConnectionId: id }),
-  addConnection: (connection) =>
-    set((state) => ({ connections: [...state.connections, connection] })),
-  removeConnection: (id) =>
-    set((state) => ({
-      connections: state.connections.filter((c) => c.id !== id),
-    })),
-  updateConnection: (id, config) =>
-    set((state) => ({
-      connections: state.connections.map((c) =>
-        c.id === id ? { ...c, ...config } : c,
-      ),
-    })),
   markPoolOpen: (id) =>
     set((state) => ({
       openPoolIds: new Set([...state.openPoolIds, id]),

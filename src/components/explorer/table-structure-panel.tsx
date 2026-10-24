@@ -7,6 +7,7 @@ import {
   useTableIndexes,
   useTableForeignKeys,
 } from "@/hooks/use-table-structure";
+import { formatDbError } from "@/lib/error";
 
 interface Props {
   connectionId: string;
@@ -17,7 +18,13 @@ interface Props {
 
 // ─── Shared table primitives ──────────────────────────────────────
 
-function Th({ children, className }: { children: React.ReactNode; className?: string }) {
+function Th({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
     <th
       className={cn(
@@ -30,10 +37,14 @@ function Th({ children, className }: { children: React.ReactNode; className?: st
   );
 }
 
-function Td({ children, className }: { children: React.ReactNode; className?: string }) {
-  return (
-    <td className={cn("px-3 py-1.5 text-xs", className)}>{children}</td>
-  );
+function Td({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return <td className={cn("px-3 py-1.5 text-xs", className)}>{children}</td>;
 }
 
 function LoadingState() {
@@ -63,7 +74,12 @@ function EmptyState({ text }: { text: string }) {
 // ─── Columns tab ──────────────────────────────────────────────────
 
 function ColumnsTab({ connectionId, database, schema, table }: Props) {
-  const { data: columns, isLoading, isError, error } = useTableColumns({
+  const {
+    data: columns,
+    isLoading,
+    isError,
+    error,
+  } = useTableColumns({
     connectionId,
     database,
     schema,
@@ -71,7 +87,7 @@ function ColumnsTab({ connectionId, database, schema, table }: Props) {
   });
 
   if (isLoading) return <LoadingState />;
-  if (isError) return <ErrorState message={String(error)} />;
+  if (isError) return <ErrorState message={formatDbError(error)} />;
   if (!columns?.length) return <EmptyState text="无列信息" />;
 
   return (
@@ -119,7 +135,9 @@ function ColumnsTab({ connectionId, database, schema, table }: Props) {
                 </span>
               </Td>
               <Td className="font-mono text-muted-foreground">
-                {col.defaultValue ?? <span className="italic opacity-40">NULL</span>}
+                {col.defaultValue ?? (
+                  <span className="italic opacity-40">NULL</span>
+                )}
               </Td>
               <Td className="text-muted-foreground">{col.comment ?? ""}</Td>
               <Td className="text-muted-foreground">{col.extra ?? ""}</Td>
@@ -134,7 +152,12 @@ function ColumnsTab({ connectionId, database, schema, table }: Props) {
 // ─── Indexes tab ──────────────────────────────────────────────────
 
 function IndexesTab({ connectionId, database, schema, table }: Props) {
-  const { data: indexes, isLoading, isError, error } = useTableIndexes({
+  const {
+    data: indexes,
+    isLoading,
+    isError,
+    error,
+  } = useTableIndexes({
     connectionId,
     database,
     schema,
@@ -142,7 +165,7 @@ function IndexesTab({ connectionId, database, schema, table }: Props) {
   });
 
   if (isLoading) return <LoadingState />;
-  if (isError) return <ErrorState message={String(error)} />;
+  if (isError) return <ErrorState message={formatDbError(error)} />;
   if (!indexes?.length) return <EmptyState text="无索引信息" />;
 
   return (
@@ -201,7 +224,12 @@ function IndexesTab({ connectionId, database, schema, table }: Props) {
 // ─── Foreign Keys tab ─────────────────────────────────────────────
 
 function ForeignKeysTab({ connectionId, database, schema, table }: Props) {
-  const { data: fks, isLoading, isError, error } = useTableForeignKeys({
+  const {
+    data: fks,
+    isLoading,
+    isError,
+    error,
+  } = useTableForeignKeys({
     connectionId,
     database,
     schema,
@@ -209,7 +237,7 @@ function ForeignKeysTab({ connectionId, database, schema, table }: Props) {
   });
 
   if (isLoading) return <LoadingState />;
-  if (isError) return <ErrorState message={String(error)} />;
+  if (isError) return <ErrorState message={formatDbError(error)} />;
   if (!fks?.length) return <EmptyState text="无外键" />;
 
   return (
@@ -276,9 +304,16 @@ function RuleChip({ rule }: { rule: string }) {
 
 // ─── TableStructurePanel — exported component ─────────────────────
 
-export function TableStructurePanel({ connectionId, database, schema, table }: Props) {
+export function TableStructurePanel({
+  connectionId,
+  database,
+  schema,
+  table,
+}: Props) {
   const qualifier = [schema, table].filter(Boolean).join(".");
-  const dbLabel = schema ? `${database} › ${qualifier}` : `${database}.${table}`;
+  const dbLabel = schema
+    ? `${database} › ${qualifier}`
+    : `${database}.${table}`;
 
   return (
     <div className="flex h-full flex-col">
@@ -292,7 +327,10 @@ export function TableStructurePanel({ connectionId, database, schema, table }: P
       </div>
 
       {/* Tabs */}
-      <Tabs defaultValue="columns" className="flex flex-1 flex-col overflow-hidden">
+      <Tabs
+        defaultValue="columns"
+        className="flex flex-1 flex-col overflow-hidden"
+      >
         <TabsList className="mx-4 mt-2 w-auto self-start">
           <TabsTrigger value="columns">列</TabsTrigger>
           <TabsTrigger value="indexes">索引</TabsTrigger>

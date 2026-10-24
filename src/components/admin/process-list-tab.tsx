@@ -19,6 +19,7 @@ import {
   type ProcessInfo,
 } from "@/services/tauri-commands";
 import type { DatabaseType } from "@/types/database";
+import { formatDbError } from "@/lib/error";
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -125,7 +126,7 @@ export function ProcessListTab({ connectionId, dbType }: ProcessListTabProps) {
       const data = await listProcesses(connectionId);
       setProcesses(data);
     } catch (e) {
-      setError(String(e));
+      setError(formatDbError(e));
     } finally {
       refreshingRef.current = false;
       setLoading(false);
@@ -323,7 +324,7 @@ function BoundProcessRow({
       await killHandler(proc.id, type);
       onKilled();
     } catch (e) {
-      await alertDialog(String(e), { title: "终止失败" });
+      await alertDialog(formatDbError(e), { title: "终止失败" });
     } finally {
       setKilling(null);
     }

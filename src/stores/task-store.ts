@@ -6,9 +6,9 @@ export type TaskStatus = "running" | "done" | "error";
 export interface BgTask {
   id: string;
   kind: TaskKind;
-  description: string;   // e.g. "导入 users"
+  description: string; // e.g. "导入 users"
   status: TaskStatus;
-  progress: number | null;  // 0–100, null = indeterminate
+  progress: number | null; // 0–100, null = indeterminate
   rowsDone: number;
   rowsPerSec: number;
   errorMessage: string | null;

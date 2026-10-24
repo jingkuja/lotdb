@@ -45,12 +45,16 @@ const TYPE_LABEL: Record<string, string> = {
 const TYPE_COLOR: Record<string, string> = {
   table: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
   view: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
-  function: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-  procedure: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  function:
+    "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  procedure:
+    "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
 };
 
 export function ObjectSearchDialog(props: Props) {
-  return props.open ? <ObjectSearchBody key={props.connectionId ?? "all"} {...props} /> : null;
+  return props.open ? (
+    <ObjectSearchBody key={props.connectionId ?? "all"} {...props} />
+  ) : null;
 }
 
 function ObjectSearchBody({ open, onOpenChange, connectionId }: Props) {
@@ -72,7 +76,10 @@ function ObjectSearchBody({ open, onOpenChange, connectionId }: Props) {
   const resultKey = JSON.stringify(results);
   const selectedIndex = selection.key === resultKey ? selection.index : 0;
   const setSelectedIndex = (next: number | ((previous: number) => number)) => {
-    setSelection({ key: resultKey, index: typeof next === "function" ? next(selectedIndex) : next });
+    setSelection({
+      key: resultKey,
+      index: typeof next === "function" ? next(selectedIndex) : next,
+    });
   };
 
   const openResult = useCallback(
@@ -143,9 +150,7 @@ function ObjectSearchBody({ open, onOpenChange, connectionId }: Props) {
             <Input
               autoFocus
               placeholder={
-                connectionId
-                  ? "搜索表、视图、函数..."
-                  : "请先连接一个数据库"
+                connectionId ? "搜索表、视图、函数..." : "请先连接一个数据库"
               }
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -169,7 +174,8 @@ function ObjectSearchBody({ open, onOpenChange, connectionId }: Props) {
             <div className="flex flex-col items-center gap-2 px-4 py-8 text-muted-foreground">
               <SearchX className="size-8 opacity-40" />
               <p className="text-sm">
-                未找到匹配 <span className="font-medium">"{debouncedQuery}"</span> 的对象
+                未找到匹配{" "}
+                <span className="font-medium">"{debouncedQuery}"</span> 的对象
               </p>
             </div>
           )}

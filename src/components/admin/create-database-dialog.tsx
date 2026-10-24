@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createDatabase } from "@/services/tauri-commands";
 import type { DatabaseType } from "@/types/database";
+import { formatDbError } from "@/lib/error";
 
 // MySQL charset/collation options
 const MYSQL_CHARSETS = [
@@ -97,7 +98,7 @@ export function CreateDatabaseDialog({
       onSuccess();
       onOpenChange(false);
     } catch (e) {
-      setError(String(e));
+      setError(formatDbError(e));
     } finally {
       setLoading(false);
     }

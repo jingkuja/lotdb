@@ -20,6 +20,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { useConnectionGroups } from "@/hooks/use-connections";
 import { Loader2 } from "lucide-react";
+import { formatDbError } from "@/lib/error";
 
 const DEFAULT_PORTS: Record<DatabaseType, number> = {
   mysql: 3306,
@@ -135,7 +136,7 @@ export function ConnectionDialog({
       const result = await onTest(buildConfig());
       setTestResult(result);
     } catch (e) {
-      setTestResult(String(e));
+      setTestResult(formatDbError(e));
     } finally {
       setTesting(false);
     }

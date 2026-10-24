@@ -45,7 +45,9 @@ export function DdlDiffDialog({
       <DialogContent className="flex max-h-[80vh] w-[800px] max-w-[95vw] flex-col gap-0 p-0">
         <DialogHeader className="flex-row items-center gap-3 border-b border-border px-4 py-3">
           <DialogTitle className="text-sm font-medium">
-            DDL 对比 — {"`"}{originalState.tableName || "?"}{"`"}
+            DDL 对比 — {"`"}
+            {originalState.tableName || "?"}
+            {"`"}
           </DialogTitle>
 
           {/* Stats */}

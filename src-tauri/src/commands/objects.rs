@@ -2,6 +2,7 @@
 //! and PG enum types.
 
 use crate::db::pool::{DbPool, PoolManager};
+use crate::error::{AppError, ResultExt};
 use crate::utils::sql::{
     pg_string_literal, qualified_mysql, qualified_pg, quote_ident_mysql, quote_ident_pg,
 };
@@ -29,43 +30,32 @@ pub async fn get_view_ddl(
     database: String,
     schema: Option<String>,
     name: String,
-) -> Result<ObjectDdl, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<ObjectDdl, AppError> {
+    match &pools.pool_for(&connection_id, &database).await? {
         DbPool::MySQL(pool) => {
             let sql = format!("SHOW CREATE VIEW {}", qualified_mysql(&database, &name));
             let row = sqlx::query(&sql)
                 .fetch_one(pool)
                 .await
-                .map_err(|e| format!("获取视图定义失败: {e}"))?;
+                .ctx("获取视图定义失败")?;
             // Columns: View, Create View, character_set_client, collation_connection
-            let ddl: String = row
-                .try_get(1)
-                .map_err(|e| format!("读取视图定义失败: {e}"))?;
+            let ddl: String = row.try_get(1).ctx("读取视图定义失败")?;
             Ok(ObjectDdl {
                 object_type: "view".into(),
                 name,
                 ddl,
             })
         }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(&connection_id, &database)
-                .await?;
+        DbPool::Postgres(pool) => {
             let schema_name = schema.unwrap_or_else(|| "public".into());
             let def: String = sqlx::query_scalar(
                 "SELECT pg_get_viewdef(format('%I.%I', $1, $2)::regclass, true)",
             )
             .bind(&schema_name)
             .bind(&name)
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
-            .map_err(|e| format!("获取视图定义失败: {e}"))?;
+            .ctx("获取视图定义失败")?;
             let ddl = format!(
                 "CREATE OR REPLACE VIEW {}.{} AS\n{def}",
                 quote_ident_pg(&schema_name),
@@ -90,13 +80,8 @@ pub async fn get_function_ddl(
     database: String,
     schema: Option<String>,
     name: String,
-) -> Result<ObjectDdl, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<ObjectDdl, AppError> {
+    match &pools.pool_for(&connection_id, &database).await? {
         DbPool::MySQL(pool) => {
             // Figure out whether this routine is a FUNCTION or a PROCEDURE.
             let routine_type: Option<String> = sqlx::query_scalar(
@@ -107,9 +92,9 @@ pub async fn get_function_ddl(
             .bind(&name)
             .fetch_optional(pool)
             .await
-            .map_err(|e| format!("查询例程类型失败: {e}"))?;
+            .ctx("查询例程类型失败")?;
             let Some(routine_type) = routine_type else {
-                return Err(format!("找不到例程 {name}"));
+                return Err(format!("找不到例程 {name}").into());
             };
 
             let show_sql = if routine_type == "FUNCTION" {
@@ -123,11 +108,9 @@ pub async fn get_function_ddl(
             let row = sqlx::query(&show_sql)
                 .fetch_one(pool)
                 .await
-                .map_err(|e| format!("获取例程定义失败: {e}"))?;
+                .ctx("获取例程定义失败")?;
             // Columns: Name, sql_mode, Create Function/Procedure, …
-            let ddl: String = row
-                .try_get(2)
-                .map_err(|e| format!("读取例程定义失败: {e}"))?;
+            let ddl: String = row.try_get(2).ctx("读取例程定义失败")?;
             Ok(ObjectDdl {
                 object_type: if routine_type == "FUNCTION" {
                     "function".into()
@@ -138,11 +121,7 @@ pub async fn get_function_ddl(
                 ddl,
             })
         }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(&connection_id, &database)
-                .await?;
+        DbPool::Postgres(pool) => {
             let schema_name = schema.unwrap_or_else(|| "public".into());
             let defs: Vec<String> = sqlx::query_scalar(
                 "SELECT pg_get_functiondef(p.oid) \
@@ -153,11 +132,11 @@ pub async fn get_function_ddl(
             )
             .bind(&schema_name)
             .bind(&name)
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
-            .map_err(|e| format!("获取函数定义失败: {e}"))?;
+            .ctx("获取函数定义失败")?;
             if defs.is_empty() {
-                return Err(format!("找不到函数 {schema_name}.{name}"));
+                return Err(format!("找不到函数 {schema_name}.{name}").into());
             }
             Ok(ObjectDdl {
                 object_type: "function".into(),
@@ -192,13 +171,8 @@ pub async fn list_triggers(
     database: String,
     schema: Option<String>,
     table: Option<String>,
-) -> Result<Vec<TriggerInfo>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<Vec<TriggerInfo>, AppError> {
+    match &pools.pool_for(&connection_id, &database).await? {
         DbPool::MySQL(pool) => {
             #[derive(sqlx::FromRow)]
             struct Row {
@@ -226,10 +200,7 @@ pub async fn list_triggers(
             if let Some(t) = &table_filter {
                 q = q.bind(t);
             }
-            let rows = q
-                .fetch_all(pool)
-                .await
-                .map_err(|e| format!("查询触发器失败: {e}"))?;
+            let rows = q.fetch_all(pool).await.ctx("查询触发器失败")?;
 
             Ok(rows
                 .into_iter()
@@ -249,11 +220,7 @@ pub async fn list_triggers(
                 })
                 .collect())
         }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(&connection_id, &database)
-                .await?;
+        DbPool::Postgres(pool) => {
             let schema_name = schema.unwrap_or_else(|| "public".into());
 
             #[derive(sqlx::FromRow)]
@@ -286,10 +253,7 @@ pub async fn list_triggers(
             if let Some(t) = &table {
                 q = q.bind(t);
             }
-            let rows = q
-                .fetch_all(&pool)
-                .await
-                .map_err(|e| format!("查询触发器失败: {e}"))?;
+            let rows = q.fetch_all(pool).await.ctx("查询触发器失败")?;
 
             Ok(rows
                 .into_iter()
@@ -330,13 +294,8 @@ pub async fn get_trigger_ddl(
     schema: Option<String>,
     table: Option<String>,
     name: String,
-) -> Result<ObjectDdl, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<ObjectDdl, AppError> {
+    match &pools.pool_for(&connection_id, &database).await? {
         DbPool::MySQL(pool) => {
             #[derive(sqlx::FromRow)]
             struct Row {
@@ -357,9 +316,9 @@ pub async fn get_trigger_ddl(
             .bind(&name)
             .fetch_optional(pool)
             .await
-            .map_err(|e| format!("查询触发器失败: {e}"))?;
+            .ctx("查询触发器失败")?;
             let Some(r) = row else {
-                return Err(format!("找不到触发器 {name}"));
+                return Err(format!("找不到触发器 {name}").into());
             };
             let ddl = format!(
                 "CREATE TRIGGER {} {} {} ON {} FOR EACH ROW {}",
@@ -375,11 +334,7 @@ pub async fn get_trigger_ddl(
                 ddl,
             })
         }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(&connection_id, &database)
-                .await?;
+        DbPool::Postgres(pool) => {
             let schema_name = schema.unwrap_or_else(|| "public".into());
             let ddl: String = sqlx::query_scalar(
                 "SELECT pg_get_triggerdef(t.oid, true) \
@@ -393,9 +348,9 @@ pub async fn get_trigger_ddl(
             .bind(&schema_name)
             .bind(&name)
             .bind(table.as_deref().unwrap_or(""))
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
-            .map_err(|e| format!("查询触发器失败: {e}"))?;
+            .ctx("查询触发器失败")?;
             Ok(ObjectDdl {
                 object_type: "trigger".into(),
                 name,
@@ -414,26 +369,17 @@ pub async fn drop_trigger(
     schema: Option<String>,
     table: String,
     name: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+    match &pools.pool_for(&connection_id, &database).await? {
         DbPool::MySQL(pool) => {
             let sql = format!("DROP TRIGGER {}", qualified_mysql(&database, &name));
             sqlx::query(&sql)
                 .execute(pool)
                 .await
-                .map_err(|e| format!("删除触发器失败: {e}"))?;
+                .ctx("删除触发器失败")?;
         }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(&connection_id, &database)
-                .await?;
+        DbPool::Postgres(pool) => {
             let schema_name = schema.unwrap_or_else(|| "public".into());
             let sql = format!(
                 "DROP TRIGGER {} ON {}",
@@ -441,9 +387,9 @@ pub async fn drop_trigger(
                 qualified_pg(&schema_name, &table)
             );
             sqlx::query(&sql)
-                .execute(&pool)
+                .execute(pool)
                 .await
-                .map_err(|e| format!("删除触发器失败: {e}"))?;
+                .ctx("删除触发器失败")?;
         }
     }
     Ok(())
@@ -482,19 +428,8 @@ pub async fn list_sequences(
     connection_id: String,
     database: String,
     schema: Option<String>,
-) -> Result<Vec<SequenceInfo>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    let DbPool::Postgres(_) = &entry.pool else {
-        return Err("序列仅支持 PostgreSQL".into());
-    };
-    drop(entry);
-    let pool = pools
-        .pg_pool_for_database(&connection_id, &database)
-        .await?;
+) -> Result<Vec<SequenceInfo>, AppError> {
+    let pool = pools.pg_pool(&connection_id, &database, "序列").await?;
     let schema_name = schema.unwrap_or_else(|| "public".into());
 
     #[derive(sqlx::FromRow)]
@@ -519,7 +454,7 @@ pub async fn list_sequences(
     .bind(&schema_name)
     .fetch_all(&pool)
     .await
-    .map_err(|e| format!("查询序列失败: {e}"))?;
+    .ctx("查询序列失败")?;
 
     Ok(rows
         .into_iter()
@@ -545,20 +480,9 @@ pub async fn create_sequence(
     schema: Option<String>,
     name: String,
     options: SequenceOptions,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    let DbPool::Postgres(_) = &entry.pool else {
-        return Err("序列仅支持 PostgreSQL".into());
-    };
-    drop(entry);
-    let pool = pools
-        .pg_pool_for_database(&connection_id, &database)
-        .await?;
+    let pool = pools.pg_pool(&connection_id, &database, "序列").await?;
     let schema_name = schema.unwrap_or_else(|| "public".into());
 
     let mut sql = format!("CREATE SEQUENCE {}", qualified_pg(&schema_name, &name));
@@ -576,10 +500,7 @@ pub async fn create_sequence(
     }
     sql.push_str(if options.cycle { " CYCLE" } else { " NO CYCLE" });
 
-    sqlx::query(&sql)
-        .execute(&pool)
-        .await
-        .map_err(|e| format!("创建序列失败: {e}"))?;
+    sqlx::query(&sql).execute(&pool).await.ctx("创建序列失败")?;
     Ok(())
 }
 
@@ -592,20 +513,9 @@ pub async fn restart_sequence(
     schema: Option<String>,
     name: String,
     value: Option<i64>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    let DbPool::Postgres(_) = &entry.pool else {
-        return Err("序列仅支持 PostgreSQL".into());
-    };
-    drop(entry);
-    let pool = pools
-        .pg_pool_for_database(&connection_id, &database)
-        .await?;
+    let pool = pools.pg_pool(&connection_id, &database, "序列").await?;
     let schema_name = schema.unwrap_or_else(|| "public".into());
 
     let mut sql = format!(
@@ -615,10 +525,7 @@ pub async fn restart_sequence(
     if let Some(v) = value {
         sql.push_str(&format!(" WITH {v}"));
     }
-    sqlx::query(&sql)
-        .execute(&pool)
-        .await
-        .map_err(|e| format!("重置序列失败: {e}"))?;
+    sqlx::query(&sql).execute(&pool).await.ctx("重置序列失败")?;
     Ok(())
 }
 
@@ -630,27 +537,13 @@ pub async fn drop_sequence(
     database: String,
     schema: Option<String>,
     name: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    let DbPool::Postgres(_) = &entry.pool else {
-        return Err("序列仅支持 PostgreSQL".into());
-    };
-    drop(entry);
-    let pool = pools
-        .pg_pool_for_database(&connection_id, &database)
-        .await?;
+    let pool = pools.pg_pool(&connection_id, &database, "序列").await?;
     let schema_name = schema.unwrap_or_else(|| "public".into());
 
     let sql = format!("DROP SEQUENCE {}", qualified_pg(&schema_name, &name));
-    sqlx::query(&sql)
-        .execute(&pool)
-        .await
-        .map_err(|e| format!("删除序列失败: {e}"))?;
+    sqlx::query(&sql).execute(&pool).await.ctx("删除序列失败")?;
     Ok(())
 }
 
@@ -670,19 +563,8 @@ pub async fn list_enums(
     connection_id: String,
     database: String,
     schema: Option<String>,
-) -> Result<Vec<EnumTypeInfo>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    let DbPool::Postgres(_) = &entry.pool else {
-        return Err("枚举类型仅支持 PostgreSQL".into());
-    };
-    drop(entry);
-    let pool = pools
-        .pg_pool_for_database(&connection_id, &database)
-        .await?;
+) -> Result<Vec<EnumTypeInfo>, AppError> {
+    let pool = pools.pg_pool(&connection_id, &database, "枚举类型").await?;
     let schema_name = schema.unwrap_or_else(|| "public".into());
 
     #[derive(sqlx::FromRow)]
@@ -703,7 +585,7 @@ pub async fn list_enums(
     .bind(&schema_name)
     .fetch_all(&pool)
     .await
-    .map_err(|e| format!("查询枚举类型失败: {e}"))?;
+    .ctx("查询枚举类型失败")?;
 
     Ok(rows
         .into_iter()
@@ -723,23 +605,12 @@ pub async fn create_enum_type(
     schema: Option<String>,
     name: String,
     labels: Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
     if labels.is_empty() {
         return Err("枚举至少需要一个值".into());
     }
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    let DbPool::Postgres(_) = &entry.pool else {
-        return Err("枚举类型仅支持 PostgreSQL".into());
-    };
-    drop(entry);
-    let pool = pools
-        .pg_pool_for_database(&connection_id, &database)
-        .await?;
+    let pool = pools.pg_pool(&connection_id, &database, "枚举类型").await?;
     let schema_name = schema.unwrap_or_else(|| "public".into());
 
     let values = labels
@@ -754,7 +625,7 @@ pub async fn create_enum_type(
     sqlx::query(&sql)
         .execute(&pool)
         .await
-        .map_err(|e| format!("创建枚举类型失败: {e}"))?;
+        .ctx("创建枚举类型失败")?;
     Ok(())
 }
 
@@ -767,20 +638,9 @@ pub async fn add_enum_value(
     schema: Option<String>,
     name: String,
     label: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    let DbPool::Postgres(_) = &entry.pool else {
-        return Err("枚举类型仅支持 PostgreSQL".into());
-    };
-    drop(entry);
-    let pool = pools
-        .pg_pool_for_database(&connection_id, &database)
-        .await?;
+    let pool = pools.pg_pool(&connection_id, &database, "枚举类型").await?;
     let schema_name = schema.unwrap_or_else(|| "public".into());
 
     let sql = format!(
@@ -791,7 +651,7 @@ pub async fn add_enum_value(
     sqlx::query(&sql)
         .execute(&pool)
         .await
-        .map_err(|e| format!("添加枚举值失败: {e}"))?;
+        .ctx("添加枚举值失败")?;
     Ok(())
 }
 
@@ -804,20 +664,9 @@ pub async fn drop_enum_type(
     schema: Option<String>,
     name: String,
     cascade: bool,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    let DbPool::Postgres(_) = &entry.pool else {
-        return Err("枚举类型仅支持 PostgreSQL".into());
-    };
-    drop(entry);
-    let pool = pools
-        .pg_pool_for_database(&connection_id, &database)
-        .await?;
+    let pool = pools.pg_pool(&connection_id, &database, "枚举类型").await?;
     let schema_name = schema.unwrap_or_else(|| "public".into());
 
     let sql = format!(
@@ -828,7 +677,7 @@ pub async fn drop_enum_type(
     sqlx::query(&sql)
         .execute(&pool)
         .await
-        .map_err(|e| format!("删除枚举类型失败: {e}"))?;
+        .ctx("删除枚举类型失败")?;
     Ok(())
 }
 

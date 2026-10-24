@@ -56,6 +56,7 @@ import { getTableDesignerState } from "@/lib/designer-loader";
 import { Database, Loader2 } from "lucide-react";
 import type { DatabaseType } from "@/types/database";
 import type { DesignerState } from "@/types/designer";
+import { formatDbError } from "@/lib/error";
 
 // ─── Loader for existing-table designer ──────────────────────────
 
@@ -94,7 +95,7 @@ function DesignerLoader({
   if (error || !data) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 text-destructive">
-        <p className="text-sm">加载失败：{String(error)}</p>
+        <p className="text-sm">加载失败：{formatDbError(error)}</p>
       </div>
     );
   }

@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { restoreDatabase } from "@/services/tauri-commands";
 import { formatBytes, useCliTask } from "@/hooks/use-cli-task";
+import { formatDbError } from "@/lib/error";
 
 interface RestoreDialogProps {
   open: boolean;
@@ -45,7 +46,6 @@ export function RestoreDialog({
     setCreateDb(false);
   };
 
-
   const handleRestore = useCallback(async () => {
     if (!filePath.trim()) {
       await alertDialog("请先填写备份文件路径");
@@ -61,7 +61,7 @@ export function RestoreDialog({
       setStderr(res.stderrOutput);
       setDone(true);
     } catch (e) {
-      setError(String(e));
+      setError(formatDbError(e));
       setDone(true);
     } finally {
       setRunning(false);
@@ -116,20 +116,26 @@ export function RestoreDialog({
             </div>
 
             <p className="text-[11px] text-muted-foreground">
-              使用 mysql / psql 执行恢复，需要本机已安装对应 CLI 工具。PostgreSQL
-              在单个事务中执行，遇错即停止并整体回滚。
+              使用 mysql / psql 执行恢复，需要本机已安装对应 CLI
+              工具。PostgreSQL 在单个事务中执行，遇错即停止并整体回滚。
             </p>
 
             {running && task.progress && task.progress.total > 0 && (
               <p className="text-xs text-muted-foreground">
-                已发送 {formatBytes(task.progress.done)} / {formatBytes(task.progress.total)}（
-                {Math.round((task.progress.done / task.progress.total) * 100)}%）
+                已发送 {formatBytes(task.progress.done)} /{" "}
+                {formatBytes(task.progress.total)}（
+                {Math.round((task.progress.done / task.progress.total) * 100)}
+                %）
               </p>
             )}
 
             <DialogFooter>
               {running ? (
-                <Button variant="outline" onClick={task.cancel} disabled={task.cancelling}>
+                <Button
+                  variant="outline"
+                  onClick={task.cancel}
+                  disabled={task.cancelling}
+                >
                   {task.cancelling ? "正在取消…" : "取消恢复"}
                 </Button>
               ) : (
@@ -143,7 +149,10 @@ export function RestoreDialog({
                 disabled={running || !filePath}
               >
                 {running ? (
-                  <><Loader2 className="size-3.5 mr-1.5 animate-spin" />恢复中…</>
+                  <>
+                    <Loader2 className="size-3.5 mr-1.5 animate-spin" />
+                    恢复中…
+                  </>
                 ) : (
                   "开始恢复"
                 )}
@@ -157,7 +166,9 @@ export function RestoreDialog({
                 <AlertCircle className="size-4 shrink-0 mt-0.5" />
                 <div className="flex flex-col gap-1">
                   <span className="text-sm font-medium">恢复失败</span>
-                  <span className="text-xs whitespace-pre-wrap break-all">{error}</span>
+                  <span className="text-xs whitespace-pre-wrap break-all">
+                    {error}
+                  </span>
                 </div>
               </div>
             ) : (
@@ -174,7 +185,14 @@ export function RestoreDialog({
               </div>
             )}
             <DialogFooter>
-              <Button onClick={() => { onOpenChange(false); resetState(); }}>关闭</Button>
+              <Button
+                onClick={() => {
+                  onOpenChange(false);
+                  resetState();
+                }}
+              >
+                关闭
+              </Button>
             </DialogFooter>
           </div>
         )}

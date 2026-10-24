@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Check, Loader2, AlertCircle, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatDbError } from "@/lib/error";
 
 interface Props {
   open: boolean;
@@ -18,8 +19,15 @@ interface Props {
   onCommit: () => Promise<void>;
 }
 
-export function ChangePreviewDialog({ open, onOpenChange, sqls, onCommit }: Props) {
-  const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+export function ChangePreviewDialog({
+  open,
+  onOpenChange,
+  sqls,
+  onCommit,
+}: Props) {
+  const [status, setStatus] = useState<"idle" | "running" | "done" | "error">(
+    "idle",
+  );
   const [errorMsg, setErrorMsg] = useState("");
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
@@ -30,10 +38,13 @@ export function ChangePreviewDialog({ open, onOpenChange, sqls, onCommit }: Prop
       await onCommit();
       setStatus("done");
       // Auto-close after short delay on success
-      setTimeout(() => { onOpenChange(false); setStatus("idle"); }, 800);
+      setTimeout(() => {
+        onOpenChange(false);
+        setStatus("idle");
+      }, 800);
     } catch (e) {
       setStatus("error");
-      setErrorMsg(String(e));
+      setErrorMsg(formatDbError(e));
     }
   };
 
@@ -100,19 +111,32 @@ export function ChangePreviewDialog({ open, onOpenChange, sqls, onCommit }: Prop
         )}
 
         <DialogFooter className="border-t border-border px-4 py-3">
-          <Button variant="ghost" size="sm" onClick={handleClose} disabled={status === "running"}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleClose}
+            disabled={status === "running"}
+          >
             取消
           </Button>
           <Button
             size="sm"
             onClick={handleCommit}
-            disabled={status === "running" || status === "done" || sqls.length === 0}
+            disabled={
+              status === "running" || status === "done" || sqls.length === 0
+            }
             className={cn("gap-1.5", status === "done" && "bg-emerald-600")}
           >
             {status === "running" ? (
-              <><Loader2 className="size-3 animate-spin" />执行中…</>
+              <>
+                <Loader2 className="size-3 animate-spin" />
+                执行中…
+              </>
             ) : status === "done" ? (
-              <><Check className="size-3" />已提交</>
+              <>
+                <Check className="size-3" />
+                已提交
+              </>
             ) : (
               "确认提交"
             )}

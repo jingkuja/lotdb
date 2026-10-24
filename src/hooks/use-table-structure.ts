@@ -12,7 +12,12 @@ interface TableKey {
   table: string;
 }
 
-export function useTableColumns({ connectionId, database, schema, table }: TableKey) {
+export function useTableColumns({
+  connectionId,
+  database,
+  schema,
+  table,
+}: TableKey) {
   return useQuery({
     queryKey: ["columns", connectionId, database, schema ?? "", table],
     queryFn: () => getTableColumns(connectionId, database, schema, table),
@@ -20,7 +25,12 @@ export function useTableColumns({ connectionId, database, schema, table }: Table
   });
 }
 
-export function useTableIndexes({ connectionId, database, schema, table }: TableKey) {
+export function useTableIndexes({
+  connectionId,
+  database,
+  schema,
+  table,
+}: TableKey) {
   return useQuery({
     queryKey: ["indexes", connectionId, database, schema ?? "", table],
     queryFn: () => getTableIndexes(connectionId, database, schema, table),
@@ -28,7 +38,12 @@ export function useTableIndexes({ connectionId, database, schema, table }: Table
   });
 }
 
-export function useTableForeignKeys({ connectionId, database, schema, table }: TableKey) {
+export function useTableForeignKeys({
+  connectionId,
+  database,
+  schema,
+  table,
+}: TableKey) {
   return useQuery({
     queryKey: ["foreign-keys", connectionId, database, schema ?? "", table],
     queryFn: () => getTableForeignKeys(connectionId, database, schema, table),

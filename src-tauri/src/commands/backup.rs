@@ -1,8 +1,9 @@
 use crate::commands::transfer::{TransferControl, TransferRegistry};
 use crate::db::pool::{DbPool, PoolManager};
+use crate::error::{AppError, ResultExt};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,43 +40,50 @@ struct BackupProgress {
 
 // ─── helpers ──────────────────────────────────────────────────────
 
-/// Search common locations for a CLI tool (mysqldump / pg_dump / mysql / psql).
-fn find_tool(name: &str) -> Result<std::path::PathBuf, String> {
-    // Try PATH first
-    if let Ok(p) = which_path(name) {
-        return Ok(p);
-    }
-    // macOS Homebrew locations
-    let candidates = [
-        format!("/opt/homebrew/bin/{name}"),    // Apple Silicon
-        format!("/usr/local/bin/{name}"),       // Intel Homebrew
-        format!("/usr/local/mysql/bin/{name}"), // MySQL installer
-        format!("/opt/homebrew/opt/mysql-client/bin/{name}"),
-        format!("/opt/homebrew/opt/postgresql@16/bin/{name}"),
-        format!("/opt/homebrew/opt/postgresql@15/bin/{name}"),
-        format!("/opt/homebrew/opt/postgresql/bin/{name}"),
-        format!("/usr/bin/{name}"),
+/// Search PATH, then common install locations, for a CLI tool (mysqldump /
+/// pg_dump / mysql / psql). Only stat calls: no `which` child process runs
+/// on the async runtime. A GUI app's PATH is minimal, hence the fallbacks.
+fn find_tool(name: &str) -> Result<std::path::PathBuf, AppError> {
+    let path_dirs = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let fallback_dirs = [
+        "/opt/homebrew/bin",    // Apple Silicon
+        "/usr/local/bin",       // Intel Homebrew
+        "/usr/local/mysql/bin", // MySQL installer
+        "/opt/homebrew/opt/mysql-client/bin",
+        "/opt/homebrew/opt/postgresql@18/bin",
+        "/opt/homebrew/opt/postgresql@17/bin",
+        "/opt/homebrew/opt/postgresql@16/bin",
+        "/opt/homebrew/opt/postgresql@15/bin",
+        "/opt/homebrew/opt/postgresql/bin",
+        "/usr/bin",
     ];
-    for c in &candidates {
-        let p = std::path::Path::new(c);
-        if p.exists() {
-            return Ok(p.to_path_buf());
-        }
-    }
-    Err(format!(
-        "找不到 `{name}`，请安装 MySQL 或 PostgreSQL 客户端工具并确保它们在 PATH 中"
-    ))
+    path_dirs
+        .into_iter()
+        .chain(fallback_dirs.iter().map(std::path::PathBuf::from))
+        .map(|dir| dir.join(name))
+        .find(|p| is_executable(p))
+        .ok_or_else(|| {
+            AppError::io(format!(
+                "找不到 `{name}`，请安装 MySQL 或 PostgreSQL 客户端工具并确保它们在 PATH 中"
+            ))
+        })
 }
 
-fn which_path(name: &str) -> Result<std::path::PathBuf, ()> {
-    let out = Command::new("which").arg(name).output().map_err(|_| ())?;
-    if out.status.success() {
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !s.is_empty() {
-            return Ok(std::path::PathBuf::from(s));
-        }
+fn is_executable(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
     }
-    Err(())
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
 }
 
 /// Effective host/port (SSH tunnels resolve to 127.0.0.1:<local port>),
@@ -89,21 +97,12 @@ struct ConnTarget {
     pool: DbPool,
 }
 
-fn conn_target(pools: &PoolManager, connection_id: &str) -> Result<ConnTarget, String> {
-    let (host, port, pool) = {
-        let entry = pools
-            .pools
-            .get(connection_id)
-            .ok_or_else(|| format!("连接 {connection_id} 未打开，请先连接"))?;
-        (
-            entry.effective_host.clone(),
-            entry.effective_port,
-            entry.pool.clone(),
-        )
-    };
+fn conn_target(pools: &PoolManager, connection_id: &str) -> Result<ConnTarget, AppError> {
+    let pool = pools.pool(connection_id)?;
+    let (host, port) = pools.effective_address(connection_id)?;
     let (user, password) = pools
         .credentials(connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开，请先连接"))?;
+        .ok_or_else(|| AppError::connection(format!("连接 {connection_id} 未打开，请先连接")))?;
     Ok(ConnTarget {
         host,
         port,
@@ -119,7 +118,7 @@ fn conn_target(pools: &PoolManager, connection_id: &str) -> Result<ConnTarget, S
 struct MySqlOptionFile(std::path::PathBuf);
 
 impl MySqlOptionFile {
-    fn create(user: &str, password: &str) -> Result<Self, String> {
+    fn create(user: &str, password: &str) -> Result<Self, AppError> {
         let path = std::env::temp_dir().join(format!("lotdb-{}.cnf", uuid::Uuid::new_v4()));
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -128,16 +127,14 @@ impl MySqlOptionFile {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut file = opts
-            .open(&path)
-            .map_err(|e| format!("创建临时凭据文件失败: {e}"))?;
+        let mut file = opts.open(&path).ctx("创建临时凭据文件失败")?;
         let guard = MySqlOptionFile(path);
         let mut content = format!("[client]\nuser={}\n", option_value(user));
         if !password.is_empty() {
             content.push_str(&format!("password={}\n", option_value(password)));
         }
         file.write_all(content.as_bytes())
-            .map_err(|e| format!("写入临时凭据文件失败: {e}"))?;
+            .ctx("写入临时凭据文件失败")?;
         Ok(guard)
     }
 
@@ -173,7 +170,7 @@ async fn run_tool(
     mut cmd: tokio::process::Command,
     stdin_file: Option<&str>,
     output_file: Option<&str>,
-) -> Result<(std::process::ExitStatus, String), String> {
+) -> Result<(std::process::ExitStatus, String), AppError> {
     cmd.kill_on_drop(true)
         .stderr(Stdio::piped())
         .stdin(if stdin_file.is_some() {
@@ -181,7 +178,7 @@ async fn run_tool(
         } else {
             Stdio::null()
         });
-    let mut child = cmd.spawn().map_err(|e| format!("启动外部工具失败: {e}"))?;
+    let mut child = cmd.spawn().ctx("启动外部工具失败")?;
 
     let mut stderr = child.stderr.take().expect("stderr is piped");
     let stderr_task = tokio::spawn(async move {
@@ -193,9 +190,7 @@ async fn run_tool(
     let sent = Arc::new(AtomicU64::new(0));
     let mut total = 0;
     if let Some(path) = stdin_file {
-        let mut file = tokio::fs::File::open(path)
-            .await
-            .map_err(|e| format!("打开备份文件失败: {e}"))?;
+        let mut file = tokio::fs::File::open(path).await.ctx("打开备份文件失败")?;
         total = file.metadata().await.map(|m| m.len()).unwrap_or(0);
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let sent = sent.clone();
@@ -220,13 +215,13 @@ async fn run_tool(
     let status = loop {
         if control.cancelled.load(Ordering::Acquire) {
             let _ = child.kill().await;
-            return Err("已取消".into());
+            return Err(AppError::io("已取消"));
         }
         tokio::select! {
-            status = child.wait() => break status.map_err(|e| format!("等待外部工具失败: {e}"))?,
+            status = child.wait() => break status.ctx("等待外部工具失败")?,
             _ = control.notify.notified() => {
                 let _ = child.kill().await;
-                return Err("已取消".into());
+                return Err(AppError::io("已取消"));
             }
             _ = tick.tick() => {
                 let done = match output_file {
@@ -271,12 +266,12 @@ pub async fn backup_database(
     no_data: bool,
     no_schema: bool,
     tables: Vec<String>,
-) -> Result<BackupResult, String> {
+) -> Result<BackupResult, AppError> {
     let target = conn_target(&pools, &connection_id)?;
 
     // Ensure parent directory exists
     if let Some(parent) = std::path::Path::new(&file_path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+        std::fs::create_dir_all(parent).ctx("创建目录失败")?;
     }
 
     let task_id = task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -324,7 +319,7 @@ async fn run_mysqldump(
     no_data: bool,
     no_schema: bool,
     tables: &[String],
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let tool = find_tool("mysqldump")?;
     let options = MySqlOptionFile::create(&target.user, &target.password)?;
     let mut cmd = tokio::process::Command::new(&tool);
@@ -353,17 +348,17 @@ async fn run_mysqldump(
     }
 
     // Redirect stdout to file
-    let file = std::fs::File::create(file_path).map_err(|e| format!("创建备份文件失败: {e}"))?;
+    let file = std::fs::File::create(file_path).ctx("创建备份文件失败")?;
     cmd.stdout(file);
 
     let (status, stderr) = run_tool(app, task_id, control, cmd, None, Some(file_path)).await?;
 
     if !status.success() {
-        return Err(format!(
+        return Err(AppError::io(format!(
             "mysqldump 失败 (exit {}): {}",
             exit_code(status),
             stderr
-        ));
+        )));
     }
 
     Ok(stderr)
@@ -380,7 +375,7 @@ async fn run_pg_dump(
     no_data: bool,
     no_schema: bool,
     tables: &[String],
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let tool = find_tool("pg_dump")?;
     let mut cmd = tokio::process::Command::new(&tool);
 
@@ -415,11 +410,11 @@ async fn run_pg_dump(
     let (status, stderr) = run_tool(app, task_id, control, cmd, None, Some(file_path)).await?;
 
     if !status.success() {
-        return Err(format!(
+        return Err(AppError::io(format!(
             "pg_dump 失败 (exit {}): {}",
             exit_code(status),
             stderr
-        ));
+        )));
     }
 
     Ok(stderr)
@@ -444,27 +439,27 @@ pub async fn restore_database(
     database: String,
     file_path: String,
     create_db: bool,
-) -> Result<RestoreResult, String> {
+) -> Result<RestoreResult, AppError> {
     pools.ensure_writable(&connection_id)?;
     let target = conn_target(&pools, &connection_id)?;
 
     // Verify file exists
     if !std::path::Path::new(&file_path).exists() {
-        return Err(format!("文件不存在: {file_path}"));
+        return Err(AppError::io(format!("文件不存在: {file_path}")));
     }
 
     let task_id = task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let control = registry.register(&task_id)?;
     let result = match &target.pool {
-        DbPool::MySQL(pool) => {
+        DbPool::MySQL(_) => {
             if create_db {
                 let sql = format!(
                     "CREATE DATABASE IF NOT EXISTS {}",
                     crate::utils::sql::quote_ident_mysql(&database)
                 );
-                if let Err(e) = sqlx::query(&sql).execute(pool).await {
+                if let Err(e) = target.pool.execute(&sql).await {
                     registry.finish(&task_id);
-                    return Err(format!("创建数据库失败: {e}"));
+                    return Err(AppError::from_sqlx("创建数据库失败", e));
                 }
             }
             run_mysql_restore(&app, &task_id, &control, &target, &database, &file_path).await
@@ -488,7 +483,7 @@ async fn run_mysql_restore(
     target: &ConnTarget,
     database: &str,
     file_path: &str,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let tool = find_tool("mysql")?;
     let options = MySqlOptionFile::create(&target.user, &target.password)?;
     let mut cmd = tokio::process::Command::new(&tool);
@@ -501,11 +496,11 @@ async fn run_mysql_restore(
     let (status, stderr) = run_tool(app, task_id, control, cmd, Some(file_path), None).await?;
 
     if !status.success() {
-        return Err(format!(
+        return Err(AppError::io(format!(
             "mysql 恢复失败 (exit {}): {}",
             exit_code(status),
             stderr
-        ));
+        )));
     }
 
     Ok(stderr)
@@ -518,7 +513,7 @@ async fn run_psql_restore(
     target: &ConnTarget,
     database: &str,
     file_path: &str,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let tool = find_tool("psql")?;
     let mut cmd = tokio::process::Command::new(&tool);
 
@@ -547,11 +542,11 @@ async fn run_psql_restore(
     let (status, stderr) = run_tool(app, task_id, control, cmd, Some(file_path), None).await?;
 
     if !status.success() {
-        return Err(format!(
+        return Err(AppError::io(format!(
             "psql 恢复失败，已回滚 (exit {}): {}",
             exit_code(status),
             stderr
-        ));
+        )));
     }
 
     Ok(stderr)

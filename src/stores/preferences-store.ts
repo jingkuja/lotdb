@@ -12,12 +12,12 @@ export type EditorFontFamily =
 
 export interface Preferences {
   editorFontFamily: EditorFontFamily;
-  editorFontSize: number;      // 11–20
-  gridFontSize: number;        // 11–16
+  editorFontSize: number; // 11–20
+  gridFontSize: number; // 11–16
   pageSize: 50 | 100 | 200 | 500;
   saveQueryHistory: boolean;
-  confirmDml: boolean;         // require confirmation before DML
-  queryMaxRows: number;        // SQL 查询结果行数上限；0 = 不限制
+  confirmDml: boolean; // require confirmation before DML
+  queryMaxRows: number; // SQL 查询结果行数上限；0 = 不限制
 }
 
 const DEFAULTS: Preferences = {

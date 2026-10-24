@@ -15,6 +15,7 @@ import { useObjectDdl, type DdlKind } from "@/hooks/use-objects";
 import { dropTrigger } from "@/services/tauri-commands";
 import { useEditorStore } from "@/stores/editor-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
+import { formatDbError } from "@/lib/error";
 
 interface ObjectDdlTabProps {
   connectionId: string;
@@ -93,19 +94,27 @@ export function ObjectDdlTab({
     setDropping(true);
     setDropError(null);
     try {
-      await dropTrigger(connectionId, database, schema, triggerTable ?? "", name);
+      await dropTrigger(
+        connectionId,
+        database,
+        schema,
+        triggerTable ?? "",
+        name,
+      );
       setDropped(true);
       queryClient.invalidateQueries({
         queryKey: ["triggers", connectionId, database],
       });
     } catch (e) {
-      setDropError(String(e));
+      setDropError(formatDbError(e));
     } finally {
       setDropping(false);
     }
   };
 
-  const qualifier = schema ? `${database} › ${schema} › ${name}` : `${database}.${name}`;
+  const qualifier = schema
+    ? `${database} › ${schema} › ${name}`
+    : `${database}.${name}`;
 
   return (
     <div className="flex h-full flex-col">
@@ -152,7 +161,11 @@ export function ObjectDdlTab({
             onClick={handleCopy}
             disabled={!data}
           >
-            {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+            {copied ? (
+              <Check className="size-3" />
+            ) : (
+              <Copy className="size-3" />
+            )}
             {copied ? "已复制" : "复制"}
           </Button>
         </div>
@@ -167,7 +180,9 @@ export function ObjectDdlTab({
       ) : error || !data ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 text-destructive">
           <AlertCircle className="size-5" />
-          <p className="text-sm">{String(error ?? "未找到对象")}</p>
+          <p className="text-sm">
+            {error ? formatDbError(error) : "未找到对象"}
+          </p>
         </div>
       ) : dropped ? (
         <div className="flex flex-1 items-center justify-center gap-2 text-muted-foreground">

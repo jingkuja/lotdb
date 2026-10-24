@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Download, Loader2, CheckCircle2, XCircle, FolderOpen } from "lucide-react";
+import {
+  Download,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  FolderOpen,
+} from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import {
   Dialog,
@@ -19,6 +25,7 @@ import {
 } from "@/services/tauri-commands";
 import { downloadDir } from "@tauri-apps/api/path";
 import { useTaskStore, newTaskId } from "@/stores/task-store";
+import { formatDbError } from "@/lib/error";
 
 // ─── Format options ───────────────────────────────────────────────
 
@@ -56,12 +63,15 @@ export function BatchExportDialog({
   const [outputDir, setOutputDir] = useState("");
   const [status, setStatus] = useState<ExportStatus>("idle");
   const [results, setResults] = useState<TableExportStatus[]>([]);
-  const [exportProgress, setExportProgress] = useState<BatchExportProgressEvent | null>(null);
+  const [exportProgress, setExportProgress] =
+    useState<BatchExportProgressEvent | null>(null);
 
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   const addTask = useTaskStore((s) => s.addTask);
@@ -88,7 +98,10 @@ export function BatchExportDialog({
     });
   };
 
-  const selectAll = useCallback(() => setSelectedTables(new Set(tables)), [tables]);
+  const selectAll = useCallback(
+    () => setSelectedTables(new Set(tables)),
+    [tables],
+  );
   const selectNone = useCallback(() => setSelectedTables(new Set()), []);
 
   const handleExport = async () => {
@@ -111,14 +124,17 @@ export function BatchExportDialog({
       setExportProgress(null);
     }
 
-    const unlisten = await listen<BatchExportProgressEvent>("export-batch-progress", (ev) => {
-      const p = ev.payload;
-      if (mountedRef.current) setExportProgress(p);
-      updateTask(taskId, {
-        progress: Math.round(((p.tableIndex + 1) / p.totalTables) * 100),
-        description: `批量导出 ${p.tableIndex + 1}/${p.totalTables}: ${p.table}`,
-      });
-    });
+    const unlisten = await listen<BatchExportProgressEvent>(
+      "export-batch-progress",
+      (ev) => {
+        const p = ev.payload;
+        if (mountedRef.current) setExportProgress(p);
+        updateTask(taskId, {
+          progress: Math.round(((p.tableIndex + 1) / p.totalTables) * 100),
+          description: `批量导出 ${p.tableIndex + 1}/${p.totalTables}: ${p.table}`,
+        });
+      },
+    );
 
     try {
       const limitNum = parseInt(limit, 10);
@@ -145,9 +161,16 @@ export function BatchExportDialog({
         setStatus("done");
       }
     } catch (e) {
-      updateTask(taskId, { status: "error", errorMessage: String(e) });
+      updateTask(taskId, { status: "error", errorMessage: formatDbError(e) });
       if (mountedRef.current) {
-        setResults([{ table: "(batch)", rowsExported: 0, filePath: "", error: String(e) }]);
+        setResults([
+          {
+            table: "(batch)",
+            rowsExported: 0,
+            filePath: "",
+            error: formatDbError(e),
+          },
+        ]);
         setStatus("done");
       }
     } finally {
@@ -168,7 +191,8 @@ export function BatchExportDialog({
       <DialogContent className="flex w-[620px] max-w-[95vw] flex-col gap-0 p-0">
         <DialogHeader className="border-b border-border px-4 py-3">
           <DialogTitle className="text-sm font-medium">
-            批量导出 — {database}{schema ? `.${schema}` : ""}
+            批量导出 — {database}
+            {schema ? `.${schema}` : ""}
           </DialogTitle>
         </DialogHeader>
 
@@ -274,7 +298,10 @@ export function BatchExportDialog({
               </Button>
             </div>
             <p className="mt-1 text-[11px] text-muted-foreground">
-              每张表将导出为 <span className="font-mono">表名.{FORMATS.find((f) => f.value === format)?.ext}</span>
+              每张表将导出为{" "}
+              <span className="font-mono">
+                表名.{FORMATS.find((f) => f.value === format)?.ext}
+              </span>
             </p>
           </div>
 
@@ -284,10 +311,14 @@ export function BatchExportDialog({
               <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                 <span className="flex items-center gap-1.5">
                   <Loader2 className="size-3 animate-spin" />
-                  正在导出 <span className="font-mono font-medium text-foreground">{exportProgress.table}</span>
+                  正在导出{" "}
+                  <span className="font-mono font-medium text-foreground">
+                    {exportProgress.table}
+                  </span>
                 </span>
                 <span>
-                  {exportProgress.tableIndex + 1} / {exportProgress.totalTables} 张表
+                  {exportProgress.tableIndex + 1} / {exportProgress.totalTables}{" "}
+                  张表
                 </span>
               </div>
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
@@ -330,9 +361,13 @@ export function BatchExportDialog({
                       <CheckCircle2 className="mt-0.5 size-3 shrink-0 text-green-600 dark:text-green-400" />
                     )}
                     <div className="min-w-0 flex-1">
-                      <p className="font-mono text-[11px] font-medium">{r.table}</p>
+                      <p className="font-mono text-[11px] font-medium">
+                        {r.table}
+                      </p>
                       {r.error ? (
-                        <p className="text-[10px] text-destructive opacity-80">{r.error}</p>
+                        <p className="text-[10px] text-destructive opacity-80">
+                          {r.error}
+                        </p>
                       ) : (
                         <p className="text-[10px] text-muted-foreground">
                           {r.rowsExported} 行 → {r.filePath}

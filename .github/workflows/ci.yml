@@ -32,6 +32,9 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: Format Check
+        run: pnpm format:check
+
       - name: Type Check
         run: npx tsc -b
 
@@ -73,7 +76,7 @@ jobs:
 
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Unit Tests
         working-directory: src-tauri

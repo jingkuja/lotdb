@@ -1,5 +1,11 @@
 import { useState, useCallback } from "react";
-import { Plus, Trash2, ChevronDown, ChevronRight, GripVertical } from "lucide-react";
+import {
+  Plus,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
+  GripVertical,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -17,7 +23,14 @@ import type { DatabaseType } from "@/types/database";
 const MYSQL_TYPES: IndexType[] = ["INDEX", "UNIQUE", "FULLTEXT", "SPATIAL"];
 const PG_TYPES: IndexType[] = ["INDEX", "UNIQUE"];
 
-const PG_METHODS: IndexMethod[] = ["BTREE", "HASH", "GIN", "GIST", "BRIN", "SPGIST"];
+const PG_METHODS: IndexMethod[] = [
+  "BTREE",
+  "HASH",
+  "GIN",
+  "GIST",
+  "BRIN",
+  "SPGIST",
+];
 
 function getTypes(dbType: DatabaseType): IndexType[] {
   return dbType === "postgres" ? PG_TYPES : MYSQL_TYPES;
@@ -68,7 +81,9 @@ function ColumnPicker({
         <p className="mb-1 text-[10px] text-muted-foreground">可选列</p>
         <div className="flex flex-wrap gap-1">
           {available.length === 0 && (
-            <span className="text-[11px] text-muted-foreground/60">无列可选（先添加列）</span>
+            <span className="text-[11px] text-muted-foreground/60">
+              无列可选（先添加列）
+            </span>
           )}
           {available.map((col) => {
             const isSelected = selected.includes(col.name);
@@ -106,14 +121,25 @@ function ColumnPicker({
                   "flex items-center gap-1 rounded border border-border bg-muted/30 px-1.5 py-0.5 text-[11px]",
                   dragOver === idx && dragFrom !== idx && "border-primary",
                 )}
-                onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragFrom(idx); }}
-                onDragOver={(e) => { e.preventDefault(); setDragOver(idx); }}
+                onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = "move";
+                  setDragFrom(idx);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver(idx);
+                }}
                 onDrop={() => handleDrop(idx)}
-                onDragEnd={() => { setDragFrom(null); setDragOver(null); }}
+                onDragEnd={() => {
+                  setDragFrom(null);
+                  setDragOver(null);
+                }}
               >
                 <GripVertical className="size-3 shrink-0 cursor-grab text-muted-foreground/40" />
                 <span className="flex-1 truncate">{colName}</span>
-                <span className="shrink-0 text-[9px] text-muted-foreground/50">{idx + 1}</span>
+                <span className="shrink-0 text-[9px] text-muted-foreground/50">
+                  {idx + 1}
+                </span>
               </div>
             ))}
           </div>
@@ -146,9 +172,8 @@ function IndexRow({
   const methods = getMethods(dbType, index.type);
 
   // Auto-generate name from columns if name is empty
-  const namePlaceholder = index.columns.length > 0
-    ? `idx_${index.columns.join("_")}`
-    : "索引名称";
+  const namePlaceholder =
+    index.columns.length > 0 ? `idx_${index.columns.join("_")}` : "索引名称";
 
   return (
     <div className="rounded-md border border-border">
@@ -158,9 +183,11 @@ function IndexRow({
           className="text-muted-foreground hover:text-foreground"
           onClick={() => setExpanded((v) => !v)}
         >
-          {expanded
-            ? <ChevronDown className="size-3.5" />
-            : <ChevronRight className="size-3.5" />}
+          {expanded ? (
+            <ChevronDown className="size-3.5" />
+          ) : (
+            <ChevronRight className="size-3.5" />
+          )}
         </button>
 
         {/* Name */}
@@ -185,7 +212,11 @@ function IndexRow({
             });
           }}
         >
-          {types.map((t) => <option key={t} value={t}>{t}</option>)}
+          {types.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
         </select>
 
         {/* Method */}
@@ -194,14 +225,16 @@ function IndexRow({
           value={index.method}
           onChange={(e) => set("method", e.target.value as IndexMethod)}
         >
-          {methods.map((m) => <option key={m} value={m}>{m}</option>)}
+          {methods.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
         </select>
 
         {/* Columns summary */}
         <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
-          {index.columns.length === 0
-            ? "（未选列）"
-            : index.columns.join(", ")}
+          {index.columns.length === 0 ? "（未选列）" : index.columns.join(", ")}
         </span>
 
         {/* Comment */}
@@ -243,18 +276,29 @@ interface IndexEditorProps {
   onChange: (indexes: DesignerIndex[]) => void;
 }
 
-export function IndexEditor({ indexes, columns, dbType, onChange }: IndexEditorProps) {
+export function IndexEditor({
+  indexes,
+  columns,
+  dbType,
+  onChange,
+}: IndexEditorProps) {
   const addIndex = useCallback(() => {
     onChange([...indexes, emptyIndex(`idx-${Date.now()}`)]);
   }, [indexes, onChange]);
 
-  const updateIndex = useCallback((i: number, idx: DesignerIndex) => {
-    onChange(indexes.map((x, j) => (j === i ? idx : x)));
-  }, [indexes, onChange]);
+  const updateIndex = useCallback(
+    (i: number, idx: DesignerIndex) => {
+      onChange(indexes.map((x, j) => (j === i ? idx : x)));
+    },
+    [indexes, onChange],
+  );
 
-  const deleteIndex = useCallback((i: number) => {
-    onChange(indexes.filter((_, j) => j !== i));
-  }, [indexes, onChange]);
+  const deleteIndex = useCallback(
+    (i: number) => {
+      onChange(indexes.filter((_, j) => j !== i));
+    },
+    [indexes, onChange],
+  );
 
   return (
     <div className="flex flex-col gap-3 p-4">
@@ -280,7 +324,12 @@ export function IndexEditor({ indexes, columns, dbType, onChange }: IndexEditorP
       )}
 
       {indexes.length > 0 && (
-        <Button variant="ghost" size="sm" className="self-start gap-1 text-xs" onClick={addIndex}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="self-start gap-1 text-xs"
+          onClick={addIndex}
+        >
           <Plus className="size-3" />
           添加索引
         </Button>

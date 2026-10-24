@@ -1,5 +1,15 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { toDbError } from "@/lib/error";
 import type { ConnectionConfig } from "@/types/database";
+
+/** All commands go through here so failures reject with a typed `DbError`. */
+async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
+  try {
+    return await tauriInvoke<T>(cmd, args);
+  } catch (e) {
+    throw toDbError(e);
+  }
+}
 
 export async function createConnection(
   config: ConnectionConfig,

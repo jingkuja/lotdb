@@ -9,7 +9,9 @@ function applyTheme(mode: "light" | "dark" | "system") {
     root.classList.remove("dark");
   } else {
     // system
-    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const prefersDark = window.matchMedia(
+      "(prefers-color-scheme: dark)",
+    ).matches;
     root.classList.toggle("dark", prefersDark);
   }
 }

@@ -9,6 +9,7 @@ import {
   X,
 } from "lucide-react";
 import { useTaskStore, type BgTask } from "@/stores/task-store";
+import { formatDbError } from "@/lib/error";
 
 // ─── Single task row ──────────────────────────────────────────────
 
@@ -73,22 +74,22 @@ function TaskRow({ task }: { task: BgTask }) {
       )}
       {task.status === "running" &&
         (task.kind === "transfer" || task.kind === "import") && (
-        <button
-          disabled={cancelling}
-          className="text-xs text-destructive"
-          onClick={async () => {
-            setCancelling(true);
-            try {
-              await cancelTransfer(task.id);
-            } catch (error) {
-              setCancelError(String(error));
-              setCancelling(false);
-            }
-          }}
-        >
-          {cancelling ? "取消中" : "取消"}
-        </button>
-      )}
+          <button
+            disabled={cancelling}
+            className="text-xs text-destructive"
+            onClick={async () => {
+              setCancelling(true);
+              try {
+                await cancelTransfer(task.id);
+              } catch (error) {
+                setCancelError(formatDbError(error));
+                setCancelling(false);
+              }
+            }}
+          >
+            {cancelling ? "取消中" : "取消"}
+          </button>
+        )}
       {/* Close (only when done/error) */}
       {task.status !== "running" && (
         <button

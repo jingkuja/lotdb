@@ -18,6 +18,7 @@ import {
 import { cn } from "@/lib/utils";
 import { promptDialog } from "@/stores/app-dialog-store";
 import type { QueryResult } from "@/services/tauri-commands";
+import { formatDbError } from "@/lib/error";
 
 /** One statement's outcome inside a multi-statement run. */
 export interface MultiStmtOutcome {
@@ -184,7 +185,7 @@ function ResultGrid({ result }: { result: QueryResult }) {
       await exportQueryResult(result.columns, result.rows, path);
       setMessage(`已导出 ${result.rows.length} 行：${path}`);
     } catch (error) {
-      setMessage(`导出失败：${String(error)}`);
+      setMessage(`导出失败：${formatDbError(error)}`);
     } finally {
       setBusy(false);
     }
@@ -204,7 +205,7 @@ function ResultGrid({ result }: { result: QueryResult }) {
               );
               setMessage("已复制 CSV");
             } catch (error) {
-              setMessage(`复制失败：${String(error)}`);
+              setMessage(`复制失败：${formatDbError(error)}`);
             }
           }}
         >

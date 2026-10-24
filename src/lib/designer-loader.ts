@@ -66,12 +66,15 @@ function parsePgType(rawType: string): { baseType: string; length: string } {
   if (numMatch) return { baseType: "NUMERIC", length: numMatch[1]! };
 
   // double precision
-  if (s === "double precision") return { baseType: "DOUBLE PRECISION", length: "" };
+  if (s === "double precision")
+    return { baseType: "DOUBLE PRECISION", length: "" };
 
   // timestamp / time variants
-  if (s.startsWith("timestamp with time zone")) return { baseType: "TIMESTAMPTZ", length: "" };
+  if (s.startsWith("timestamp with time zone"))
+    return { baseType: "TIMESTAMPTZ", length: "" };
   if (s.startsWith("timestamp")) return { baseType: "TIMESTAMP", length: "" };
-  if (s.startsWith("time with time zone")) return { baseType: "TIME", length: "" };
+  if (s.startsWith("time with time zone"))
+    return { baseType: "TIME", length: "" };
   if (s.startsWith("time")) return { baseType: "TIME", length: "" };
 
   // Map verbose names to designer names
@@ -104,7 +107,10 @@ function parsePgType(rawType: string): { baseType: string; length: string } {
 let _counter = 0;
 const nextId = () => `loaded-col-${Date.now()}-${_counter++}`;
 
-function toDesignerColumn(def: ColumnDef, dbType: DatabaseType): DesignerColumn {
+function toDesignerColumn(
+  def: ColumnDef,
+  dbType: DatabaseType,
+): DesignerColumn {
   const { baseType, length, unsigned } =
     dbType === "mysql"
       ? parseMysqlType(def.dataType)
@@ -132,7 +138,8 @@ function toDesignerColumn(def: ColumnDef, dbType: DatabaseType): DesignerColumn 
     isUnique: false, // derived from indexes below
     unsigned,
     comment: def.comment ?? "",
-    ...(mysqlDef && (mysqlDef.charset || mysqlDef.generated || mysqlDef.attributes)
+    ...(mysqlDef &&
+    (mysqlDef.charset || mysqlDef.generated || mysqlDef.attributes)
       ? {
           mysqlExtras: {
             charset: mysqlDef.charset,
@@ -154,11 +161,20 @@ function toDesignerIndex(def: IndexDef): DesignerIndex {
   if (upperType === "FULLTEXT") type = "FULLTEXT";
   if (upperType === "SPATIAL") type = "SPATIAL";
 
-  const method = (["BTREE", "HASH", "FULLTEXT", "SPATIAL", "GIN", "GIST", "BRIN", "SPGIST"].includes(
-    upperType,
-  )
-    ? upperType
-    : "BTREE") as IndexMethod;
+  const method = (
+    [
+      "BTREE",
+      "HASH",
+      "FULLTEXT",
+      "SPATIAL",
+      "GIN",
+      "GIST",
+      "BRIN",
+      "SPGIST",
+    ].includes(upperType)
+      ? upperType
+      : "BTREE"
+  ) as IndexMethod;
 
   return {
     id: `loaded-idx-${def.name}`,
@@ -174,7 +190,11 @@ function toDesignerIndex(def: IndexDef): DesignerIndex {
 
 function toDesignerForeignKey(def: ForeignKeyDef): DesignerForeignKey {
   const validActions: FKAction[] = [
-    "NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT",
+    "NO ACTION",
+    "RESTRICT",
+    "CASCADE",
+    "SET NULL",
+    "SET DEFAULT",
   ];
   const onDelete = validActions.includes(def.onDelete as FKAction)
     ? (def.onDelete as FKAction)
@@ -223,9 +243,7 @@ export async function getTableDesignerState(
   }
 
   // Skip PRIMARY index (represented by isPrimaryKey on column)
-  const indexes = idxs
-    .filter((i) => !i.primary)
-    .map(toDesignerIndex);
+  const indexes = idxs.filter((i) => !i.primary).map(toDesignerIndex);
 
   const foreignKeys = fks.map(toDesignerForeignKey);
 

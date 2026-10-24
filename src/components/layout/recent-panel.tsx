@@ -18,6 +18,7 @@ import { useWorkspaceStore } from "@/stores/workspace-store";
 import { useConnections } from "@/hooks/use-connections";
 import { cn } from "@/lib/utils";
 import type { Tab } from "@/stores/workspace-store";
+import { formatDbError } from "@/lib/error";
 
 const ICON_MAP: Record<Tab["type"], React.ElementType> = {
   query: Terminal,
@@ -79,7 +80,7 @@ function RecentRow({ item }: { item: RecentItem }) {
         metadata: item.metadata,
       });
     } catch (error) {
-      setOpenError(String(error));
+      setOpenError(formatDbError(error));
     } finally {
       setOpening(false);
     }

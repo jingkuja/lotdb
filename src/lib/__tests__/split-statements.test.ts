@@ -3,11 +3,17 @@ import { splitStatements } from "@/lib/split-statements";
 
 describe("splitStatements", () => {
   it("splits simple statements", () => {
-    expect(splitStatements("SELECT 1; SELECT 2;")).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(splitStatements("SELECT 1; SELECT 2;")).toEqual([
+      "SELECT 1",
+      "SELECT 2",
+    ]);
   });
 
   it("handles a missing trailing semicolon", () => {
-    expect(splitStatements("SELECT 1; SELECT 2")).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(splitStatements("SELECT 1; SELECT 2")).toEqual([
+      "SELECT 1",
+      "SELECT 2",
+    ]);
   });
 
   it("ignores semicolons inside single-quoted strings", () => {
@@ -74,11 +80,16 @@ describe("splitStatements", () => {
 
   it("supports tagged dollar quotes", () => {
     const sql = "SELECT $body$ a;b $body$ AS x; SELECT 2";
-    expect(splitStatements(sql)).toEqual(["SELECT $body$ a;b $body$ AS x", "SELECT 2"]);
+    expect(splitStatements(sql)).toEqual([
+      "SELECT $body$ a;b $body$ AS x",
+      "SELECT 2",
+    ]);
   });
 
   it("drops comment-only fragments", () => {
-    expect(splitStatements("-- only a comment\n; SELECT 1")).toEqual(["SELECT 1"]);
+    expect(splitStatements("-- only a comment\n; SELECT 1")).toEqual([
+      "SELECT 1",
+    ]);
   });
 
   it("returns empty for empty / blank input", () => {

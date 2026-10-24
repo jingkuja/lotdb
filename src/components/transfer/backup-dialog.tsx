@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { backupDatabase } from "@/services/tauri-commands";
 import { formatBytes, useCliTask } from "@/hooks/use-cli-task";
+import { formatDbError } from "@/lib/error";
 
 interface BackupDialogProps {
   open: boolean;
@@ -35,16 +36,18 @@ export function BackupDialog({
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ size: number; stderr: string } | null>(null);
+  const [result, setResult] = useState<{ size: number; stderr: string } | null>(
+    null,
+  );
   const task = useCliTask();
   const runTask = task.run;
 
   // Pre-fill with downloads dir on open
   useEffect(() => {
     if (open && !filePath) {
-      downloadDir().then((dir) =>
-        join(dir, `${database}_backup.sql`).then(setFilePath),
-      ).catch(() => {});
+      downloadDir()
+        .then((dir) => join(dir, `${database}_backup.sql`).then(setFilePath))
+        .catch(() => {});
     }
   }, [open, database, filePath]);
 
@@ -80,7 +83,7 @@ export function BackupDialog({
       setResult({ size: res.sizeBytes, stderr: res.stderrOutput });
       setDone(true);
     } catch (e) {
-      setError(String(e));
+      setError(formatDbError(e));
       setDone(true);
     } finally {
       setRunning(false);
@@ -159,7 +162,11 @@ export function BackupDialog({
 
             <DialogFooter>
               {running ? (
-                <Button variant="outline" onClick={task.cancel} disabled={task.cancelling}>
+                <Button
+                  variant="outline"
+                  onClick={task.cancel}
+                  disabled={task.cancelling}
+                >
                   {task.cancelling ? "正在取消…" : "取消备份"}
                 </Button>
               ) : (
@@ -169,7 +176,10 @@ export function BackupDialog({
               )}
               <Button onClick={handleBackup} disabled={running || !filePath}>
                 {running ? (
-                  <><Loader2 className="size-3.5 mr-1.5 animate-spin" />备份中…</>
+                  <>
+                    <Loader2 className="size-3.5 mr-1.5 animate-spin" />
+                    备份中…
+                  </>
                 ) : (
                   "开始备份"
                 )}
@@ -183,7 +193,9 @@ export function BackupDialog({
                 <AlertCircle className="size-4 shrink-0 mt-0.5" />
                 <div className="flex flex-col gap-1">
                   <span className="text-sm font-medium">备份失败</span>
-                  <span className="text-xs whitespace-pre-wrap break-all">{error}</span>
+                  <span className="text-xs whitespace-pre-wrap break-all">
+                    {error}
+                  </span>
                 </div>
               </div>
             ) : (
@@ -204,8 +216,17 @@ export function BackupDialog({
               </div>
             )}
             <DialogFooter>
-              <Button variant="outline" onClick={resetState}>再次备份</Button>
-              <Button onClick={() => { onOpenChange(false); resetState(); }}>关闭</Button>
+              <Button variant="outline" onClick={resetState}>
+                再次备份
+              </Button>
+              <Button
+                onClick={() => {
+                  onOpenChange(false);
+                  resetState();
+                }}
+              >
+                关闭
+              </Button>
             </DialogFooter>
           </div>
         )}

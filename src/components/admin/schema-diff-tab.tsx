@@ -22,6 +22,7 @@ import { diffLines, buildHunks } from "@/lib/line-diff";
 import type { DatabaseType } from "@/types/database";
 import type { DesignerState } from "@/types/designer";
 import type { DiffLine } from "@/lib/line-diff";
+import { formatDbError } from "@/lib/error";
 
 // ─── Side state ───────────────────────────────────────────────────
 
@@ -65,7 +66,16 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
     async (connectionId: string) => {
       const conn = connections.find((c) => c.id === connectionId);
       const dbType: DatabaseType = conn?.dbType ?? "mysql";
-      onChange({ connectionId, dbType, database: "", schema: "", table: "", databases: [], schemas: [], tables: [] });
+      onChange({
+        connectionId,
+        dbType,
+        database: "",
+        schema: "",
+        table: "",
+        databases: [],
+        schemas: [],
+        tables: [],
+      });
       if (!connectionId) return;
       setLoading(true);
       try {
@@ -90,7 +100,11 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
           const schemas = await listSchemas(state.connectionId, database);
           onChange({ schemas });
         } else {
-          const objs = await listObjects(state.connectionId, database, undefined);
+          const objs = await listObjects(
+            state.connectionId,
+            database,
+            undefined,
+          );
           onChange({ tables: objs.tables });
         }
       } catch {
@@ -108,7 +122,11 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
       if (!schema) return;
       setLoading(true);
       try {
-        const objs = await listObjects(state.connectionId, state.database, schema);
+        const objs = await listObjects(
+          state.connectionId,
+          state.database,
+          schema,
+        );
         onChange({ tables: objs.tables });
       } catch {
         // ignore
@@ -130,7 +148,9 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
 
       {/* Connection */}
       <div>
-        <label className="mb-1 block text-[11px] text-muted-foreground">连接</label>
+        <label className="mb-1 block text-[11px] text-muted-foreground">
+          连接
+        </label>
         <select
           className={selectClass}
           value={state.connectionId}
@@ -147,7 +167,9 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
 
       {/* Database */}
       <div>
-        <label className="mb-1 block text-[11px] text-muted-foreground">数据库</label>
+        <label className="mb-1 block text-[11px] text-muted-foreground">
+          数据库
+        </label>
         <select
           className={selectClass}
           disabled={!state.connectionId || state.databases.length === 0}
@@ -156,7 +178,9 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
         >
           <option value="">— 选择数据库 —</option>
           {state.databases.map((db) => (
-            <option key={db} value={db}>{db}</option>
+            <option key={db} value={db}>
+              {db}
+            </option>
           ))}
         </select>
       </div>
@@ -164,7 +188,9 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
       {/* Schema (PG only) */}
       {state.dbType === "postgres" && (
         <div>
-          <label className="mb-1 block text-[11px] text-muted-foreground">Schema</label>
+          <label className="mb-1 block text-[11px] text-muted-foreground">
+            Schema
+          </label>
           <select
             className={selectClass}
             disabled={!state.database || state.schemas.length === 0}
@@ -173,7 +199,9 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
           >
             <option value="">— 选择 Schema —</option>
             {state.schemas.map((s) => (
-              <option key={s} value={s}>{s}</option>
+              <option key={s} value={s}>
+                {s}
+              </option>
             ))}
           </select>
         </div>
@@ -181,7 +209,9 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
 
       {/* Table */}
       <div>
-        <label className="mb-1 block text-[11px] text-muted-foreground">表名</label>
+        <label className="mb-1 block text-[11px] text-muted-foreground">
+          表名
+        </label>
         <select
           className={selectClass}
           disabled={!state.database || state.tables.length === 0}
@@ -190,7 +220,9 @@ function SideSelector({ label, state, onChange }: SideSelectorProps) {
         >
           <option value="">— 选择表 —</option>
           {state.tables.map((t) => (
-            <option key={t} value={t}>{t}</option>
+            <option key={t} value={t}>
+              {t}
+            </option>
           ))}
         </select>
       </div>
@@ -226,8 +258,10 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
               key={li}
               className={cn(
                 "flex gap-0 whitespace-pre",
-                line.kind === "added" && "bg-green-500/10 text-green-700 dark:text-green-400",
-                line.kind === "removed" && "bg-red-500/10 text-red-700 dark:text-red-400",
+                line.kind === "added" &&
+                  "bg-green-500/10 text-green-700 dark:text-green-400",
+                line.kind === "removed" &&
+                  "bg-red-500/10 text-red-700 dark:text-red-400",
                 line.kind === "same" && "text-muted-foreground",
               )}
             >
@@ -240,7 +274,11 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
               </span>
               {/* Sign */}
               <span className="w-5 shrink-0 select-none text-center">
-                {line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}
+                {line.kind === "added"
+                  ? "+"
+                  : line.kind === "removed"
+                    ? "−"
+                    : " "}
               </span>
               {/* Content */}
               <span className="flex-1 px-1">{line.text}</span>
@@ -278,7 +316,11 @@ function SyncSqlPanel({
         className="flex w-full items-center gap-2 px-4 py-2.5 text-xs font-medium hover:bg-muted/40"
         onClick={() => setOpen((v) => !v)}
       >
-        {open ? <ChevronDown className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}
+        {open ? (
+          <ChevronDown className="size-3.5" />
+        ) : (
+          <ChevronRightIcon className="size-3.5" />
+        )}
         同步 SQL（将目标表同步为来源结构）
         <span className="ml-auto rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
           {stmts.length} 条语句
@@ -337,8 +379,12 @@ export function SchemaDiffTab() {
   }, []);
 
   const canCompare =
-    left.connectionId && left.database && left.table &&
-    right.connectionId && right.database && right.table;
+    left.connectionId &&
+    left.database &&
+    left.table &&
+    right.connectionId &&
+    right.database &&
+    right.table;
 
   const handleCompare = async () => {
     if (!canCompare) return;
@@ -348,14 +394,18 @@ export function SchemaDiffTab() {
     try {
       const [ls, rs] = await Promise.all([
         getTableDesignerState(
-          left.connectionId, left.database,
-          left.dbType === "postgres" ? (left.schema || "public") : undefined,
-          left.table, left.dbType,
+          left.connectionId,
+          left.database,
+          left.dbType === "postgres" ? left.schema || "public" : undefined,
+          left.table,
+          left.dbType,
         ),
         getTableDesignerState(
-          right.connectionId, right.database,
-          right.dbType === "postgres" ? (right.schema || "public") : undefined,
-          right.table, right.dbType,
+          right.connectionId,
+          right.database,
+          right.dbType === "postgres" ? right.schema || "public" : undefined,
+          right.table,
+          right.dbType,
         ),
       ]);
       setLeftState(ls);
@@ -364,7 +414,7 @@ export function SchemaDiffTab() {
       const rightDdl = generateCreateTable(rs, right.dbType);
       setDiffLines(diffLines(leftDdl, rightDdl));
     } catch (e) {
-      setError(String(e));
+      setError(formatDbError(e));
     } finally {
       setComparing(false);
     }
@@ -384,7 +434,11 @@ export function SchemaDiffTab() {
             <ArrowRight className="size-5 text-muted-foreground" />
           </div>
 
-          <SideSelector label="目标（右）" state={right} onChange={patchRight} />
+          <SideSelector
+            label="目标（右）"
+            state={right}
+            onChange={patchRight}
+          />
         </div>
 
         <div className="mt-4 flex items-center gap-3">

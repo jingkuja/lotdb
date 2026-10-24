@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/nicehash/tauri/v2/crates/tauri/schema.json",
+  "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for LotDB",
   "windows": ["main"],
@@ -8,7 +8,6 @@
     "core:window:allow-destroy",
     "core:path:allow-resolve-directory",
     "dialog:allow-open",
-    "dialog:allow-save",
-    "sql:default"
+    "dialog:allow-save"
   ]
 }

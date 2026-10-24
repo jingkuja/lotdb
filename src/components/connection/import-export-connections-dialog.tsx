@@ -8,9 +8,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Download, Upload, Check, AlertCircle, Loader2 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { exportConnections, importConnections } from "@/services/tauri-commands";
+import {
+  exportConnections,
+  importConnections,
+} from "@/services/tauri-commands";
 import type { ConnectionConfig } from "@/types/database";
 import { useQueryClient } from "@tanstack/react-query";
+import { formatDbError } from "@/lib/error";
 
 interface ImportExportConnectionsDialogProps {
   open: boolean;
@@ -34,7 +38,10 @@ export function ImportExportConnectionsDialog({
   const [preview, setPreview] = useState<ConnectionConfig[] | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<{ imported: number; skipped: number } | null>(null);
+  const [importResult, setImportResult] = useState<{
+    imported: number;
+    skipped: number;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
 
@@ -53,7 +60,7 @@ export function ImportExportConnectionsDialog({
       setExportDone(true);
       setTimeout(() => setExportDone(false), 2000);
     } catch (e) {
-      setExportError(String(e));
+      setExportError(formatDbError(e));
     } finally {
       setExporting(false);
     }
@@ -70,10 +77,11 @@ export function ImportExportConnectionsDialog({
     reader.onload = (ev) => {
       try {
         const parsed = JSON.parse(ev.target?.result as string) as unknown;
-        if (!Array.isArray(parsed)) throw new Error("文件格式错误：顶层应为数组");
+        if (!Array.isArray(parsed))
+          throw new Error("文件格式错误：顶层应为数组");
         setPreview(parsed as ConnectionConfig[]);
       } catch (err) {
-        setImportError(String(err));
+        setImportError(formatDbError(err));
       }
     };
     reader.readAsText(file);
@@ -90,7 +98,7 @@ export function ImportExportConnectionsDialog({
       setPreview(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (e) {
-      setImportError(String(e));
+      setImportError(formatDbError(e));
     } finally {
       setImporting(false);
     }
@@ -131,9 +139,14 @@ export function ImportExportConnectionsDialog({
         {tab === "export" && (
           <div className="flex flex-col gap-4 py-2">
             <p className="text-xs text-muted-foreground">
-              将所有连接配置导出为 JSON 文件。数据库密码和 SSH 密码/口令不会包含在导出文件中。
+              将所有连接配置导出为 JSON 文件。数据库密码和 SSH
+              密码/口令不会包含在导出文件中。
             </p>
-            <Button onClick={handleExport} disabled={exporting} className="gap-2 self-start">
+            <Button
+              onClick={handleExport}
+              disabled={exporting}
+              className="gap-2 self-start"
+            >
               {exporting ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : exportDone ? (
@@ -192,13 +205,16 @@ export function ImportExportConnectionsDialog({
             {importResult && (
               <div className="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
                 <Check className="size-3.5 shrink-0" />
-                导入完成：{importResult.imported} 条已导入，{importResult.skipped} 条已跳过
+                导入完成：{importResult.imported} 条已导入，
+                {importResult.skipped} 条已跳过
               </div>
             )}
 
             {preview && preview.length > 0 && (
               <div className="flex flex-col gap-1">
-                <p className="text-[11px] font-medium text-muted-foreground">预览（前 10 条）</p>
+                <p className="text-[11px] font-medium text-muted-foreground">
+                  预览（前 10 条）
+                </p>
                 <div className="max-h-40 overflow-y-auto rounded-md border border-border text-xs">
                   {preview.slice(0, 10).map((c, i) => (
                     <div
@@ -212,7 +228,9 @@ export function ImportExportConnectionsDialog({
                       >
                         {c.dbType === "mysql" ? "M" : "P"}
                       </span>
-                      <span className="flex-1 truncate font-medium">{c.name}</span>
+                      <span className="flex-1 truncate font-medium">
+                        {c.name}
+                      </span>
                       <span className="text-muted-foreground">
                         {c.host}:{c.port}
                       </span>

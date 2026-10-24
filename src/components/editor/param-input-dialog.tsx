@@ -20,7 +20,9 @@ interface Props {
 }
 
 export function ParamInputDialog(props: Props) {
-  return props.open ? <ParamInputBody key={JSON.stringify(props.params)} {...props} /> : null;
+  return props.open ? (
+    <ParamInputBody key={JSON.stringify(props.params)} {...props} />
+  ) : null;
 }
 
 function ParamInputBody({ open, onOpenChange, params, onExecute }: Props) {
@@ -57,7 +59,9 @@ function ParamInputBody({ open, onOpenChange, params, onExecute }: Props) {
         <div className="flex flex-col gap-3 py-2">
           {params.map((param, i) => (
             <div key={param.index} className="grid gap-1.5">
-              <Label className="font-mono text-xs text-muted-foreground">{param.label}</Label>
+              <Label className="font-mono text-xs text-muted-foreground">
+                {param.label}
+              </Label>
               <Input
                 autoFocus={i === 0}
                 value={values[i] ?? ""}

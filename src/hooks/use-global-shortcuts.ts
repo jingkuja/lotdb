@@ -38,7 +38,12 @@ export function useGlobalShortcuts({ onShowShortcuts, onShowSearch }: Options) {
             : (openPoolIds.values().next().value as string | undefined);
         if (id) {
           const tabId = `query-${id}-${Date.now()}`;
-          addTab({ id: tabId, title: "新查询", type: "query", connectionId: id });
+          addTab({
+            id: tabId,
+            title: "新查询",
+            type: "query",
+            connectionId: id,
+          });
         }
         return;
       }
@@ -78,7 +83,8 @@ export function useGlobalShortcuts({ onShowShortcuts, onShowSearch }: Options) {
       }
 
       // ── ? — shortcuts help (only when not in input) ───────────────
-      if (!mod && !e.shiftKey && !e.altKey && e.key === "?" && !inInput) {
+      // `?` is Shift+/ on most layouts, so Shift must be allowed.
+      if (!mod && !e.altKey && e.key === "?" && !inInput) {
         onShowShortcuts();
         return;
       }

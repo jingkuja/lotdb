@@ -32,7 +32,10 @@ function stripStrings(sql: string): string {
   return sql.replace(/'(?:[^']|'')*'/g, "''");
 }
 
-export function detectParams(sql: string): { params: SqlParam[]; style: ParamStyle } {
+export function detectParams(sql: string): {
+  params: SqlParam[];
+  style: ParamStyle;
+} {
   const clean = stripStrings(stripComments(sql));
 
   // PostgreSQL: $1 … $N

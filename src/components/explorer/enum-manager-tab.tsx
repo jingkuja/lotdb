@@ -1,13 +1,7 @@
 import { useState } from "react";
 import { confirmDialog, promptDialog } from "@/stores/app-dialog-store";
 import { useQueryClient } from "@tanstack/react-query";
-import {
-  AlertCircle,
-  Loader2,
-  Plus,
-  Shapes,
-  Trash2,
-} from "lucide-react";
+import { AlertCircle, Loader2, Plus, Shapes, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,8 +13,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { addEnumValue, createEnumType, dropEnumType } from "@/services/tauri-commands";
+import {
+  addEnumValue,
+  createEnumType,
+  dropEnumType,
+} from "@/services/tauri-commands";
 import { useEnums } from "@/hooks/use-objects";
+import { formatDbError } from "@/lib/error";
 
 interface EnumManagerTabProps {
   connectionId: string;
@@ -28,8 +27,16 @@ interface EnumManagerTabProps {
   schema?: string;
 }
 
-export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTabProps) {
-  const { data: rows = [], isLoading, error } = useEnums(connectionId, database, schema, true);
+export function EnumManagerTab({
+  connectionId,
+  database,
+  schema,
+}: EnumManagerTabProps) {
+  const {
+    data: rows = [],
+    isLoading,
+    error,
+  } = useEnums(connectionId, database, schema, true);
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
@@ -38,7 +45,9 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
   const [actionError, setActionError] = useState<string | null>(null);
 
   const refresh = () =>
-    queryClient.invalidateQueries({ queryKey: ["enums", connectionId, database] });
+    queryClient.invalidateQueries({
+      queryKey: ["enums", connectionId, database],
+    });
 
   const withBusy = async (key: string, fn: () => Promise<void>) => {
     setBusy(key);
@@ -47,7 +56,7 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
       await fn();
       await refresh();
     } catch (e) {
-      setActionError(String(e));
+      setActionError(formatDbError(e));
     } finally {
       setBusy(null);
     }
@@ -60,7 +69,13 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
       .filter(Boolean);
     if (!createName.trim() || labels.length === 0) return;
     void withBusy("create", async () => {
-      await createEnumType(connectionId, database, schema, createName.trim(), labels);
+      await createEnumType(
+        connectionId,
+        database,
+        schema,
+        createName.trim(),
+        labels,
+      );
       setCreateOpen(false);
       setCreateName("");
       setCreateLabels("");
@@ -90,7 +105,7 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
       try {
         await dropEnumType(connectionId, database, schema, name, false);
       } catch (e) {
-        const msg = String(e);
+        const msg = formatDbError(e);
         if (
           msg.includes("dependent objects") &&
           (await confirmDialog(
@@ -144,7 +159,7 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
       ) : error ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 text-destructive">
           <AlertCircle className="size-5" />
-          <p className="text-sm">{String(error)}</p>
+          <p className="text-sm">{formatDbError(error)}</p>
         </div>
       ) : rows.length === 0 ? (
         <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
@@ -230,12 +245,18 @@ export function EnumManagerTab({ connectionId, database, schema }: EnumManagerTa
             </div>
           </div>
           <DialogFooter>
-            <Button variant="ghost" size="sm" onClick={() => setCreateOpen(false)}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setCreateOpen(false)}
+            >
               取消
             </Button>
             <Button
               onClick={handleCreate}
-              disabled={!createName.trim() || !createLabels.trim() || busy === "create"}
+              disabled={
+                !createName.trim() || !createLabels.trim() || busy === "create"
+              }
             >
               {busy === "create" && <Loader2 className="size-3 animate-spin" />}
               创建

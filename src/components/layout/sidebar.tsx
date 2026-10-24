@@ -60,6 +60,7 @@ import {
   confirmDialog,
   promptDialog,
 } from "@/stores/app-dialog-store";
+import { formatDbError } from "@/lib/error";
 
 const THEME_CYCLE: ThemeMode[] = ["light", "dark", "system"];
 const THEME_ICONS: Record<ThemeMode, React.ElementType> = {
@@ -174,7 +175,7 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
     try {
       await createGroupMutation.mutateAsync(name.trim());
     } catch (e) {
-      await alertDialog(String(e), { title: "新建分组失败" });
+      await alertDialog(formatDbError(e), { title: "新建分组失败" });
     }
   };
 
@@ -186,7 +187,7 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
     try {
       await renameGroupMutation.mutateAsync({ id, name: name.trim() });
     } catch (e) {
-      await alertDialog(String(e), { title: "重命名分组失败" });
+      await alertDialog(formatDbError(e), { title: "重命名分组失败" });
     }
   };
 
@@ -202,7 +203,7 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
     try {
       await deleteGroupMutation.mutateAsync(id);
     } catch (e) {
-      await alertDialog(String(e), { title: "删除分组失败" });
+      await alertDialog(formatDbError(e), { title: "删除分组失败" });
     }
   };
 
@@ -216,7 +217,7 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
         // Auto-expand tree once connected
         setExpandedIds((prev) => new Set([...prev, conn.id]));
       } catch (error) {
-        setConnectionError(`${conn.name}：${String(error)}`);
+        setConnectionError(`${conn.name}：${formatDbError(error)}`);
       }
     }
   };
@@ -438,7 +439,7 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
 
           {isError && !isLoading && (
             <div className="flex flex-col gap-1.5 px-2 py-3 text-xs text-destructive">
-              <span>加载连接失败：{String(error)}</span>
+              <span>加载连接失败：{formatDbError(error)}</span>
               <button
                 type="button"
                 className="self-start text-foreground underline-offset-2 hover:underline"

@@ -26,7 +26,7 @@ function lcsTable(a: string[], b: string[]): number[][] {
     for (let j = 1; j <= n; j++) {
       dp[i]![j] =
         a[i - 1] === b[j - 1]
-          ? (dp[i - 1]![j - 1]!) + 1
+          ? dp[i - 1]![j - 1]! + 1
           : Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
     }
   }

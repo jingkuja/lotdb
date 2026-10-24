@@ -32,8 +32,10 @@ function FKRow({
   onDelete: () => void;
 }) {
   const [expanded, setExpanded] = useState(true);
-  const set = <K extends keyof DesignerForeignKey>(key: K, val: DesignerForeignKey[K]) =>
-    onChange({ ...fk, [key]: val });
+  const set = <K extends keyof DesignerForeignKey>(
+    key: K,
+    val: DesignerForeignKey[K],
+  ) => onChange({ ...fk, [key]: val });
 
   const namePlaceholder =
     fk.columns.length > 0 && fk.refTable
@@ -78,9 +80,11 @@ function FKRow({
           className="text-muted-foreground hover:text-foreground"
           onClick={() => setExpanded((v) => !v)}
         >
-          {expanded
-            ? <ChevronDown className="size-3.5" />
-            : <ChevronRight className="size-3.5" />}
+          {expanded ? (
+            <ChevronDown className="size-3.5" />
+          ) : (
+            <ChevronRight className="size-3.5" />
+          )}
         </button>
 
         <Input
@@ -108,7 +112,9 @@ function FKRow({
         <div className="space-y-4 border-t border-border/50 bg-muted/20 px-4 py-3">
           {/* Local column picker */}
           <div>
-            <p className="mb-1.5 text-[10px] font-medium text-muted-foreground">本地列</p>
+            <p className="mb-1.5 text-[10px] font-medium text-muted-foreground">
+              本地列
+            </p>
             <div className="flex flex-wrap gap-1">
               {columns.length === 0 && (
                 <span className="text-[11px] text-muted-foreground/60">
@@ -159,9 +165,7 @@ function FKRow({
                 className="h-7 text-xs"
                 placeholder="public"
                 value={fk.refSchema ?? ""}
-                onChange={(e) =>
-                  set("refSchema", e.target.value || undefined)
-                }
+                onChange={(e) => set("refSchema", e.target.value || undefined)}
               />
             </div>
           </div>
@@ -203,7 +207,9 @@ function FKRow({
                 onChange={(e) => set("onDelete", e.target.value as FKAction)}
               >
                 {FK_ACTIONS.map((a) => (
-                  <option key={a} value={a}>{a}</option>
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
                 ))}
               </select>
             </div>
@@ -217,7 +223,9 @@ function FKRow({
                 onChange={(e) => set("onUpdate", e.target.value as FKAction)}
               >
                 {FK_ACTIONS.map((a) => (
-                  <option key={a} value={a}>{a}</option>
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
                 ))}
               </select>
             </div>

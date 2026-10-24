@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { copyAsInsert, copyAsCsv, copyAsJson, copyAsMarkdown } from "../copy-as";
+import {
+  copyAsInsert,
+  copyAsCsv,
+  copyAsJson,
+  copyAsMarkdown,
+} from "../copy-as";
 
 const columns = ["id", "name", "age"];
 const rows = [
@@ -9,7 +14,14 @@ const rows = [
 
 describe("copyAsInsert", () => {
   it("generates MySQL INSERT with backtick quoting", () => {
-    const sql = copyAsInsert("mydb", undefined, "users", columns, rows, "mysql");
+    const sql = copyAsInsert(
+      "mydb",
+      undefined,
+      "users",
+      columns,
+      rows,
+      "mysql",
+    );
     expect(sql).toContain("INSERT INTO `mydb`.`users`");
     expect(sql).toContain("`id`, `name`, `age`");
     expect(sql).toContain("(1, 'Alice', 30)");
@@ -17,7 +29,14 @@ describe("copyAsInsert", () => {
   });
 
   it("generates PG INSERT with double-quote quoting", () => {
-    const sql = copyAsInsert("mydb", "public", "users", columns, rows, "postgres");
+    const sql = copyAsInsert(
+      "mydb",
+      "public",
+      "users",
+      columns,
+      rows,
+      "postgres",
+    );
     expect(sql).toContain('INSERT INTO "public"."users"');
     expect(sql).toContain('"id", "name", "age"');
     expect(sql).toContain("(1, 'Alice', 30)");
@@ -25,7 +44,14 @@ describe("copyAsInsert", () => {
   });
 
   it("escapes single quotes in string values", () => {
-    const sql = copyAsInsert("db", undefined, "t", ["val"], [["it's"]], "mysql");
+    const sql = copyAsInsert(
+      "db",
+      undefined,
+      "t",
+      ["val"],
+      [["it's"]],
+      "mysql",
+    );
     expect(sql).toContain("'it''s'");
   });
 

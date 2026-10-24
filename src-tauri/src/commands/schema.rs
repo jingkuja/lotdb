@@ -1,4 +1,5 @@
 use crate::db::pool::{DbPool, PoolManager};
+use crate::error::{AppError, ResultExt};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tauri::State;
@@ -17,18 +18,13 @@ pub struct SchemaObjects {
 pub async fn list_databases(
     pools: State<'_, PoolManager>,
     connection_id: String,
-) -> Result<Vec<String>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<Vec<String>, AppError> {
+    match &pools.pool(&connection_id)? {
         DbPool::MySQL(pool) => {
             let rows: Vec<(String,)> = sqlx::query_as("SHOW DATABASES")
                 .fetch_all(pool)
                 .await
-                .map_err(|e| format!("查询数据库列表失败: {e}"))?;
+                .ctx("查询数据库列表失败")?;
             Ok(rows.into_iter().map(|(name,)| name).collect())
         }
         DbPool::Postgres(pool) => {
@@ -37,7 +33,7 @@ pub async fn list_databases(
             )
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询数据库列表失败: {e}"))?;
+            .ctx("查询数据库列表失败")?;
             Ok(rows.into_iter().map(|(name,)| name).collect())
         }
     }
@@ -51,16 +47,8 @@ pub async fn list_schemas(
     pools: State<'_, PoolManager>,
     connection_id: String,
     database: String,
-) -> Result<Vec<String>, String> {
-    let is_pg = {
-        let entry = pools
-            .pools
-            .get(&connection_id)
-            .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-        matches!(entry.pool, DbPool::Postgres(_))
-    };
-
-    if !is_pg {
+) -> Result<Vec<String>, AppError> {
+    if pools.dialect(&connection_id)?.is_mysql() {
         return Ok(vec![]);
     }
 
@@ -74,7 +62,7 @@ pub async fn list_schemas(
     )
     .fetch_all(&pool)
     .await
-    .map_err(|e| format!("查询 Schema 列表失败: {e}"))?;
+    .ctx("查询 Schema 列表失败")?;
     Ok(rows.into_iter().map(|(name,)| name).collect())
 }
 
@@ -87,13 +75,8 @@ pub async fn list_objects(
     connection_id: String,
     database: String,
     schema: Option<String>,
-) -> Result<SchemaObjects, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<SchemaObjects, AppError> {
+    match &pools.pool_for(&connection_id, &database).await? {
         DbPool::MySQL(pool) => {
             let tables: Vec<(String,)> = sqlx::query_as(
                 "SELECT TABLE_NAME FROM information_schema.TABLES \
@@ -103,7 +86,7 @@ pub async fn list_objects(
             .bind(&database)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询表列表失败: {e}"))?;
+            .ctx("查询表列表失败")?;
 
             let views: Vec<(String,)> = sqlx::query_as(
                 "SELECT TABLE_NAME FROM information_schema.VIEWS \
@@ -112,7 +95,7 @@ pub async fn list_objects(
             .bind(&database)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询视图列表失败: {e}"))?;
+            .ctx("查询视图列表失败")?;
 
             let functions: Vec<(String,)> = sqlx::query_as(
                 "SELECT ROUTINE_NAME FROM information_schema.ROUTINES \
@@ -121,7 +104,7 @@ pub async fn list_objects(
             .bind(&database)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询函数列表失败: {e}"))?;
+            .ctx("查询函数列表失败")?;
 
             Ok(SchemaObjects {
                 tables: tables.into_iter().map(|(n,)| n).collect(),
@@ -129,12 +112,7 @@ pub async fn list_objects(
                 functions: functions.into_iter().map(|(n,)| n).collect(),
             })
         }
-        DbPool::Postgres(_) => {
-            // Drop the entry lock before awaiting
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(&connection_id, &database)
-                .await?;
+        DbPool::Postgres(pool) => {
             let schema_name = schema.as_deref().unwrap_or("public");
 
             let tables: Vec<(String,)> = sqlx::query_as(
@@ -143,18 +121,18 @@ pub async fn list_objects(
                  ORDER BY table_name",
             )
             .bind(schema_name)
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询表列表失败: {e}"))?;
+            .ctx("查询表列表失败")?;
 
             let views: Vec<(String,)> = sqlx::query_as(
                 "SELECT table_name FROM information_schema.views \
                  WHERE table_schema = $1 ORDER BY table_name",
             )
             .bind(schema_name)
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询视图列表失败: {e}"))?;
+            .ctx("查询视图列表失败")?;
 
             let functions: Vec<(String,)> = sqlx::query_as(
                 "SELECT routine_name FROM information_schema.routines \
@@ -162,9 +140,9 @@ pub async fn list_objects(
                  ORDER BY routine_name",
             )
             .bind(schema_name)
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询函数列表失败: {e}"))?;
+            .ctx("查询函数列表失败")?;
 
             Ok(SchemaObjects {
                 tables: tables.into_iter().map(|(n,)| n).collect(),
@@ -408,13 +386,8 @@ pub async fn get_table_columns(
     database: String,
     schema: Option<String>,
     table: String,
-) -> Result<Vec<ColumnDef>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<Vec<ColumnDef>, AppError> {
+    match &pools.pool_for(&connection_id, &database).await? {
         DbPool::MySQL(pool) => {
             // PRIMARY KEY info
             let pk_rows: Vec<(String,)> = sqlx::query_as(
@@ -426,7 +399,7 @@ pub async fn get_table_columns(
             .bind(&table)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询主键失败: {e}"))?;
+            .ctx("查询主键失败")?;
             let pk_set: std::collections::HashSet<String> =
                 pk_rows.into_iter().map(|(n,)| n).collect();
 
@@ -466,7 +439,7 @@ pub async fn get_table_columns(
             .bind(&table)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询列失败: {e}"))?;
+            .ctx("查询列失败")?;
 
             Ok(rows
                 .into_iter()
@@ -490,11 +463,7 @@ pub async fn get_table_columns(
                 })
                 .collect())
         }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(&connection_id, &database)
-                .await?;
+        DbPool::Postgres(pool) => {
             let schema_name = schema.as_deref().unwrap_or("public");
 
             #[derive(sqlx::FromRow)]
@@ -535,9 +504,9 @@ pub async fn get_table_columns(
             )
             .bind(schema_name)
             .bind(&table)
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询列失败: {e}"))?;
+            .ctx("查询列失败")?;
 
             Ok(rows
                 .into_iter()
@@ -564,13 +533,8 @@ pub async fn get_table_indexes(
     database: String,
     schema: Option<String>,
     table: String,
-) -> Result<Vec<IndexDef>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<Vec<IndexDef>, AppError> {
+    match &pools.pool_for(&connection_id, &database).await? {
         DbPool::MySQL(pool) => {
             #[derive(sqlx::FromRow)]
             struct MysqlIdx {
@@ -591,7 +555,7 @@ pub async fn get_table_indexes(
             .bind(&table)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询索引失败: {e}"))?;
+            .ctx("查询索引失败")?;
 
             // Group by index name
             let mut map: BTreeMap<String, IndexDef> = BTreeMap::new();
@@ -607,11 +571,7 @@ pub async fn get_table_indexes(
             }
             Ok(map.into_values().collect())
         }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(&connection_id, &database)
-                .await?;
+        DbPool::Postgres(pool) => {
             let schema_name = schema.as_deref().unwrap_or("public");
 
             #[derive(sqlx::FromRow)]
@@ -645,9 +605,9 @@ pub async fn get_table_indexes(
             )
             .bind(schema_name)
             .bind(&table)
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询索引失败: {e}"))?;
+            .ctx("查询索引失败")?;
 
             let mut map: BTreeMap<String, IndexDef> = BTreeMap::new();
             for r in rows {
@@ -684,7 +644,7 @@ pub async fn get_table_foreign_keys(
     database: String,
     schema: Option<String>,
     table: String,
-) -> Result<Vec<ForeignKeyDef>, String> {
+) -> Result<Vec<ForeignKeyDef>, AppError> {
     get_table_foreign_keys_impl(&pools, connection_id, database, schema, table).await
 }
 
@@ -694,13 +654,8 @@ pub async fn get_table_foreign_keys_impl(
     database: String,
     schema: Option<String>,
     table: String,
-) -> Result<Vec<ForeignKeyDef>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<Vec<ForeignKeyDef>, AppError> {
+    match &pools.pool_for(&connection_id, &database).await? {
         DbPool::MySQL(pool) => {
             #[derive(sqlx::FromRow)]
             struct MysqlFk {
@@ -731,7 +686,7 @@ pub async fn get_table_foreign_keys_impl(
             .bind(&table)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询外键失败: {e}"))?;
+            .ctx("查询外键失败")?;
 
             let mut map: BTreeMap<String, ForeignKeyDef> = BTreeMap::new();
             for r in rows {
@@ -750,11 +705,7 @@ pub async fn get_table_foreign_keys_impl(
             }
             Ok(map.into_values().collect())
         }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(&connection_id, &database)
-                .await?;
+        DbPool::Postgres(pool) => {
             let schema_name = schema.as_deref().unwrap_or("public");
 
             #[derive(sqlx::FromRow)]
@@ -788,9 +739,9 @@ pub async fn get_table_foreign_keys_impl(
             )
             .bind(schema_name)
             .bind(&table)
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询外键失败: {e}"))?;
+            .ctx("查询外键失败")?;
 
             let mut map: BTreeMap<String, ForeignKeyDef> = BTreeMap::new();
             for r in rows {
@@ -835,16 +786,11 @@ pub async fn search_objects(
     connection_id: String,
     query: String,
     limit: Option<u32>,
-) -> Result<Vec<SearchResult>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
+) -> Result<Vec<SearchResult>, AppError> {
     let max = limit.unwrap_or(100) as i64;
     let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
 
-    match &entry.pool {
+    match &pools.pool(&connection_id)? {
         DbPool::MySQL(pool) => {
             #[derive(sqlx::FromRow)]
             struct Row {
@@ -866,7 +812,7 @@ pub async fn search_objects(
             .bind(max)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("搜索失败: {e}"))?;
+            .ctx("搜索失败")?;
 
             // Functions + procedures
             let mut fns: Vec<Row> = sqlx::query_as(
@@ -881,7 +827,7 @@ pub async fn search_objects(
             .bind(max)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("搜索函数失败: {e}"))?;
+            .ctx("搜索函数失败")?;
 
             results.append(&mut fns);
             results.sort_by(|a, b| a.name.cmp(&b.name));
@@ -918,7 +864,7 @@ pub async fn search_objects(
             .bind(max)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("搜索失败: {e}"))?;
+            .ctx("搜索失败")?;
 
             // Functions
             let mut fns: Vec<Row> = sqlx::query_as(
@@ -934,7 +880,7 @@ pub async fn search_objects(
             .bind(max)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("搜索函数失败: {e}"))?;
+            .ctx("搜索函数失败")?;
 
             results.append(&mut fns);
             results.sort_by(|a, b| a.name.cmp(&b.name));
@@ -943,7 +889,7 @@ pub async fn search_objects(
             let (current_db,): (String,) = sqlx::query_as("SELECT current_database()::text")
                 .fetch_one(pool)
                 .await
-                .map_err(|e| format!("查询当前数据库失败: {e}"))?;
+                .ctx("查询当前数据库失败")?;
 
             Ok(results
                 .into_iter()
@@ -978,18 +924,10 @@ pub async fn get_completion_schema(
     pools: State<'_, PoolManager>,
     connection_id: String,
     database: Option<String>,
-) -> Result<Vec<CompletionTable>, String> {
-    let base = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?
-        .pool
-        .clone();
-    let pool = match (&base, database.as_deref()) {
-        (DbPool::Postgres(_), Some(db)) => {
-            DbPool::Postgres(pools.pg_pool_for_database(&connection_id, db).await?)
-        }
-        _ => base,
+) -> Result<Vec<CompletionTable>, AppError> {
+    let pool = match database.as_deref() {
+        Some(db) => pools.pool_for(&connection_id, db).await?,
+        None => pools.pool(&connection_id)?,
     };
     match &pool {
         DbPool::MySQL(pool) => {
@@ -1017,7 +955,7 @@ pub async fn get_completion_schema(
             .bind(database.as_deref())
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("获取补全数据失败: {e}"))?;
+            .ctx("获取补全数据失败")?;
 
             let mut map: BTreeMap<(String, String), CompletionTable> = BTreeMap::new();
             for r in rows {
@@ -1051,12 +989,12 @@ pub async fn get_completion_schema(
             )
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("获取补全数据失败: {e}"))?;
+            .ctx("获取补全数据失败")?;
 
             let (current_db,): (String,) = sqlx::query_as("SELECT current_database()::text")
                 .fetch_one(pool)
                 .await
-                .map_err(|e| format!("查询当前数据库失败: {e}"))?;
+                .ctx("查询当前数据库失败")?;
 
             let mut map: BTreeMap<(String, String), CompletionTable> = BTreeMap::new();
             for r in rows {

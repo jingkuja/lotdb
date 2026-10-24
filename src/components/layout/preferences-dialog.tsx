@@ -37,7 +37,13 @@ const MAX_ROWS_OPTIONS: { value: number; label: string }[] = [
   { value: 0, label: "无限制" },
 ];
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-3">
       <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -48,7 +54,13 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
+function Row({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="flex items-center justify-between gap-4">
       <Label className="text-xs shrink-0">{label}</Label>
@@ -57,7 +69,10 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-export function PreferencesDialog({ open, onOpenChange }: PreferencesDialogProps) {
+export function PreferencesDialog({
+  open,
+  onOpenChange,
+}: PreferencesDialogProps) {
   const { prefs, setPref, reset } = usePreferencesStore();
 
   return (
@@ -74,7 +89,10 @@ export function PreferencesDialog({ open, onOpenChange }: PreferencesDialogProps
               <select
                 value={prefs.editorFontFamily}
                 onChange={(e) =>
-                  setPref("editorFontFamily", e.target.value as EditorFontFamily)
+                  setPref(
+                    "editorFontFamily",
+                    e.target.value as EditorFontFamily,
+                  )
                 }
                 className="rounded border border-border bg-background px-2 py-1 text-xs"
               >
@@ -143,7 +161,9 @@ export function PreferencesDialog({ open, onOpenChange }: PreferencesDialogProps
             <Row label="查询结果行数上限">
               <select
                 value={prefs.queryMaxRows}
-                onChange={(e) => setPref("queryMaxRows", Number(e.target.value))}
+                onChange={(e) =>
+                  setPref("queryMaxRows", Number(e.target.value))
+                }
                 className="rounded border border-border bg-background px-2 py-1 text-xs"
               >
                 {MAX_ROWS_OPTIONS.map((o) => (

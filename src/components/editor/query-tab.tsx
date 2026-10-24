@@ -172,11 +172,9 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
       sessionReady.current = true;
       setDatabase(nextDatabase);
       setSchema(nextSchema);
-      useWorkspaceStore
-        .getState()
-        .updateTab(tabId, {
-          metadata: { database: nextDatabase, schema: nextSchema },
-        });
+      useWorkspaceStore.getState().updateTab(tabId, {
+        metadata: { database: nextDatabase, schema: nextSchema },
+      });
       setResultState({ status: "idle" });
       setExplainResult(null);
       setTransaction("idle");
@@ -445,11 +443,14 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         analyze &&
         confirmDml &&
         needsWriteConfirmation(sql) &&
-        !(await confirmDialog("ANALYZE 将实际执行该 SQL，可能修改数据。确认执行？", {
-          title: "确认 EXPLAIN ANALYZE",
-          confirmLabel: "执行",
-          destructive: true,
-        }))
+        !(await confirmDialog(
+          "ANALYZE 将实际执行该 SQL，可能修改数据。确认执行？",
+          {
+            title: "确认 EXPLAIN ANALYZE",
+            confirmLabel: "执行",
+            destructive: true,
+          },
+        ))
       )
         return;
       if (currentExecutionRef.current) return;

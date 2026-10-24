@@ -25,14 +25,12 @@ import {
   ListOrdered,
   Shapes,
   ExternalLink,
+  Hash,
+  FileCode,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatabases, useSchemas, useObjects } from "@/hooks/use-schema";
-import {
-  useTriggers,
-  useSequences,
-  useEnums,
-} from "@/hooks/use-objects";
+import { useTriggers, useSequences, useEnums } from "@/hooks/use-objects";
 import { dropTrigger } from "@/services/tauri-commands";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { DatabaseType } from "@/types/database";
@@ -41,10 +39,12 @@ import { DataTransferDialog } from "@/components/transfer/data-transfer-dialog";
 import { BackupDialog } from "@/components/transfer/backup-dialog";
 import { RestoreDialog } from "@/components/transfer/restore-dialog";
 import { CreateDatabaseDialog } from "@/components/admin/create-database-dialog";
-import { dropDatabase } from "@/services/tauri-commands";
+import { dropDatabase, openConnection } from "@/services/tauri-commands";
+import { useConnectionStore } from "@/stores/connection-store";
 import { alertDialog, confirmDialog } from "@/stores/app-dialog-store";
 import { useQueryClient } from "@tanstack/react-query";
 import { useConnections } from "@/hooks/use-connections";
+import { formatDbError, isConnectionError } from "@/lib/error";
 
 // ─── TreeRow — generic row with indent, icon, label ──────────────
 
@@ -58,7 +58,6 @@ interface TreeRowProps {
   error?: boolean;
   active?: boolean;
   onClick?: () => void;
-  onDoubleClick?: () => void;
   children?: React.ReactNode;
 }
 
@@ -72,7 +71,6 @@ function TreeRow({
   error,
   active,
   onClick,
-  onDoubleClick,
   children,
 }: TreeRowProps) {
   return (
@@ -85,7 +83,6 @@ function TreeRow({
       )}
       style={{ paddingLeft: `${level * 14 + 4}px`, paddingRight: "4px" }}
       onClick={onClick}
-      onDoubleClick={onDoubleClick}
     >
       {/* Chevron */}
       <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
@@ -205,17 +202,29 @@ function ObjectLeaf({
     }
   };
 
+  // One click opens one tab. Tables and views open their data (views are
+  // selectable); other views of the object are explicit row actions.
   const handleClick = () => {
-    if (type === "table") openTab("table-data");
-    else if (type === "view") openTab("object-ddl");
-    else openTab("object-ddl"); // function → read-only DDL
+    if (type === "function") openTab("object-ddl");
+    else openTab("table-data");
   };
 
-  const handleDoubleClick = () => {
-    if (type === "table") openTab("table-structure");
-    else if (type === "view") openTab("table-data"); // views are selectable
-    else openTab("object-ddl");
-  };
+  const action = (
+    title: string,
+    tabType: Parameters<typeof openTab>[0],
+    icon: React.ReactNode,
+  ) => (
+    <button
+      className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        openTab(tabType);
+      }}
+    >
+      {icon}
+    </button>
+  );
 
   return (
     <TreeRow
@@ -224,20 +233,15 @@ function ObjectLeaf({
       label={name}
       expandable={false}
       onClick={handleClick}
-      onDoubleClick={handleDoubleClick}
     >
       {type === "table" && (
-        <button
-          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-          title="在设计器中编辑"
-          onClick={(e) => {
-            e.stopPropagation();
-            openTab("designer");
-          }}
-        >
-          <Pencil className="size-3" />
-        </button>
+        <>
+          {action("查看结构", "table-structure", <Hash className="size-3" />)}
+          {action("在设计器中编辑", "designer", <Pencil className="size-3" />)}
+        </>
       )}
+      {type === "view" &&
+        action("查看定义", "object-ddl", <FileCode className="size-3" />)}
     </TreeRow>
   );
 }
@@ -333,12 +337,11 @@ function TriggersCategory({
   schema,
 }: TriggersCategoryProps) {
   const [expanded, setExpanded] = useState(false);
-  const { data: triggers = [], isLoading, isError } = useTriggers(
-    connectionId,
-    database,
-    schema,
-    expanded,
-  );
+  const {
+    data: triggers = [],
+    isLoading,
+    isError,
+  } = useTriggers(connectionId, database, schema, expanded);
   const addTab = useWorkspaceStore((s) => s.addTab);
   const tabs = useWorkspaceStore((s) => s.tabs);
   const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
@@ -346,7 +349,9 @@ function TriggersCategory({
   const [deleting, setDeleting] = useState<string | null>(null);
 
   const openDdl = (name: string, table: string) => {
-    const id = [connectionId, database, schema, "trigger", name, "ddl"].join("/");
+    const id = [connectionId, database, schema, "trigger", name, "ddl"].join(
+      "/",
+    );
     const existing = tabs.find((t) => t.id === id);
     if (existing) {
       setActiveTab(id);
@@ -384,7 +389,7 @@ function TriggersCategory({
         queryKey: ["triggers", connectionId, database],
       });
     } catch (err) {
-      await alertDialog(String(err), { title: "删除失败" });
+      await alertDialog(formatDbError(err), { title: "删除失败" });
     } finally {
       setDeleting(null);
     }
@@ -477,18 +482,19 @@ function PgManagerCategory({
   useList,
 }: PgManagerCategoryProps) {
   const [expanded, setExpanded] = useState(false);
-  const { data: items = [], isLoading, isError } = useList(
-    connectionId,
-    database,
-    schema,
-    expanded,
-  );
+  const {
+    data: items = [],
+    isLoading,
+    isError,
+  } = useList(connectionId, database, schema, expanded);
   const addTab = useWorkspaceStore((s) => s.addTab);
   const tabs = useWorkspaceStore((s) => s.tabs);
   const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
 
   const openManager = () => {
-    const id = [connectionId, database, schema, managerKind, "manager"].join("/");
+    const id = [connectionId, database, schema, managerKind, "manager"].join(
+      "/",
+    );
     const existing = tabs.find((t) => t.id === id);
     if (existing) {
       setActiveTab(id);
@@ -535,7 +541,12 @@ function PgManagerCategory({
             error
           />
         ) : items.length === 0 ? (
-          <TreeRow level={level + 1} icon={icon} label="（无）" onClick={openManager} />
+          <TreeRow
+            level={level + 1}
+            icon={icon}
+            label="（无）"
+            onClick={openManager}
+          />
         ) : (
           items.map((item) => (
             <TreeRow
@@ -560,7 +571,12 @@ interface SchemaNodeProps {
   level: number;
 }
 
-function SchemaNode({ schema, database, connectionId, level }: SchemaNodeProps) {
+function SchemaNode({
+  schema,
+  database,
+  connectionId,
+  level,
+}: SchemaNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const { data, isLoading, isError } = useObjects(
     connectionId,
@@ -666,11 +682,14 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
   const handleDrop = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (
-      !(await confirmDialog(`确定要删除数据库 "${database}" 吗？此操作不可撤销！`, {
-        title: "删除数据库",
-        confirmLabel: "删除",
-        destructive: true,
-      }))
+      !(await confirmDialog(
+        `确定要删除数据库 "${database}" 吗？此操作不可撤销！`,
+        {
+          title: "删除数据库",
+          confirmLabel: "删除",
+          destructive: true,
+        },
+      ))
     )
       return;
     setDropping(true);
@@ -678,7 +697,7 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
       await dropDatabase(connectionId, database);
       queryClient.invalidateQueries({ queryKey: ["databases", connectionId] });
     } catch (err) {
-      await alertDialog(String(err), { title: "删除失败" });
+      await alertDialog(formatDbError(err), { title: "删除失败" });
     } finally {
       setDropping(false);
     }
@@ -699,14 +718,20 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
         <button
           className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
           title="备份数据库"
-          onClick={(e) => { e.stopPropagation(); setBackupOpen(true); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            setBackupOpen(true);
+          }}
         >
           <Archive className="size-3" />
         </button>
         <button
           className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
           title="恢复数据库"
-          onClick={(e) => { e.stopPropagation(); setRestoreOpen(true); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            setRestoreOpen(true);
+          }}
         >
           <ArchiveRestore className="size-3" />
         </button>
@@ -780,11 +805,11 @@ function PgDbNode({ database, connectionId, level }: PgDbNodeProps) {
   const [expanded, setExpanded] = useState(true);
   const [backupOpen, setBackupOpen] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
-  const { data: schemas = [], isLoading, isError } = useSchemas(
-    connectionId,
-    database,
-    expanded,
-  );
+  const {
+    data: schemas = [],
+    isLoading,
+    isError,
+  } = useSchemas(connectionId, database, expanded);
 
   return (
     <>
@@ -801,14 +826,20 @@ function PgDbNode({ database, connectionId, level }: PgDbNodeProps) {
         <button
           className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
           title="备份数据库"
-          onClick={(e) => { e.stopPropagation(); setBackupOpen(true); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            setBackupOpen(true);
+          }}
         >
           <Archive className="size-3" />
         </button>
         <button
           className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
           title="恢复数据库"
-          onClick={(e) => { e.stopPropagation(); setRestoreOpen(true); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            setRestoreOpen(true);
+          }}
         >
           <ArchiveRestore className="size-3" />
         </button>
@@ -847,7 +878,14 @@ interface ObjectTreeProps {
 }
 
 export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
-  const { data: databases = [], isLoading, isError } = useDatabases(connectionId);
+  const {
+    data: databases = [],
+    isLoading,
+    isError,
+    error,
+  } = useDatabases(connectionId);
+  const markPoolOpen = useConnectionStore((s) => s.markPoolOpen);
+  const [reconnecting, setReconnecting] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
   const queryClient = useQueryClient();
@@ -925,11 +963,45 @@ export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
     );
   }
 
+  // Rebuilds the pool (and SSH tunnel); every cached query of this
+  // connection is refetched against it.
+  const handleReconnect = async () => {
+    const conn = connections.find((c) => c.id === connectionId);
+    if (!conn) return;
+    setReconnecting(true);
+    try {
+      await openConnection(conn);
+      markPoolOpen(conn.id);
+      await queryClient.invalidateQueries({
+        predicate: (q) => q.queryKey[1] === connectionId,
+      });
+    } catch (e) {
+      await alertDialog(formatDbError(e), { title: "重新连接失败" });
+    } finally {
+      setReconnecting(false);
+    }
+  };
+
   if (isError) {
+    const lost = isConnectionError(error);
     return (
-      <div className="flex items-center gap-1.5 px-4 py-1.5 text-xs text-destructive">
-        <AlertCircle className="size-3" />
-        <span>加载失败</span>
+      <div className="flex flex-col gap-1 px-4 py-1.5 text-xs">
+        <div className="flex items-center gap-1.5 text-destructive">
+          <AlertCircle className="size-3" />
+          <span>{lost ? "连接已断开" : "加载失败"}</span>
+        </div>
+        <span className="break-all text-muted-foreground">
+          {formatDbError(error)}
+        </span>
+        {lost && (
+          <button
+            className="self-start rounded border border-sidebar-border px-1.5 py-0.5 hover:bg-sidebar-accent disabled:opacity-50"
+            disabled={reconnecting}
+            onClick={() => void handleReconnect()}
+          >
+            {reconnecting ? "正在重新连接…" : "重新连接"}
+          </button>
+        )}
       </div>
     );
   }
@@ -1014,7 +1086,9 @@ export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
         connectionId={connectionId}
         dbType={dbType}
         onSuccess={() =>
-          queryClient.invalidateQueries({ queryKey: ["databases", connectionId] })
+          queryClient.invalidateQueries({
+            queryKey: ["databases", connectionId],
+          })
         }
       />
 

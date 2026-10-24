@@ -57,10 +57,10 @@ function SnippetForm({
 }) {
   const [form, setForm] = useState(initial);
 
-
-  const set = (key: keyof FormState) => (
-    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
-  ) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const set =
+    (key: keyof FormState) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      setForm((f) => ({ ...f, [key]: e.target.value }));
 
   return (
     <div className="flex flex-col gap-3 p-4">
@@ -196,7 +196,9 @@ interface Props {
 }
 
 export function SnippetsDialog(props: Props) {
-  return props.open ? <SnippetsDialogBody key={String(props.createMode)} {...props} /> : null;
+  return props.open ? (
+    <SnippetsDialogBody key={String(props.createMode)} {...props} />
+  ) : null;
 }
 
 function SnippetsDialogBody({
@@ -237,7 +239,12 @@ function SnippetsDialogBody({
           sql: form.sql,
           description: form.description || undefined,
         },
-        { onSuccess: () => { setMode("list"); setEditingEntry(null); } },
+        {
+          onSuccess: () => {
+            setMode("list");
+            setEditingEntry(null);
+          },
+        },
       );
     }
   };
@@ -276,7 +283,10 @@ function SnippetsDialogBody({
           {mode !== "list" && (
             <button
               className="mr-2 rounded p-0.5 hover:bg-muted"
-              onClick={() => { setMode("list"); setEditingEntry(null); }}
+              onClick={() => {
+                setMode("list");
+                setEditingEntry(null);
+              }}
             >
               <ChevronLeft className="size-4" />
             </button>
@@ -327,7 +337,9 @@ function SnippetsDialogBody({
                 <div className="flex flex-col items-center gap-2 py-10 text-muted-foreground">
                   <Bookmark className="size-8 opacity-30" />
                   <p className="text-sm">
-                    {debouncedSearch ? "未找到匹配片段" : "暂无片段，点击「新建」添加"}
+                    {debouncedSearch
+                      ? "未找到匹配片段"
+                      : "暂无片段，点击「新建」添加"}
                   </p>
                 </div>
               )}
@@ -362,7 +374,10 @@ function SnippetsDialogBody({
               key={editingEntry?.id ?? mode}
               initial={formInitial}
               onSave={handleSave}
-              onCancel={() => { setMode("list"); setEditingEntry(null); }}
+              onCancel={() => {
+                setMode("list");
+                setEditingEntry(null);
+              }}
               saving={isSaving}
             />
           </ScrollArea>

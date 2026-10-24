@@ -149,6 +149,10 @@ pub async fn store_password_async(connection_id: String, password: String) -> Re
         .map_err(|e| format!("Keychain task failed: {e}"))?
 }
 
+pub async fn delete_password_async(connection_id: String) {
+    let _ = tokio::task::spawn_blocking(move || delete_password(&connection_id)).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::PasswordCache;

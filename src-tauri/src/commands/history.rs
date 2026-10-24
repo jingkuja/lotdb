@@ -1,8 +1,13 @@
+use crate::error::{local_store, AppError};
+use crate::utils::sql::redact_secrets;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tauri::State;
 
 type LocalDb = SqlitePool;
+
+/// Entries kept in total; older ones are pruned on every save.
+pub const HISTORY_LIMIT: i64 = 5000;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +23,8 @@ pub struct HistoryEntry {
     pub executed_at: String,
 }
 
-/// Persist a query execution to history.
+/// Persist a query execution to history. Password literals are masked first
+/// (see [`redact_secrets`]); the oldest entries beyond [`HISTORY_LIMIT`] go.
 #[tauri::command]
 pub async fn save_history(
     db: State<'_, LocalDb>,
@@ -29,7 +35,7 @@ pub async fn save_history(
     rows_affected: Option<i64>,
     execution_ms: Option<i64>,
     error_message: Option<String>,
-) -> Result<i64, String> {
+) -> Result<i64, AppError> {
     let result = sqlx::query(
         "INSERT INTO query_history \
          (connection_id, connection_name, sql, status, rows_affected, execution_ms, error_message) \
@@ -37,14 +43,23 @@ pub async fn save_history(
     )
     .bind(&connection_id)
     .bind(&connection_name)
-    .bind(&sql)
+    .bind(redact_secrets(&sql))
     .bind(&status)
     .bind(rows_affected)
     .bind(execution_ms)
-    .bind(&error_message)
+    .bind(error_message.as_deref().map(redact_secrets))
     .execute(db.inner())
     .await
-    .map_err(|e| format!("保存历史失败: {e}"))?;
+    .map_err(local_store("保存历史失败"))?;
+
+    sqlx::query(
+        "DELETE FROM query_history WHERE id <= \
+         (SELECT id FROM query_history ORDER BY id DESC LIMIT 1 OFFSET ?)",
+    )
+    .bind(HISTORY_LIMIT)
+    .execute(db.inner())
+    .await
+    .map_err(local_store("清理历史失败"))?;
 
     Ok(result.last_insert_rowid())
 }
@@ -55,39 +70,37 @@ pub async fn get_history(
     db: State<'_, LocalDb>,
     connection_id: Option<String>,
     limit: Option<i64>,
-) -> Result<Vec<HistoryEntry>, String> {
+) -> Result<Vec<HistoryEntry>, AppError> {
     let max = limit.unwrap_or(200);
 
     let rows = if let Some(conn_id) = connection_id {
         sqlx::query_as::<_, HistoryEntry>(
             "SELECT * FROM query_history WHERE connection_id = ? \
-             ORDER BY executed_at DESC LIMIT ?",
+             ORDER BY id DESC LIMIT ?",
         )
         .bind(conn_id)
         .bind(max)
         .fetch_all(db.inner())
         .await
     } else {
-        sqlx::query_as::<_, HistoryEntry>(
-            "SELECT * FROM query_history ORDER BY executed_at DESC LIMIT ?",
-        )
-        .bind(max)
-        .fetch_all(db.inner())
-        .await
+        sqlx::query_as::<_, HistoryEntry>("SELECT * FROM query_history ORDER BY id DESC LIMIT ?")
+            .bind(max)
+            .fetch_all(db.inner())
+            .await
     }
-    .map_err(|e| format!("查询历史失败: {e}"))?;
+    .map_err(local_store("查询历史失败"))?;
 
     Ok(rows)
 }
 
 /// Delete a single history entry by id.
 #[tauri::command]
-pub async fn delete_history(db: State<'_, LocalDb>, id: i64) -> Result<(), String> {
+pub async fn delete_history(db: State<'_, LocalDb>, id: i64) -> Result<(), AppError> {
     sqlx::query("DELETE FROM query_history WHERE id = ?")
         .bind(id)
         .execute(db.inner())
         .await
-        .map_err(|e| format!("删除历史失败: {e}"))?;
+        .map_err(local_store("删除历史失败"))?;
     Ok(())
 }
 
@@ -96,7 +109,7 @@ pub async fn delete_history(db: State<'_, LocalDb>, id: i64) -> Result<(), Strin
 pub async fn clear_history(
     db: State<'_, LocalDb>,
     connection_id: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     if let Some(conn_id) = connection_id {
         sqlx::query("DELETE FROM query_history WHERE connection_id = ?")
             .bind(conn_id)
@@ -107,7 +120,7 @@ pub async fn clear_history(
             .execute(db.inner())
             .await
     }
-    .map_err(|e| format!("清空历史失败: {e}"))?;
+    .map_err(local_store("清空历史失败"))?;
 
     Ok(())
 }

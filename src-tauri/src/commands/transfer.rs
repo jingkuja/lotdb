@@ -1,9 +1,11 @@
+use crate::db::dialect::Dialect;
 use crate::db::pool::{DbPool, PoolManager};
+use crate::error::{AppError, ResultExt};
 use dashmap::DashMap;
 use futures::{stream::BoxStream, StreamExt};
-use rust_xlsxwriter::{Color, Format, Workbook};
+use rust_xlsxwriter::{Color, Format, Workbook, Worksheet};
 use serde::{Deserialize, Serialize};
-use sqlx::{Column, Row};
+use sqlx::Row;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::{
@@ -63,35 +65,35 @@ struct BatchExportProgress {
 
 // ─── Value → export string helpers ───────────────────────────────
 
-/// Format a JSON value for CSV: wrap strings in quotes, numbers raw, null as empty.
+/// One CSV field. Strings are always quoted, so an empty string (`""`) stays
+/// distinct from NULL (an empty field); numbers and booleans are bare.
 fn csv_cell(v: &serde_json::Value) -> String {
+    let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     match v {
         serde_json::Value::Null => String::new(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            // RFC 4180: wrap in quotes, escape internal quotes by doubling
-            let escaped = s.replace('"', "\"\"");
-            format!("\"{escaped}\"")
-        }
-        other => {
-            let s = other.to_string();
-            let escaped = s.replace('"', "\"\"");
-            format!("\"{escaped}\"")
-        }
+        serde_json::Value::String(s) => quote(s),
+        other => quote(&other.to_string()),
     }
 }
 
+/// One CSV record (RFC 4180), the only CSV writer: table export, batch
+/// export and query-result export all go through it.
+fn csv_line<'a>(values: impl IntoIterator<Item = &'a serde_json::Value>) -> String {
+    values
+        .into_iter()
+        .map(csv_cell)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Format a JSON value for SQL INSERT: NULL, numbers raw, everything else quoted.
-fn sql_val(v: &serde_json::Value, mysql: bool) -> String {
+fn sql_val(v: &serde_json::Value, dialect: Dialect) -> String {
     if let Some(hex) = v.get("$lotdbBinary").and_then(|v| v.as_str()) {
         // Type tags only come from our row converter, or validated imports.
         if hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return if mysql {
-                format!("X'{hex}'")
-            } else {
-                format!("decode('{hex}', 'hex')")
-            };
+            return dialect.binary_literal(hex);
         }
     }
     match v {
@@ -104,12 +106,12 @@ fn sql_val(v: &serde_json::Value, mysql: bool) -> String {
             }
         }
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => crate::utils::sql::string_literal(s, mysql),
-        other => crate::utils::sql::string_literal(&other.to_string(), mysql),
+        serde_json::Value::String(s) => dialect.string_literal(s),
+        other => dialect.string_literal(&other.to_string()),
     }
 }
 
-fn import_literal(value: Option<&str>, binary: bool, boolean: bool, mysql: bool) -> String {
+fn import_literal(value: Option<&str>, binary: bool, boolean: bool, dialect: Dialect) -> String {
     let Some(s) = value else {
         return "NULL".into();
     };
@@ -123,15 +125,15 @@ fn import_literal(value: Option<&str>, binary: bool, boolean: bool, mysql: bool)
     }
     if binary {
         if let Some(hex) = s.strip_prefix("\\x") {
-            return sql_val(&serde_json::json!({"$lotdbBinary": hex}), mysql);
+            return sql_val(&serde_json::json!({"$lotdbBinary": hex}), dialect);
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
             if v.get("$lotdbBinary").is_some() {
-                return sql_val(&v, mysql);
+                return sql_val(&v, dialect);
             }
         }
     }
-    crate::utils::sql::string_literal(s, mysql)
+    dialect.string_literal(s)
 }
 
 struct ImportColumnKinds {
@@ -145,13 +147,13 @@ async fn import_column_kinds(
     database: &str,
     schema: Option<&str>,
     table: &str,
-) -> Result<ImportColumnKinds, String> {
+) -> Result<ImportColumnKinds, AppError> {
     let columns: Vec<(String, String)> = match pool {
         DbPool::MySQL(p) => sqlx::query_as("SELECT COLUMN_NAME, CAST(COLUMN_TYPE AS CHAR) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?")
             .bind(database).bind(table).fetch_all(p).await,
         DbPool::Postgres(p) => sqlx::query_as("SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2")
             .bind(schema.unwrap_or("public")).bind(table).fetch_all(p).await,
-    }.map_err(|e| format!("获取导入列类型失败: {e}"))?;
+    }.ctx("获取导入列类型失败")?;
     let mut kinds = ImportColumnKinds {
         all: columns.iter().map(|(name, _)| name.clone()).collect(),
         binary: Default::default(),
@@ -182,8 +184,8 @@ use crate::db::value::{mysql_export_value as mysql_val, pg_export_value as pg_va
 /// arrives in the server's own text form — PG enums, inet, ranges, geometry
 /// etc. all survive. `raw_sql` accepts multiple statements, so the raw WHERE
 /// fragment must not smuggle in a second one.
-fn ensure_single_statement(sql: &str, mysql: bool) -> Result<(), String> {
-    if crate::utils::sql::split_sql(sql, mysql)?.len() != 1 {
+fn ensure_single_statement(sql: &str, dialect: Dialect) -> Result<(), AppError> {
+    if crate::utils::sql::split_sql(sql, dialect.is_mysql())?.len() != 1 {
         return Err("筛选条件只能是单个 WHERE 表达式，不能包含多条语句".into());
     }
     Ok(())
@@ -192,108 +194,188 @@ fn ensure_single_statement(sql: &str, mysql: bool) -> Result<(), String> {
 fn row_values<R: Row>(
     row: &R,
     convert: impl Fn(&R, usize) -> Result<serde_json::Value, String>,
-) -> Result<Vec<serde_json::Value>, String> {
-    (0..row.columns().len()).map(|i| convert(row, i)).collect()
+) -> Result<Vec<serde_json::Value>, AppError> {
+    (0..row.columns().len())
+        .map(|i| convert(row, i).map_err(AppError::sql))
+        .collect()
 }
 
-/// Resolve the pool a data command must query through.
-/// MySQL: the main pool (the database is qualified inside the SQL).
-/// PostgreSQL: routed through `pg_pool_for_database` so the command runs in
-/// the database the user selected, not the connection's default database.
-async fn resolve_pool(
-    pools: &PoolManager,
-    connection_id: &str,
-    database: &str,
-) -> Result<DbPool, String> {
-    let entry = pools
-        .pools
-        .get(connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-    match &entry.pool {
-        DbPool::MySQL(p) => Ok(DbPool::MySQL(p.clone())),
-        DbPool::Postgres(_) => {
-            drop(entry);
-            Ok(DbPool::Postgres(
-                pools.pg_pool_for_database(connection_id, database).await?,
-            ))
-        }
+/// Rows of `sql` over the text protocol, as export values. The one place
+/// export and transfer read rows, whatever the database.
+fn text_rows<'a>(
+    pool: &'a DbPool,
+    sql: &'a str,
+) -> BoxStream<'a, Result<Vec<serde_json::Value>, AppError>> {
+    match pool {
+        DbPool::MySQL(p) => sqlx::raw_sql(sql)
+            .fetch(p)
+            .map(|r| {
+                r.ctx("查询失败")
+                    .and_then(|row| row_values(&row, mysql_val))
+            })
+            .boxed(),
+        DbPool::Postgres(p) => sqlx::raw_sql(sql)
+            .fetch(p)
+            .map(|r| r.ctx("查询失败").and_then(|row| row_values(&row, pg_val)))
+            .boxed(),
     }
 }
 
 // ─── File writers ─────────────────────────────────────────────────
 
-fn write_excel(
-    file_path: &str,
-    columns: &[String],
-    rows: &[Vec<serde_json::Value>],
-) -> Result<(), String> {
-    let mut workbook = Workbook::new();
-    let worksheet = workbook.add_worksheet();
+/// One export file. Rows are written as they arrive; only Excel keeps them
+/// in memory (rust_xlsxwriter assembles the workbook before saving).
+enum ExportWriter {
+    Csv(BufWriter<File>),
+    Json {
+        out: BufWriter<File>,
+        columns: Vec<String>,
+        first: bool,
+    },
+    SqlInsert {
+        out: BufWriter<File>,
+        prefix: String,
+        dialect: Dialect,
+    },
+    Excel {
+        path: String,
+        sheet: Box<Worksheet>,
+        row: u32,
+    },
+}
 
-    // Header style: bold + light blue background
-    let header_fmt = Format::new()
-        .set_bold()
-        .set_background_color(Color::RGB(0xD9E1F2))
-        .set_border(rust_xlsxwriter::FormatBorder::Thin);
-
-    // Write headers
-    for (col_idx, col_name) in columns.iter().enumerate() {
-        worksheet
-            .write_string_with_format(0, col_idx as u16, col_name, &header_fmt)
-            .map_err(|e| format!("写入标题失败: {e}"))?;
+impl ExportWriter {
+    /// `format`: "csv" (default) | "json" | "sql_insert" | "excel".
+    fn new(
+        format: &str,
+        file: File,
+        path: &str,
+        columns: &[String],
+        dialect: Dialect,
+        table_ref: &str,
+    ) -> Result<Self, AppError> {
+        let mut out = BufWriter::new(file);
+        Ok(match format {
+            "json" => {
+                write!(out, "[").ctx("写入失败")?;
+                ExportWriter::Json {
+                    out,
+                    columns: columns.to_vec(),
+                    first: true,
+                }
+            }
+            "sql_insert" => {
+                writeln!(out, "-- Generated by LotDB").ctx("写入失败")?;
+                let col_list = columns
+                    .iter()
+                    .map(|c| dialect.quote_ident(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ExportWriter::SqlInsert {
+                    out,
+                    prefix: format!("INSERT INTO {table_ref} ({col_list}) VALUES ("),
+                    dialect,
+                }
+            }
+            "excel" => {
+                drop(out);
+                let mut sheet = Worksheet::new();
+                // Header style: bold + light blue background
+                let header = Format::new()
+                    .set_bold()
+                    .set_background_color(Color::RGB(0xD9E1F2))
+                    .set_border(rust_xlsxwriter::FormatBorder::Thin);
+                for (i, name) in columns.iter().enumerate() {
+                    sheet
+                        .write_string_with_format(0, i as u16, name, &header)
+                        .ctx("写入标题失败")?;
+                    // Estimate: header length, within 12–40.
+                    let width = (name.len() as f64 + 2.0).clamp(12.0, 40.0);
+                    sheet
+                        .set_column_width(i as u16, width)
+                        .ctx("设置列宽失败")?;
+                }
+                sheet.set_freeze_panes(1, 0).ctx("冻结行失败")?;
+                ExportWriter::Excel {
+                    path: path.to_owned(),
+                    sheet: Box::new(sheet),
+                    row: 0,
+                }
+            }
+            _ => {
+                let header = columns.iter().map(|c| serde_json::Value::String(c.clone()));
+                writeln!(out, "{}", csv_line(&header.collect::<Vec<_>>())).ctx("写入失败")?;
+                ExportWriter::Csv(out)
+            }
+        })
     }
 
-    // Freeze header row
-    worksheet
-        .set_freeze_panes(1, 0)
-        .map_err(|e| format!("冻结行失败: {e}"))?;
-
-    // Write data rows
-    for (row_idx, row) in rows.iter().enumerate() {
-        let row_num = (row_idx + 1) as u32;
-        for (col_idx, val) in row.iter().enumerate() {
-            let col_num = col_idx as u16;
-            match val {
-                serde_json::Value::Null => {} // leave cell empty
-                serde_json::Value::Bool(b) => {
-                    worksheet
-                        .write_boolean(row_num, col_num, *b)
-                        .map_err(|e| format!("写入布尔失败: {e}"))?;
-                }
-                serde_json::Value::Number(n) => {
-                    if let Some(f) = n.as_f64() {
-                        worksheet
-                            .write_number(row_num, col_num, f)
-                            .map_err(|e| format!("写入数字失败: {e}"))?;
+    fn write_row(&mut self, values: &[serde_json::Value]) -> Result<(), AppError> {
+        match self {
+            ExportWriter::Csv(out) => writeln!(out, "{}", csv_line(values)).ctx("写入失败"),
+            ExportWriter::Json {
+                out,
+                columns,
+                first,
+            } => {
+                let obj: serde_json::Map<String, serde_json::Value> = columns
+                    .iter()
+                    .cloned()
+                    .zip(values.iter().cloned())
+                    .collect();
+                let s = serde_json::to_string(&obj).ctx("序列化失败")?;
+                let sep = if std::mem::take(first) { "" } else { "," };
+                write!(out, "{sep}\n  {s}").ctx("写入失败")
+            }
+            ExportWriter::SqlInsert {
+                out,
+                prefix,
+                dialect,
+            } => {
+                let vals = values
+                    .iter()
+                    .map(|v| sql_val(v, *dialect))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(out, "{prefix}{vals});").ctx("写入失败")
+            }
+            ExportWriter::Excel { sheet, row, .. } => {
+                *row += 1;
+                for (col, val) in values.iter().enumerate() {
+                    let col = col as u16;
+                    match val {
+                        serde_json::Value::Null => Ok(sheet.as_mut()), // leave cell empty
+                        serde_json::Value::Bool(b) => sheet.write_boolean(*row, col, *b),
+                        serde_json::Value::Number(n) => match n.as_f64() {
+                            Some(f) => sheet.write_number(*row, col, f),
+                            None => Ok(sheet.as_mut()),
+                        },
+                        serde_json::Value::String(s) => sheet.write_string(*row, col, s),
+                        other => sheet.write_string(*row, col, other.to_string()),
                     }
+                    .ctx("写入单元格失败")?;
                 }
-                serde_json::Value::String(s) => {
-                    worksheet
-                        .write_string(row_num, col_num, s)
-                        .map_err(|e| format!("写入字符串失败: {e}"))?;
-                }
-                other => {
-                    worksheet
-                        .write_string(row_num, col_num, other.to_string())
-                        .map_err(|e| format!("写入值失败: {e}"))?;
-                }
+                Ok(())
             }
         }
     }
 
-    // Auto-fit column widths (estimate: max of header length and 12)
-    for (col_idx, col_name) in columns.iter().enumerate() {
-        let width = (col_name.len() as f64 + 2.0).clamp(12.0, 40.0);
-        worksheet
-            .set_column_width(col_idx as u16, width)
-            .map_err(|e| format!("设置列宽失败: {e}"))?;
+    fn finish(self) -> Result<(), AppError> {
+        match self {
+            ExportWriter::Csv(mut out) | ExportWriter::SqlInsert { mut out, .. } => {
+                out.flush().ctx("刷新缓冲区失败")
+            }
+            ExportWriter::Json { mut out, .. } => {
+                writeln!(out, "\n]").ctx("写入失败")?;
+                out.flush().ctx("刷新缓冲区失败")
+            }
+            ExportWriter::Excel { path, sheet, .. } => {
+                let mut workbook = Workbook::new();
+                workbook.push_worksheet(*sheet);
+                workbook.save(&path).ctx("保存 Excel 文件失败")
+            }
+        }
     }
-
-    workbook
-        .save(file_path)
-        .map_err(|e| format!("保存 Excel 文件失败: {e}"))?;
-
-    Ok(())
 }
 
 // ─── Export command ───────────────────────────────────────────────
@@ -337,7 +419,7 @@ pub async fn export_table_data(
     where_clause: Option<String>,
     limit: u64,
     file_path: String,
-) -> Result<ExportResult, String> {
+) -> Result<ExportResult, AppError> {
     export_table_data_impl(
         Some(&app),
         &pools,
@@ -367,336 +449,53 @@ pub async fn export_table_data_impl(
     where_clause: Option<String>,
     limit: u64,
     file_path: String,
-) -> Result<ExportResult, String> {
+) -> Result<ExportResult, AppError> {
     // Route PG queries to the selected database (not the connection default).
-    let pool = resolve_pool(pools, &connection_id, &database).await?;
+    let pool = pools.pool_for(&connection_id, &database).await?;
+    let dialect = pool.dialect();
+    let table_ref = dialect.table_ref(&database, schema.as_deref(), &table);
+    let sql = build_select_sql(
+        &table_ref,
+        &dialect.column_list(&columns),
+        where_clause.as_deref(),
+        limit,
+    );
+    ensure_single_statement(&sql, dialect)?;
+    let col_names = pool.describe_columns(&sql).await.ctx("获取结果列失败")?;
 
-    // Excel needs all rows in memory (rust_xlsxwriter builds the file in-memory)
-    // Use fetch_all for excel; stream for everything else.
-    if format == "excel" {
-        let (col_names, rows) = fetch_all_as_json(
-            &pool,
-            &database,
-            schema.as_deref(),
-            &table,
-            &columns,
-            where_clause.as_deref(),
-            limit,
-        )
-        .await?;
-        write_excel(&file_path, &col_names, &rows)?;
-        return Ok(ExportResult {
-            rows_exported: rows.len() as u64,
-            file_path,
-        });
-    }
-
-    // Build SQL and open output file
-    let (table_ref, col_select, db_quote): (String, String, fn(&str) -> String) = match &pool {
-        DbPool::MySQL(_) => {
-            let tr = crate::utils::sql::qualified_mysql(&database, &table);
-            let cs = if columns.is_empty() {
-                "*".to_string()
-            } else {
-                columns
-                    .iter()
-                    .map(|c| crate::utils::sql::quote_ident_mysql(c))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            (tr, cs, |c| crate::utils::sql::quote_ident_mysql(c))
-        }
-        DbPool::Postgres(_) => {
-            let sn = schema.as_deref().unwrap_or("public");
-            let tr = crate::utils::sql::qualified_pg(sn, &table);
-            let cs = if columns.is_empty() {
-                "*".to_string()
-            } else {
-                columns
-                    .iter()
-                    .map(|c| crate::utils::sql::quote_ident_pg(c))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            (tr, cs, |c| crate::utils::sql::quote_ident_pg(c))
-        }
-    };
-
-    let sql = build_select_sql(&table_ref, &col_select, where_clause.as_deref(), limit);
-    ensure_single_statement(&sql, matches!(&pool, DbPool::MySQL(_)))?;
-
-    let file = File::create(&file_path).map_err(|e| format!("创建文件失败: {e}"))?;
-    let mut writer = BufWriter::new(file);
+    let file = File::create(&file_path).ctx("创建文件失败")?;
+    let mut writer = ExportWriter::new(&format, file, &file_path, &col_names, dialect, &table_ref)?;
 
     let start = Instant::now();
     let mut rows_exported: u64 = 0;
-    let mut col_names: Vec<String> = vec![];
-
-    macro_rules! emit_export_progress {
-        () => {
-            if rows_exported % 500 == 0 {
-                let elapsed = start.elapsed().as_secs_f64().max(0.001);
-                if let Some(app) = app {
-                    app.emit(
-                        "export-progress",
-                        ExportProgress {
-                            current: rows_exported,
-                            rows_per_sec: rows_exported as f64 / elapsed,
-                        },
-                    )
-                    .ok();
-                }
-            }
-        };
-    }
-
-    match format.as_str() {
-        "json" => {
-            write!(writer, "[").map_err(|e| format!("写入失败: {e}"))?;
-            match &pool {
-                DbPool::MySQL(pool) => {
-                    let mut stream = sqlx::raw_sql(&sql).fetch(pool);
-                    while let Some(row) = stream.next().await {
-                        let row = row.map_err(|e| format!("查询失败: {e}"))?;
-                        if col_names.is_empty() {
-                            col_names =
-                                row.columns().iter().map(|c| c.name().to_string()).collect();
-                        }
-                        let vals = row_values(&row, mysql_val)?;
-                        let obj: serde_json::Map<String, serde_json::Value> =
-                            col_names.iter().cloned().zip(vals).collect();
-                        if rows_exported > 0 {
-                            write!(writer, ",").map_err(|e| format!("写入失败: {e}"))?;
-                        }
-                        let s = serde_json::to_string(&serde_json::Value::Object(obj))
-                            .map_err(|e| format!("序列化失败: {e}"))?;
-                        write!(writer, "\n  {s}").map_err(|e| format!("写入失败: {e}"))?;
-                        rows_exported += 1;
-                        emit_export_progress!();
-                    }
-                }
-                DbPool::Postgres(pool) => {
-                    let mut stream = sqlx::raw_sql(&sql).fetch(pool);
-                    while let Some(row) = stream.next().await {
-                        let row = row.map_err(|e| format!("查询失败: {e}"))?;
-                        if col_names.is_empty() {
-                            col_names =
-                                row.columns().iter().map(|c| c.name().to_string()).collect();
-                        }
-                        let vals = row_values(&row, pg_val)?;
-                        let obj: serde_json::Map<String, serde_json::Value> =
-                            col_names.iter().cloned().zip(vals).collect();
-                        if rows_exported > 0 {
-                            write!(writer, ",").map_err(|e| format!("写入失败: {e}"))?;
-                        }
-                        let s = serde_json::to_string(&serde_json::Value::Object(obj))
-                            .map_err(|e| format!("序列化失败: {e}"))?;
-                        write!(writer, "\n  {s}").map_err(|e| format!("写入失败: {e}"))?;
-                        rows_exported += 1;
-                        emit_export_progress!();
-                    }
-                }
-            }
-            writeln!(writer, "\n]").map_err(|e| format!("写入失败: {e}"))?;
+    let emit = |current: u64| {
+        if let Some(app) = app {
+            let elapsed = start.elapsed().as_secs_f64().max(0.001);
+            app.emit(
+                "export-progress",
+                ExportProgress {
+                    current,
+                    rows_per_sec: current as f64 / elapsed,
+                },
+            )
+            .ok();
         }
-        "sql_insert" => {
-            writeln!(writer, "-- Generated by LotDB").map_err(|e| format!("写入失败: {e}"))?;
-            match &pool {
-                DbPool::MySQL(pool) => {
-                    let mut stream = sqlx::raw_sql(&sql).fetch(pool);
-                    while let Some(row) = stream.next().await {
-                        let row = row.map_err(|e| format!("查询失败: {e}"))?;
-                        if col_names.is_empty() {
-                            col_names =
-                                row.columns().iter().map(|c| c.name().to_string()).collect();
-                        }
-                        let vals = row_values(&row, mysql_val)?;
-                        let col_list = col_names
-                            .iter()
-                            .map(|c| db_quote(c))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let val_list = vals
-                            .iter()
-                            .map(|v| sql_val(v, true))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        writeln!(
-                            writer,
-                            "INSERT INTO {table_ref} ({col_list}) VALUES ({val_list});"
-                        )
-                        .map_err(|e| format!("写入失败: {e}"))?;
-                        rows_exported += 1;
-                        emit_export_progress!();
-                    }
-                }
-                DbPool::Postgres(pool) => {
-                    let mut stream = sqlx::raw_sql(&sql).fetch(pool);
-                    while let Some(row) = stream.next().await {
-                        let row = row.map_err(|e| format!("查询失败: {e}"))?;
-                        if col_names.is_empty() {
-                            col_names =
-                                row.columns().iter().map(|c| c.name().to_string()).collect();
-                        }
-                        let vals = row_values(&row, pg_val)?;
-                        let col_list = col_names
-                            .iter()
-                            .map(|c| db_quote(c))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let val_list = vals
-                            .iter()
-                            .map(|v| sql_val(v, false))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        writeln!(
-                            writer,
-                            "INSERT INTO {table_ref} ({col_list}) VALUES ({val_list});"
-                        )
-                        .map_err(|e| format!("写入失败: {e}"))?;
-                        rows_exported += 1;
-                        emit_export_progress!();
-                    }
-                }
-            }
-        }
-        _ => {
-            // CSV (default)
-            match &pool {
-                DbPool::MySQL(pool) => {
-                    let mut stream = sqlx::raw_sql(&sql).fetch(pool);
-                    while let Some(row) = stream.next().await {
-                        let row = row.map_err(|e| format!("查询失败: {e}"))?;
-                        if col_names.is_empty() {
-                            col_names =
-                                row.columns().iter().map(|c| c.name().to_string()).collect();
-                            writeln!(writer, "{}", col_names.join(","))
-                                .map_err(|e| format!("写入失败: {e}"))?;
-                        }
-                        let vals: Vec<String> =
-                            row_values(&row, mysql_val)?.iter().map(csv_cell).collect();
-                        writeln!(writer, "{}", vals.join(","))
-                            .map_err(|e| format!("写入失败: {e}"))?;
-                        rows_exported += 1;
-                        emit_export_progress!();
-                    }
-                }
-                DbPool::Postgres(pool) => {
-                    let mut stream = sqlx::raw_sql(&sql).fetch(pool);
-                    while let Some(row) = stream.next().await {
-                        let row = row.map_err(|e| format!("查询失败: {e}"))?;
-                        if col_names.is_empty() {
-                            col_names =
-                                row.columns().iter().map(|c| c.name().to_string()).collect();
-                            writeln!(writer, "{}", col_names.join(","))
-                                .map_err(|e| format!("写入失败: {e}"))?;
-                        }
-                        let vals: Vec<String> =
-                            row_values(&row, pg_val)?.iter().map(csv_cell).collect();
-                        writeln!(writer, "{}", vals.join(","))
-                            .map_err(|e| format!("写入失败: {e}"))?;
-                        rows_exported += 1;
-                        emit_export_progress!();
-                    }
-                }
-            }
+    };
+    let mut rows = text_rows(&pool, &sql);
+    while let Some(values) = rows.next().await {
+        writer.write_row(&values?)?;
+        rows_exported += 1;
+        if rows_exported.is_multiple_of(500) {
+            emit(rows_exported);
         }
     }
-
-    writer.flush().map_err(|e| format!("刷新缓冲区失败: {e}"))?;
-
-    // Final progress event
-    if let Some(app) = app {
-        app.emit(
-            "export-progress",
-            ExportProgress {
-                current: rows_exported,
-                rows_per_sec: rows_exported as f64 / start.elapsed().as_secs_f64().max(0.001),
-            },
-        )
-        .ok();
-    }
+    writer.finish()?;
+    emit(rows_exported);
 
     Ok(ExportResult {
         rows_exported,
         file_path,
     })
-}
-
-// Helper: fetch all rows as JSON values (used for Excel which can't stream)
-async fn fetch_all_as_json(
-    pool: &DbPool,
-    database: &str,
-    schema: Option<&str>,
-    table: &str,
-    columns: &[String],
-    where_clause: Option<&str>,
-    limit: u64,
-) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), String> {
-    let (q_table, col_select) = match pool {
-        DbPool::MySQL(_) => {
-            let tr = crate::utils::sql::qualified_mysql(database, table);
-            let cs = if columns.is_empty() {
-                "*".to_string()
-            } else {
-                columns
-                    .iter()
-                    .map(|c| crate::utils::sql::quote_ident_mysql(c))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            (tr, cs)
-        }
-        DbPool::Postgres(_) => {
-            let sn = schema.unwrap_or("public");
-            let tr = crate::utils::sql::qualified_pg(sn, table);
-            let cs = if columns.is_empty() {
-                "*".to_string()
-            } else {
-                columns
-                    .iter()
-                    .map(|c| crate::utils::sql::quote_ident_pg(c))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            (tr, cs)
-        }
-    };
-    let sql = build_select_sql(&q_table, &col_select, where_clause, limit);
-    ensure_single_statement(&sql, matches!(pool, DbPool::MySQL(_)))?;
-
-    match pool {
-        DbPool::MySQL(p) => {
-            let db_rows = sqlx::raw_sql(&sql)
-                .fetch_all(p)
-                .await
-                .map_err(|e| format!("查询失败: {e}"))?;
-            let col_names = db_rows
-                .first()
-                .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-                .unwrap_or_default();
-            let rows = db_rows
-                .iter()
-                .map(|r| row_values(r, mysql_val))
-                .collect::<Result<_, _>>()?;
-            Ok((col_names, rows))
-        }
-        DbPool::Postgres(p) => {
-            let db_rows = sqlx::raw_sql(&sql)
-                .fetch_all(p)
-                .await
-                .map_err(|e| format!("查询失败: {e}"))?;
-            let col_names = db_rows
-                .first()
-                .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-                .unwrap_or_default();
-            let rows = db_rows
-                .iter()
-                .map(|r| row_values(r, pg_val))
-                .collect::<Result<_, _>>()?;
-            Ok((col_names, rows))
-        }
-    }
 }
 
 // ─── Batch export ─────────────────────────────────────────────────
@@ -736,7 +535,7 @@ pub async fn batch_export_tables(
     format: String,
     limit: u64,
     output_dir: String,
-) -> Result<Vec<TableExportStatus>, String> {
+) -> Result<Vec<TableExportStatus>, AppError> {
     let ext = ext_for_format(&format);
     let total_tables = tables.len();
     let mut results: Vec<TableExportStatus> = Vec::new();
@@ -797,11 +596,11 @@ pub async fn preview_import_file(
     format: String,
     has_header: bool,
     preview_rows: usize,
-) -> Result<FilePreview, String> {
+) -> Result<FilePreview, AppError> {
     let (columns, mut rows): (Vec<String>, Vec<Vec<Option<String>>>) = match format.as_str() {
         "csv" => parse_csv(&file_path, has_header)?,
         "json" => parse_json(&file_path)?,
-        _ => return Err("SQL 文件无需预览".to_string()),
+        _ => return Err("SQL 文件无需预览".into()),
     };
     rows.truncate(preview_rows);
     Ok(FilePreview { columns, rows })
@@ -832,7 +631,7 @@ pub async fn import_table_data(
     has_header: bool,
     truncate_first: bool,
     column_mapping: Vec<Option<String>>,
-) -> Result<ImportResult, String> {
+) -> Result<ImportResult, AppError> {
     let import_id = import_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let control = registry.register(&import_id)?;
     let result = import_impl(
@@ -867,7 +666,7 @@ pub async fn import_table_data_impl(
     has_header: bool,
     truncate_first: bool,
     column_mapping: Vec<Option<String>>,
-) -> Result<ImportResult, String> {
+) -> Result<ImportResult, AppError> {
     import_impl(
         app,
         pools,
@@ -899,34 +698,25 @@ async fn import_impl(
     truncate_first: bool,
     column_mapping: Vec<Option<String>>,
     control: &TransferControl,
-) -> Result<ImportResult, String> {
+) -> Result<ImportResult, AppError> {
     pools.ensure_writable(&connection_id)?;
     // Route PG queries to the selected database (not the connection default).
-    let pool = resolve_pool(pools, &connection_id, &database).await?;
+    let pool = pools.pool_for(&connection_id, &database).await?;
+    let dialect = pool.dialect();
 
     // ── SQL: execute statements directly ──────────────────────────
     if format == "sql" {
-        let content =
-            std::fs::read_to_string(&file_path).map_err(|e| format!("读取文件失败: {e}"))?;
-
-        let stmts = crate::utils::sql::split_sql(&content, matches!(&pool, DbPool::MySQL(_)))?;
-        let mut mysql_conn = if let DbPool::MySQL(p) = &pool {
-            let mut conn = p.acquire().await.map_err(|e| e.to_string())?.detach();
-            sqlx::Executor::execute(
-                &mut conn,
-                format!("USE {}", crate::utils::sql::quote_ident_mysql(&database)).as_str(),
-            )
+        let content = tokio::fs::read_to_string(&file_path)
             .await
-            .map_err(|e| e.to_string())?;
-            Some(conn)
-        } else {
-            None
-        };
-        let mut pg_conn = if let DbPool::Postgres(p) = &pool {
-            Some(p.acquire().await.map_err(|e| e.to_string())?.detach())
-        } else {
-            None
-        };
+            .ctx("读取文件失败")?;
+
+        let stmts = crate::utils::sql::split_sql(&content, dialect.is_mysql())?;
+        let mut conn = ImportConn::acquire(&pool).await?;
+        if dialect.is_mysql() {
+            conn.exec(&format!("USE {}", dialect.quote_ident(&database)))
+                .await
+                .ctx("切换数据库失败")?;
+        }
         if truncate_first {
             run_truncate(&pool, &database, schema.as_deref(), &table).await?;
         }
@@ -942,16 +732,7 @@ async fn import_impl(
                 first_error = Some(format!("已取消：已执行 {idx} / {total} 条语句"));
                 break;
             }
-            let res = if let Some(conn) = &mut mysql_conn {
-                sqlx::Executor::execute(&mut *conn, stmt.as_str())
-                    .await
-                    .map(|r| r.rows_affected())
-            } else {
-                sqlx::Executor::execute(pg_conn.as_mut().unwrap(), stmt.as_str())
-                    .await
-                    .map(|r| r.rows_affected())
-            };
-            match res {
+            match conn.exec(stmt).await {
                 Ok(n) => rows_imported += n,
                 Err(e) => {
                     rows_failed += 1;
@@ -984,6 +765,7 @@ async fn import_impl(
             }
         }
 
+        conn.close().await;
         let error_message = match first_error {
             Some(e) if rows_failed > 0 => Some(format!("{rows_failed} 条语句失败: {e}")),
             other => other,
@@ -995,7 +777,6 @@ async fn import_impl(
         });
     }
 
-    let mysql = matches!(&pool, DbPool::MySQL(_));
     let (col_names, rows, total): (Vec<String>, ImportRowIter, u64) = match format.as_str() {
         // JSON arrays aren't streamable; parse into memory.
         "json" => {
@@ -1004,7 +785,7 @@ async fn import_impl(
             (cols, Box::new(rows.into_iter().map(Ok)), total)
         }
         "csv" => open_csv_rows(&file_path, has_header)?,
-        _ => return Err(format!("不支持的格式: {format}")),
+        _ => return Err(format!("不支持的格式: {format}").into()),
     };
     if total == 0 {
         return Ok(ImportResult {
@@ -1026,33 +807,27 @@ async fn import_impl(
     for (index, target) in effective_mapping.into_iter().enumerate() {
         let Some(target) = target else { continue };
         if !column_kinds.all.contains(&target) {
-            return Err(format!("目标表 {table} 中没有列 {target}"));
+            return Err(format!("目标表 {table} 中没有列 {target}").into());
         }
         if !seen.insert(target.clone()) {
-            return Err(format!("目标列 {target} 重复映射"));
+            return Err(format!("目标列 {target} 重复映射").into());
         }
         mapped.push((index, target));
     }
     if mapped.is_empty() {
-        return Err("至少需要映射一列".to_string());
+        return Err("至少需要映射一列".into());
     }
 
-    let table_ref = table_ref(&pool, &database, schema.as_deref(), &table);
+    let table_ref = dialect.table_ref(&database, schema.as_deref(), &table);
     let col_list = mapped
         .iter()
-        .map(|(_, c)| {
-            if mysql {
-                crate::utils::sql::quote_ident_mysql(c)
-            } else {
-                crate::utils::sql::quote_ident_pg(c)
-            }
-        })
+        .map(|(_, c)| dialect.quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
     let formatter = ImportRowFormatter {
         mapped,
         kinds: column_kinds,
-        mysql,
+        dialect,
     };
 
     let mut conn = ImportConn::acquire(&pool).await?;
@@ -1060,7 +835,7 @@ async fn import_impl(
         app,
         &mut conn,
         &format!("INSERT INTO {table_ref} ({col_list}) VALUES "),
-        truncate_first.then(|| clear_table_sql(mysql, &table_ref)),
+        truncate_first.then(|| dialect.clear_table_sql(&table_ref)),
         rows,
         total,
         &formatter,
@@ -1076,7 +851,7 @@ struct ImportRowFormatter {
     /// (source column index, target column name)
     mapped: Vec<(usize, String)>,
     kinds: ImportColumnKinds,
-    mysql: bool,
+    dialect: Dialect,
 }
 
 impl ImportRowFormatter {
@@ -1089,7 +864,7 @@ impl ImportRowFormatter {
                     row.get(*src_idx).and_then(|o| o.as_deref()),
                     self.kinds.binary.contains(target),
                     self.kinds.boolean.contains(target),
-                    self.mysql,
+                    self.dialect,
                 )
             })
             .collect::<Vec<_>>()
@@ -1098,26 +873,26 @@ impl ImportRowFormatter {
     }
 }
 
-type ImportRowIter = Box<dyn Iterator<Item = Result<Vec<Option<String>>, String>> + Send>;
+type ImportRowIter = Box<dyn Iterator<Item = Result<Vec<Option<String>>, AppError>> + Send>;
 
 /// Stream CSV records from disk. A first pass counts rows for progress.
 fn open_csv_rows(
     file_path: &str,
     has_header: bool,
-) -> Result<(Vec<String>, ImportRowIter, u64), String> {
+) -> Result<(Vec<String>, ImportRowIter, u64), AppError> {
     let reader = || {
         csv::ReaderBuilder::new()
             .has_headers(has_header)
             .flexible(true)
             .from_path(file_path)
-            .map_err(|e| format!("CSV 读取失败: {e}"))
+            .ctx("CSV 读取失败")
     };
     let mut counter = reader()?;
     let total = counter.records().count() as u64;
     let mut rdr = reader()?;
     let col_names: Vec<String> = if has_header {
         rdr.headers()
-            .map_err(|e| format!("读取标题失败: {e}"))?
+            .ctx("读取标题失败")?
             .iter()
             .map(|s| s.to_string())
             .collect()
@@ -1133,17 +908,17 @@ fn open_csv_rows(
                     .map(|s| (!s.is_empty()).then(|| s.to_string()))
                     .collect()
             })
-            .map_err(|e| format!("CSV 行解析失败: {e}"))
+            .ctx("CSV 行解析失败")
     });
     Ok((col_names, Box::new(rows), total))
 }
 
-fn first_record_width(mut rdr: csv::Reader<File>) -> Result<usize, String> {
+fn first_record_width(mut rdr: csv::Reader<File>) -> Result<usize, AppError> {
     Ok(rdr
         .records()
         .next()
         .transpose()
-        .map_err(|e| format!("CSV 行解析失败: {e}"))?
+        .ctx("CSV 行解析失败")?
         .map_or(0, |r| r.len()))
 }
 
@@ -1169,14 +944,13 @@ async fn insert_import_rows(
     total: u64,
     formatter: &ImportRowFormatter,
     control: &TransferControl,
-) -> Result<ImportResult, String> {
+) -> Result<ImportResult, AppError> {
     let atomic = clear_sql.is_some();
-    let db_err = |e: sqlx::Error| e.to_string();
     if let Some(clear_sql) = clear_sql {
-        conn.exec("BEGIN").await.map_err(db_err)?;
+        conn.exec("BEGIN").await.ctx("开启事务失败")?;
         if let Err(e) = conn.exec(&clear_sql).await {
             conn.rollback().await;
-            return Err(format!("清空表失败: {e}"));
+            return Err(AppError::from_sqlx("清空表失败", e));
         }
     }
 
@@ -1219,7 +993,7 @@ async fn insert_import_rows(
         }
         if let Some(e) = parse_error {
             conn.rollback().await;
-            return Err(format!("第 {line} 行：{e}。已回滚，表数据未改动"));
+            return Err(format!("第 {line} 行：{e}。已回滚，表数据未改动").into());
         }
         if batch.is_empty() {
             break;
@@ -1229,8 +1003,9 @@ async fn insert_import_rows(
         if atomic {
             if let Err(e) = conn.exec(&sql).await {
                 conn.rollback().await;
-                return Err(format!(
-                    "第 {batch_start}–{line} 行导入失败：{e}。已回滚，表数据未改动"
+                return Err(AppError::from_sqlx(
+                    &format!("第 {batch_start}–{line} 行导入失败（已回滚，表数据未改动）"),
+                    e,
                 ));
             }
             rows_imported += batch.len() as u64;
@@ -1278,7 +1053,7 @@ async fn insert_import_rows(
             conn.rollback().await;
             return Err("已取消，已回滚，表数据未改动".into());
         }
-        conn.exec("COMMIT").await.map_err(db_err)?;
+        conn.exec("COMMIT").await.ctx("提交事务失败")?;
     }
     let error_message = if cancelled {
         Some(format!("已取消：已导入 {rows_imported} 行，其余未导入"))
@@ -1301,14 +1076,10 @@ enum ImportConn {
 }
 
 impl ImportConn {
-    async fn acquire(pool: &DbPool) -> Result<Self, String> {
+    async fn acquire(pool: &DbPool) -> Result<Self, AppError> {
         Ok(match pool {
-            DbPool::MySQL(p) => {
-                ImportConn::MySql(p.acquire().await.map_err(|e| e.to_string())?.detach())
-            }
-            DbPool::Postgres(p) => {
-                ImportConn::Pg(p.acquire().await.map_err(|e| e.to_string())?.detach())
-            }
+            DbPool::MySQL(p) => ImportConn::MySql(p.acquire().await.ctx("获取连接失败")?.detach()),
+            DbPool::Postgres(p) => ImportConn::Pg(p.acquire().await.ctx("获取连接失败")?.detach()),
         })
     }
 
@@ -1359,58 +1130,27 @@ async fn run_truncate(
     database: &str,
     schema: Option<&str>,
     table: &str,
-) -> Result<(), String> {
-    let sql = format!(
-        "TRUNCATE TABLE {}",
-        table_ref(pool, database, schema, table)
-    );
-    match pool {
-        DbPool::MySQL(p) => {
-            sqlx::query(&sql)
-                .execute(p)
-                .await
-                .map_err(|e| format!("清空表失败: {e}"))?;
-        }
-        DbPool::Postgres(p) => {
-            sqlx::query(&sql)
-                .execute(p)
-                .await
-                .map_err(|e| format!("清空表失败: {e}"))?;
-        }
-    }
+) -> Result<(), AppError> {
+    let table_ref = pool.dialect().table_ref(database, schema, table);
+    pool.execute(&format!("TRUNCATE TABLE {table_ref}"))
+        .await
+        .ctx("清空表失败")?;
     Ok(())
-}
-
-fn table_ref(pool: &DbPool, database: &str, schema: Option<&str>, table: &str) -> String {
-    match pool {
-        DbPool::MySQL(_) => crate::utils::sql::qualified_mysql(database, table),
-        DbPool::Postgres(_) => crate::utils::sql::qualified_pg(schema.unwrap_or("public"), table),
-    }
-}
-
-/// Empties a table inside a transaction. MySQL's TRUNCATE commits implicitly,
-/// so it has to be DELETE there; PostgreSQL's TRUNCATE is transactional.
-fn clear_table_sql(mysql: bool, table_ref: &str) -> String {
-    if mysql {
-        format!("DELETE FROM {table_ref}")
-    } else {
-        format!("TRUNCATE TABLE {table_ref}")
-    }
 }
 
 /// Parsed import file: (columns, rows of optional cell strings)
 type ParsedTable = (Vec<String>, Vec<Vec<Option<String>>>);
 
-fn parse_csv(file_path: &str, has_header: bool) -> Result<ParsedTable, String> {
+fn parse_csv(file_path: &str, has_header: bool) -> Result<ParsedTable, AppError> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(has_header)
         .flexible(true)
         .from_path(file_path)
-        .map_err(|e| format!("CSV 读取失败: {e}"))?;
+        .ctx("CSV 读取失败")?;
 
     let col_names: Vec<String> = if has_header {
         rdr.headers()
-            .map_err(|e| format!("读取标题失败: {e}"))?
+            .ctx("读取标题失败")?
             .iter()
             .map(|s| s.to_string())
             .collect()
@@ -1420,7 +1160,7 @@ fn parse_csv(file_path: &str, has_header: bool) -> Result<ParsedTable, String> {
 
     let mut records: Vec<csv::StringRecord> = Vec::new();
     for res in rdr.records() {
-        records.push(res.map_err(|e| format!("CSV 行解析失败: {e}"))?);
+        records.push(res.ctx("CSV 行解析失败")?);
     }
 
     if records.is_empty() {
@@ -1503,7 +1243,7 @@ pub async fn transfer_table_data(
     truncate_first: bool,
     where_clause: Option<String>,
     limit: u64,
-) -> Result<TransferResult, String> {
+) -> Result<TransferResult, AppError> {
     let transfer_id = transfer_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let control = registry.register(&transfer_id)?;
     let result = transfer_stream_impl(
@@ -1545,7 +1285,7 @@ pub async fn transfer_table_data_impl(
     truncate_first: bool,
     where_clause: Option<String>,
     limit: u64,
-) -> Result<TransferResult, String> {
+) -> Result<TransferResult, AppError> {
     transfer_stream_impl(
         app,
         pools,
@@ -1578,7 +1318,7 @@ pub struct TransferRegistry(DashMap<String, Arc<TransferControl>>);
 impl TransferRegistry {
     /// Claim `id` for a running task. A cancel that arrived before the task
     /// started has already created the entry; the task picks it up.
-    pub(crate) fn register(&self, id: &str) -> Result<Arc<TransferControl>, String> {
+    pub(crate) fn register(&self, id: &str) -> Result<Arc<TransferControl>, AppError> {
         match self.0.entry(id.to_owned()) {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 let control = Arc::new(TransferControl::default());
@@ -1626,7 +1366,7 @@ async fn transfer_stream_impl(
     limit: u64,
     transfer_id: &str,
     control: &TransferControl,
-) -> Result<TransferResult, String> {
+) -> Result<TransferResult, AppError> {
     pools.ensure_writable(&tgt_connection_id)?;
     if src_connection_id == tgt_connection_id
         && src_database == tgt_database
@@ -1635,46 +1375,17 @@ async fn transfer_stream_impl(
     {
         return Err("不能将表传输到自身".into());
     }
-    let src_pool = resolve_pool(pools, &src_connection_id, &src_database).await?;
-    let tgt_pool = resolve_pool(pools, &tgt_connection_id, &tgt_database).await?;
-    let mysql_src = matches!(src_pool, DbPool::MySQL(_));
-    let mysql_tgt = matches!(tgt_pool, DbPool::MySQL(_));
-    let source = if mysql_src {
-        crate::utils::sql::qualified_mysql(&src_database, &src_table)
-    } else {
-        format!(
-            "{}.{}",
-            crate::utils::sql::quote_ident_pg(src_schema.as_deref().unwrap_or("public")),
-            crate::utils::sql::quote_ident_pg(&src_table)
-        )
-    };
-    let target = if mysql_tgt {
-        crate::utils::sql::qualified_mysql(&tgt_database, &tgt_table)
-    } else {
-        format!(
-            "{}.{}",
-            crate::utils::sql::quote_ident_pg(tgt_schema.as_deref().unwrap_or("public")),
-            crate::utils::sql::quote_ident_pg(&tgt_table)
-        )
-    };
+    let src_pool = pools.pool_for(&src_connection_id, &src_database).await?;
+    let tgt_pool = pools.pool_for(&tgt_connection_id, &tgt_database).await?;
+    let (src_dialect, tgt_dialect) = (src_pool.dialect(), tgt_pool.dialect());
+    let source = src_dialect.table_ref(&src_database, src_schema.as_deref(), &src_table);
+    let target = tgt_dialect.table_ref(&tgt_database, tgt_schema.as_deref(), &tgt_table);
     let sql = build_select_sql(&source, "*", where_clause.as_deref(), limit);
-    ensure_single_statement(&sql, mysql_src)?;
-    let columns: Vec<String> = match &src_pool {
-        DbPool::MySQL(p) => sqlx::Executor::describe(p, &sql)
-            .await
-            .map_err(|e| e.to_string())?
-            .columns()
-            .iter()
-            .map(|c| c.name().to_owned())
-            .collect(),
-        DbPool::Postgres(p) => sqlx::Executor::describe(p, &sql)
-            .await
-            .map_err(|e| e.to_string())?
-            .columns()
-            .iter()
-            .map(|c| c.name().to_owned())
-            .collect(),
-    };
+    ensure_single_statement(&sql, src_dialect)?;
+    let columns = src_pool
+        .describe_columns(&sql)
+        .await
+        .ctx("获取源表列失败")?;
     let mapping = if column_mapping.is_empty() {
         columns
             .iter()
@@ -1692,9 +1403,9 @@ async fn transfer_stream_impl(
         let index = columns
             .iter()
             .position(|c| c == &item.src)
-            .ok_or_else(|| format!("找不到源列 {}", item.src))?;
+            .ok_or_else(|| AppError::sql(format!("找不到源列 {}", item.src)))?;
         if !seen.insert(item.tgt.clone()) {
-            return Err(format!("目标列 {} 重复映射", item.tgt));
+            return Err(format!("目标列 {} 重复映射", item.tgt).into());
         }
         mapped.push((index, item.tgt));
     }
@@ -1703,13 +1414,7 @@ async fn transfer_stream_impl(
     }
     let col_list = mapped
         .iter()
-        .map(|(_, col)| {
-            if mysql_tgt {
-                crate::utils::sql::quote_ident_mysql(col)
-            } else {
-                crate::utils::sql::quote_ident_pg(col)
-            }
-        })
+        .map(|(_, col)| tgt_dialect.quote_ident(col))
         .collect::<Vec<_>>()
         .join(", ");
     let prefix = format!("INSERT INTO {target} ({col_list}) VALUES ");
@@ -1723,22 +1428,7 @@ async fn transfer_stream_impl(
     if truncate_first {
         run_truncate(&tgt_pool, &tgt_database, tgt_schema.as_deref(), &tgt_table).await?;
     }
-    let mut stream: BoxStream<'_, Result<Vec<serde_json::Value>, String>> = match &src_pool {
-        DbPool::MySQL(p) => sqlx::raw_sql(&sql)
-            .fetch(p)
-            .map(|r| {
-                r.map_err(|e| e.to_string())
-                    .and_then(|row| row_values(&row, mysql_val))
-            })
-            .boxed(),
-        DbPool::Postgres(p) => sqlx::raw_sql(&sql)
-            .fetch(p)
-            .map(|r| {
-                r.map_err(|e| e.to_string())
-                    .and_then(|row| row_values(&row, pg_val))
-            })
-            .boxed(),
-    };
+    let mut stream = text_rows(&src_pool, &sql);
     let start = Instant::now();
     let mut rows_transferred = 0;
     let mut rows_failed = 0;
@@ -1759,7 +1449,7 @@ async fn transfer_stream_impl(
             Some(Ok(row)) => {
                 let values = mapped
                     .iter()
-                    .map(|(i, _)| sql_val(&row[*i], mysql_tgt))
+                    .map(|(i, _)| sql_val(&row[*i], tgt_dialect))
                     .collect::<Vec<_>>()
                     .join(", ");
                 bytes += values.len();
@@ -1811,58 +1501,43 @@ async fn transfer_stream_impl(
 
 /// A failed statement is rolled back before retry. Only deadlocks and
 /// serialization failures are retried; connection/commit errors are ambiguous.
-async fn insert_transfer_batch(pool: &DbPool, sql: &str) -> Result<u64, String> {
+async fn insert_transfer_batch(pool: &DbPool, sql: &str) -> Result<u64, AppError> {
+    // Insert in a transaction; a failed statement is rolled back first.
+    macro_rules! in_transaction {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await.ctx("开启事务失败")?;
+            match sqlx::Executor::execute(&mut *tx, sql).await {
+                Ok(done) => {
+                    tx.commit().await.ctx("提交事务失败")?;
+                    return Ok(done.rows_affected());
+                }
+                Err(e) => {
+                    tx.rollback().await.ctx("回滚失败")?;
+                    e
+                }
+            }
+        }};
+    }
     for attempt in 0..3 {
-        let result: Result<u64, sqlx::Error> = match pool {
-            DbPool::MySQL(p) => {
-                let mut tx = p.begin().await.map_err(|e| e.to_string())?;
-                match sqlx::query(sql).execute(&mut *tx).await {
-                    Ok(done) => {
-                        tx.commit().await.map_err(|e| e.to_string())?;
-                        return Ok(done.rows_affected());
-                    }
-                    Err(e) => {
-                        tx.rollback()
-                            .await
-                            .map_err(|rollback| rollback.to_string())?;
-                        Err(e)
-                    }
-                }
-            }
-            DbPool::Postgres(p) => {
-                let mut tx = p.begin().await.map_err(|e| e.to_string())?;
-                match sqlx::query(sql).execute(&mut *tx).await {
-                    Ok(done) => {
-                        tx.commit().await.map_err(|e| e.to_string())?;
-                        return Ok(done.rows_affected());
-                    }
-                    Err(e) => {
-                        tx.rollback()
-                            .await
-                            .map_err(|rollback| rollback.to_string())?;
-                        Err(e)
-                    }
-                }
-            }
+        let error = match pool {
+            DbPool::MySQL(p) => in_transaction!(p),
+            DbPool::Postgres(p) => in_transaction!(p),
         };
-        if let Err(error) = result {
-            let retryable = error
-                .as_database_error()
-                .and_then(|e| e.code())
-                .is_some_and(|c| matches!(c.as_ref(), "40001" | "40P01" | "1213"));
-            if !retryable || attempt == 2 {
-                return Err(error.to_string());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt + 1))).await;
+        let retryable = error
+            .as_database_error()
+            .and_then(|e| e.code())
+            .is_some_and(|c| matches!(c.as_ref(), "40001" | "40P01" | "1213"));
+        if !retryable || attempt == 2 {
+            return Err(AppError::from_sqlx("写入失败", error));
         }
+        tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt + 1))).await;
     }
     unreachable!()
 }
 
-fn parse_json(file_path: &str) -> Result<ParsedTable, String> {
-    let content = std::fs::read_to_string(file_path).map_err(|e| format!("读取文件失败: {e}"))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("JSON 解析失败: {e}"))?;
+fn parse_json(file_path: &str) -> Result<ParsedTable, AppError> {
+    let content = std::fs::read_to_string(file_path).ctx("读取文件失败")?;
+    let value: serde_json::Value = serde_json::from_str(&content).ctx("JSON 解析失败")?;
     let arr = value
         .as_array()
         .ok_or_else(|| "JSON 文件必须是对象数组".to_string())?;
@@ -1905,19 +1580,28 @@ mod tests {
 
     #[test]
     fn sql_val_escapes_strings() {
-        assert_eq!(sql_val(&serde_json::json!("plain"), false), "'plain'");
-        assert_eq!(sql_val(&serde_json::json!("it's"), false), "'it''s'");
-        assert_eq!(sql_val(&serde_json::json!("a\\b"), false), "E'a\\\\b'");
-        assert_eq!(sql_val(&serde_json::json!(true), false), "TRUE");
-        let binary = serde_json::json!({"$lotdbBinary": "00ff"});
-        assert_eq!(sql_val(&binary, false), "decode('00ff', 'hex')");
-        assert_eq!(sql_val(&binary, true), "X'00ff'");
         assert_eq!(
-            import_literal(Some("\\x00ff"), true, false, true),
+            sql_val(&serde_json::json!("plain"), Dialect::Postgres),
+            "'plain'"
+        );
+        assert_eq!(
+            sql_val(&serde_json::json!("it's"), Dialect::Postgres),
+            "'it''s'"
+        );
+        assert_eq!(
+            sql_val(&serde_json::json!("a\\b"), Dialect::Postgres),
+            "E'a\\\\b'"
+        );
+        assert_eq!(sql_val(&serde_json::json!(true), Dialect::Postgres), "TRUE");
+        let binary = serde_json::json!({"$lotdbBinary": "00ff"});
+        assert_eq!(sql_val(&binary, Dialect::Postgres), "decode('00ff', 'hex')");
+        assert_eq!(sql_val(&binary, Dialect::MySQL), "X'00ff'");
+        assert_eq!(
+            import_literal(Some("\\x00ff"), true, false, Dialect::MySQL),
             "X'00ff'"
         );
         assert_eq!(
-            import_literal(Some("\\x00ff"), false, false, false),
+            import_literal(Some("\\x00ff"), false, false, Dialect::Postgres),
             "E'\\\\x00ff'"
         );
     }
@@ -1931,6 +1615,47 @@ mod tests {
             "\"say \"\"hi\"\"\""
         );
         assert_eq!(csv_cell(&serde_json::json!(true)), "true");
+    }
+
+    #[test]
+    fn csv_line_quotes_headers_and_keeps_null_apart_from_empty() {
+        use serde_json::json;
+        assert_eq!(
+            csv_line(&[json!("a,b"), json!(""), json!(null), json!(2)]),
+            "\"a,b\",\"\",,2"
+        );
+    }
+
+    #[test]
+    fn writers_produce_each_format() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("lotdb-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let columns = vec!["id".to_string(), "na,me".to_string()];
+        let rows = [vec![json!(1), json!("x")], vec![json!(2), json!(null)]];
+        for format in ["csv", "json", "sql_insert", "excel"] {
+            let path = dir.join(format).to_string_lossy().into_owned();
+            let file = File::create(&path).unwrap();
+            let mut w =
+                ExportWriter::new(format, file, &path, &columns, Dialect::Postgres, "\"t\"")
+                    .unwrap();
+            for row in &rows {
+                w.write_row(row).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+        assert_eq!(read("csv"), "\"id\",\"na,me\"\n1,\"x\"\n2,\n");
+        let json: serde_json::Value = serde_json::from_str(&read("json")).unwrap();
+        assert_eq!(
+            json,
+            json!([{"id": 1, "na,me": "x"}, {"id": 2, "na,me": null}])
+        );
+        assert!(
+            read("sql_insert").contains("INSERT INTO \"t\" (\"id\", \"na,me\") VALUES (2, NULL);")
+        );
+        assert!(std::fs::metadata(dir.join("excel")).unwrap().len() > 0);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1960,26 +1685,19 @@ pub async fn export_query_result(
     columns: Vec<String>,
     rows: Vec<Vec<serde_json::Value>>,
     file_path: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     tokio::task::spawn_blocking(move || {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&file_path)
-            .map_err(|e| e.to_string())?;
-        let mut writer = csv::Writer::from_writer(file);
-        writer.write_record(&columns).map_err(|e| e.to_string())?;
-        for row in rows {
-            writer
-                .write_record(row.iter().map(|value| match value {
-                    serde_json::Value::Null => String::new(),
-                    serde_json::Value::String(s) => s.clone(),
-                    value => value.to_string(),
-                }))
-                .map_err(|e| e.to_string())?;
+            .ctx("创建文件失败")?;
+        let mut writer = ExportWriter::new("csv", file, &file_path, &columns, Dialect::MySQL, "")?;
+        for row in &rows {
+            writer.write_row(row)?;
         }
-        writer.flush().map_err(|e| e.to_string())
+        writer.finish()
     })
     .await
-    .map_err(|e| e.to_string())?
+    .ctx("导出任务失败")?
 }

@@ -19,10 +19,13 @@ interface Props {
 
 type ViewMode = "pretty" | "raw";
 
-function tryParseJson(value: unknown): { ok: true; parsed: unknown } | { ok: false } {
+function tryParseJson(
+  value: unknown,
+): { ok: true; parsed: unknown } | { ok: false } {
   if (typeof value !== "string") return { ok: false };
   const trimmed = value.trim();
-  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return { ok: false };
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("["))
+    return { ok: false };
   try {
     return { ok: true, parsed: JSON.parse(trimmed) };
   } catch {
@@ -40,7 +43,8 @@ function renderValue(value: unknown): string {
 function JsonHighlight({ json }: { json: string }) {
   // Simple regex-based coloring
   const parts: { text: string; type: string }[] = [];
-  const regex = /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g;
+  const regex =
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -85,7 +89,12 @@ function JsonHighlight({ json }: { json: string }) {
   );
 }
 
-export function CellViewerDialog({ open, onOpenChange, columnName, value }: Props) {
+export function CellViewerDialog({
+  open,
+  onOpenChange,
+  columnName,
+  value,
+}: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("pretty");
   const [copied, setCopied] = useState(false);
 
@@ -95,7 +104,11 @@ export function CellViewerDialog({ open, onOpenChange, columnName, value }: Prop
 
   const rawText = renderValue(value);
   const prettyJson = isJson
-    ? JSON.stringify((jsonResult as { ok: true; parsed: unknown }).parsed, null, 2)
+    ? JSON.stringify(
+        (jsonResult as { ok: true; parsed: unknown }).parsed,
+        null,
+        2,
+      )
     : rawText;
 
   const displayText = isJson && viewMode === "pretty" ? prettyJson : rawText;
@@ -155,9 +168,15 @@ export function CellViewerDialog({ open, onOpenChange, columnName, value }: Prop
             disabled={isNull}
           >
             {copied ? (
-              <><Check className="size-3 text-emerald-500" />已复制</>
+              <>
+                <Check className="size-3 text-emerald-500" />
+                已复制
+              </>
             ) : (
-              <><Copy className="size-3" />复制</>
+              <>
+                <Copy className="size-3" />
+                复制
+              </>
             )}
           </Button>
         </DialogHeader>
@@ -166,7 +185,9 @@ export function CellViewerDialog({ open, onOpenChange, columnName, value }: Prop
         <ScrollArea className="flex-1">
           <div className="px-4 py-3">
             {isNull ? (
-              <span className="font-mono text-sm italic text-muted-foreground">NULL</span>
+              <span className="font-mono text-sm italic text-muted-foreground">
+                NULL
+              </span>
             ) : isJson && viewMode === "pretty" ? (
               <pre className="whitespace-pre-wrap break-all">
                 <JsonHighlight json={prettyJson} />
@@ -187,9 +208,7 @@ export function CellViewerDialog({ open, onOpenChange, columnName, value }: Prop
               JSON
             </span>
           )}
-          {!isNull && (
-            <span>{charCount.toLocaleString()} 字符</span>
-          )}
+          {!isNull && <span>{charCount.toLocaleString()} 字符</span>}
         </div>
       </DialogContent>
     </Dialog>

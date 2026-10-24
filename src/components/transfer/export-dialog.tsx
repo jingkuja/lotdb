@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { exportTableData, type ExportFormat } from "@/services/tauri-commands";
 import type { ColumnDef } from "@/services/tauri-commands";
 import { downloadDir, join } from "@tauri-apps/api/path";
+import { formatDbError } from "@/lib/error";
 
 // ─── Format options ───────────────────────────────────────────────
 
@@ -149,7 +150,7 @@ function ExportDialogBody({
       setResult({ rows: res.rowsExported, path: res.filePath });
       setStatus("done");
     } catch (e) {
-      setError(String(e));
+      setError(formatDbError(e));
       setStatus("error");
     }
   };

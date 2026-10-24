@@ -17,7 +17,11 @@ import {
   CornerDownLeft,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useHistory, useDeleteHistory, useClearHistory } from "@/hooks/use-history";
+import {
+  useHistory,
+  useDeleteHistory,
+  useClearHistory,
+} from "@/hooks/use-history";
 import type { HistoryEntry } from "@/services/tauri-commands";
 
 interface Props {
@@ -87,14 +91,15 @@ function EntryRow({
         <SqlPreview sql={entry.sql} />
         <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
           <span>{relativeTime(entry.executedAt)}</span>
-          {entry.executionMs != null && (
-            <span>{entry.executionMs} ms</span>
-          )}
+          {entry.executionMs != null && <span>{entry.executionMs} ms</span>}
           {entry.status === "success" && entry.rowsAffected != null && (
             <span>{entry.rowsAffected} 行</span>
           )}
           {entry.status === "error" && entry.errorMessage && (
-            <span className="truncate text-destructive" title={entry.errorMessage}>
+            <span
+              className="truncate text-destructive"
+              title={entry.errorMessage}
+            >
               {entry.errorMessage.slice(0, 60)}
             </span>
           )}

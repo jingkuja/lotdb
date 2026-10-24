@@ -97,10 +97,7 @@ function fkLine(
   dbType: DatabaseType,
   schema?: string,
 ): string {
-  const name = q(
-    fk.name || `fk_${fk.columns.join("_")}`,
-    dbType,
-  );
+  const name = q(fk.name || `fk_${fk.columns.join("_")}`, dbType);
   const localCols = fk.columns.map((c) => q(c, dbType)).join(", ");
   const refTable = fk.refSchema
     ? tableRef(fk.refTable, dbType, fk.refSchema)
@@ -148,9 +145,7 @@ export function generateCreateTable(
     for (const idx of indexes) {
       if (idx.columns.length === 0 || idx.type !== "UNIQUE") continue;
       const cols = idx.columns.map((c) => q(c, dbType)).join(", ");
-      const name = idx.name
-        ? `CONSTRAINT ${q(idx.name, dbType)} `
-        : "";
+      const name = idx.name ? `CONSTRAINT ${q(idx.name, dbType)} ` : "";
       lines.push(`  ${name}UNIQUE (${cols})`);
     }
     // PG: FK constraints inline
@@ -291,8 +286,7 @@ export function generateAlterTable(
     cols.map((c) =>
       renamed.has(c) && !currentNames.has(c) ? renamed.get(c)! : c,
     );
-  const resolveOrig = (cols: string[]) =>
-    cols.map((c) => renamed.get(c) ?? c);
+  const resolveOrig = (cols: string[]) => cols.map((c) => renamed.get(c) ?? c);
 
   // Dropped columns (no counterpart in current)
   for (const col of original.columns) {
@@ -348,9 +342,7 @@ export function generateAlterTable(
       }
       if (orig.nullable !== col.nullable) {
         stmts.push(
-          col.nullable
-            ? `${prefix} DROP NOT NULL;`
-            : `${prefix} SET NOT NULL;`,
+          col.nullable ? `${prefix} DROP NOT NULL;` : `${prefix} SET NOT NULL;`,
         );
       }
       if (orig.defaultValue !== col.defaultValue) {
@@ -411,7 +403,10 @@ export function generateAlterTable(
 
   // ── Index changes ────────────────────────────────────────────
   const origIdxMap = new Map(
-    original.indexes.map((i) => [i.name, { ...i, columns: resolveOrig(i.columns) }]),
+    original.indexes.map((i) => [
+      i.name,
+      { ...i, columns: resolveOrig(i.columns) },
+    ]),
   );
   const currIndexes = current.indexes.map((i) => ({
     ...i,
@@ -423,9 +418,7 @@ export function generateAlterTable(
   for (const idx of original.indexes) {
     if (!currIdxMap.has(idx.name) && idx.name) {
       if (dbType === "mysql") {
-        stmts.push(
-          `ALTER TABLE ${tref2} DROP INDEX ${q(idx.name, dbType)};`,
-        );
+        stmts.push(`ALTER TABLE ${tref2} DROP INDEX ${q(idx.name, dbType)};`);
       } else {
         stmts.push(`DROP INDEX IF EXISTS ${q(idx.name, dbType)};`);
       }
@@ -436,9 +429,7 @@ export function generateAlterTable(
   for (const idx of currIndexes) {
     if (!origIdxMap.has(idx.name) && idx.name && idx.columns.length > 0) {
       if (dbType === "mysql") {
-        stmts.push(
-          `ALTER TABLE ${tref2} ADD ${mysqlIndexLine(idx).trim()};`,
-        );
+        stmts.push(`ALTER TABLE ${tref2} ADD ${mysqlIndexLine(idx).trim()};`);
       } else {
         const isUnique = idx.type === "UNIQUE" ? "UNIQUE " : "";
         const idxName = q(idx.name, dbType);
@@ -479,7 +470,10 @@ export function generateAlterTable(
 
   // ── FK changes ───────────────────────────────────────────────
   const origFkMap = new Map(
-    original.foreignKeys.map((f) => [f.name, { ...f, columns: resolveOrig(f.columns) }]),
+    original.foreignKeys.map((f) => [
+      f.name,
+      { ...f, columns: resolveOrig(f.columns) },
+    ]),
   );
   const currForeignKeys = current.foreignKeys.map((f) => ({
     ...f,
@@ -533,9 +527,7 @@ export function generateAlterTable(
         `ALTER TABLE ${tref2} DROP FOREIGN KEY ${q(fk.name, dbType)};`,
       );
     } else {
-      stmts.push(
-        `ALTER TABLE ${tref2} DROP CONSTRAINT ${q(fk.name, dbType)};`,
-      );
+      stmts.push(`ALTER TABLE ${tref2} DROP CONSTRAINT ${q(fk.name, dbType)};`);
     }
     stmts.push(
       `ALTER TABLE ${tref2} ADD ${fkLine(fk, dbType, schema).trim()};`,
@@ -543,13 +535,11 @@ export function generateAlterTable(
   }
 
   // ── Table comment change (MySQL) ──────────────────────────────
-  if (
-    dbType === "mysql" &&
-    original.tableComment !== current.tableComment
-  ) {
+  if (dbType === "mysql" && original.tableComment !== current.tableComment) {
     stmts.push(
-      `ALTER TABLE ${tref2} COMMENT='${current.tableComment.replace(/\\/g, "\\\\").replace(/'/g, "\\'")
-      }';`,
+      `ALTER TABLE ${tref2} COMMENT='${current.tableComment
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\\'")}';`,
     );
   }
 

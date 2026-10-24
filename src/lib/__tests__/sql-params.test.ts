@@ -9,7 +9,9 @@ describe("detectParams", () => {
   });
 
   it("detects MySQL positional ? params", () => {
-    const { params, style } = detectParams("SELECT * FROM t WHERE a = ? AND b = ?");
+    const { params, style } = detectParams(
+      "SELECT * FROM t WHERE a = ? AND b = ?",
+    );
     expect(style).toBe("mysql");
     expect(params).toHaveLength(2);
     expect(params[0]).toEqual({ label: "参数 1", index: 0 });
@@ -17,7 +19,9 @@ describe("detectParams", () => {
   });
 
   it("detects PG $N params", () => {
-    const { params, style } = detectParams("SELECT * FROM t WHERE a = $1 AND b = $2 AND c = $1");
+    const { params, style } = detectParams(
+      "SELECT * FROM t WHERE a = $1 AND b = $2 AND c = $1",
+    );
     expect(style).toBe("postgres");
     // max index is 2, so 2 params
     expect(params).toHaveLength(2);
@@ -38,7 +42,9 @@ describe("detectParams", () => {
   });
 
   it("ignores params inside -- comments", () => {
-    const { params } = detectParams("SELECT * FROM t -- WHERE id = ?\nWHERE id = ?");
+    const { params } = detectParams(
+      "SELECT * FROM t -- WHERE id = ?\nWHERE id = ?",
+    );
     expect(params).toHaveLength(1);
   });
 

@@ -87,5 +87,38 @@ pub async fn init_local_db(app_data_dir: PathBuf) -> Result<SqlitePool, sqlx::Er
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_query_history_connection \
+         ON query_history (connection_id, id)",
+    )
+    .execute(&pool)
+    .await?;
+
+    redact_saved_history(&pool).await?;
+
     Ok(pool)
+}
+
+/// History written before passwords were masked: rewrite those rows once.
+/// The LIKE filter keeps this a cheap no-op on later starts.
+async fn redact_saved_history(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, sql, error_message FROM query_history \
+         WHERE sql LIKE '%IDENTIFIED%' OR sql LIKE '%PASSWORD%'",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (id, sql, error) in rows {
+        let masked = crate::utils::sql::redact_secrets(&sql);
+        let masked_error = error.as_deref().map(crate::utils::sql::redact_secrets);
+        if masked != sql || masked_error != error {
+            sqlx::query("UPDATE query_history SET sql = ?, error_message = ? WHERE id = ?")
+                .bind(masked)
+                .bind(masked_error)
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
+    }
+    Ok(())
 }

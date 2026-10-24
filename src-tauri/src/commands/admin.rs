@@ -1,4 +1,6 @@
+use crate::db::dialect::Dialect;
 use crate::db::pool::{DbPool, PoolManager};
+use crate::error::{AppError, ResultExt};
 use crate::utils::sql::{quote_ident_mysql, quote_ident_pg, string_literal};
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -12,55 +14,33 @@ pub async fn create_database(
     db_name: String,
     charset: Option<String>,
     collation: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
     if db_name.trim().is_empty() {
-        return Err("数据库名称不能为空".to_string());
+        return Err("数据库名称不能为空".into());
     }
-    let pool = main_pool(&pools, &connection_id)?;
-
-    match &pool {
-        DbPool::MySQL(pool) => {
-            let mut sql = format!("CREATE DATABASE {}", quote_ident_mysql(&db_name));
-            if let Some(cs) = charset.as_deref().filter(|s| !s.is_empty()) {
-                sql.push_str(&format!(" CHARACTER SET {}", charset_name(cs)?));
-            }
-            if let Some(co) = collation.as_deref().filter(|s| !s.is_empty()) {
-                sql.push_str(&format!(" COLLATE {}", charset_name(co)?));
-            }
-            sqlx::query(&sql)
-                .execute(pool)
-                .await
-                .map_err(|e| format!("创建数据库失败: {e}"))?;
+    let pool = pools.pool(&connection_id)?;
+    let mut sql = format!("CREATE DATABASE {}", pool.dialect().quote_ident(&db_name));
+    if pool.dialect().is_mysql() {
+        if let Some(cs) = charset.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(&format!(" CHARACTER SET {}", charset_name(cs)?));
         }
-        DbPool::Postgres(pool) => {
-            sqlx::query(&format!("CREATE DATABASE {}", quote_ident_pg(&db_name)))
-                .execute(pool)
-                .await
-                .map_err(|e| format!("创建数据库失败: {e}"))?;
+        if let Some(co) = collation.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(&format!(" COLLATE {}", charset_name(co)?));
         }
     }
-
+    pool.execute(&sql).await.ctx("创建数据库失败")?;
     Ok(())
 }
 
 /// Charset and collation names are keywords-like identifiers, not quotable
 /// in every position; accept only the characters real names use.
-fn charset_name(name: &str) -> Result<&str, String> {
+fn charset_name(name: &str) -> Result<&str, AppError> {
     if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         Ok(name)
     } else {
-        Err(format!("无效的字符集或排序规则: {name}"))
+        Err(format!("无效的字符集或排序规则: {name}").into())
     }
-}
-
-/// Clone the connection's main pool so no DashMap guard is held across await.
-fn main_pool(pools: &PoolManager, connection_id: &str) -> Result<DbPool, String> {
-    pools
-        .pools
-        .get(connection_id)
-        .map(|entry| entry.pool.clone())
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))
 }
 
 /// `user`@`host` with both parts quoted; an empty host means any host.
@@ -79,11 +59,11 @@ fn mysql_account(username: &str, host: &str) -> String {
 async fn mysql_plain_literal(
     conn: &mut sqlx::MySqlConnection,
     value: &str,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let sql_mode: String = sqlx::query_scalar("SELECT CAST(@@SESSION.sql_mode AS CHAR)")
         .fetch_one(&mut *conn)
         .await
-        .map_err(|e| e.to_string())?;
+        .ctx("读取 sql_mode 失败")?;
     let mut escaped = value.replace('\'', "''");
     if !sql_mode
         .to_ascii_uppercase()
@@ -101,7 +81,7 @@ pub async fn drop_database(
     pools: State<'_, PoolManager>,
     connection_id: String,
     db_name: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     drop_database_impl(&pools, connection_id, db_name).await
 }
 
@@ -109,27 +89,17 @@ pub async fn drop_database_impl(
     pools: &PoolManager,
     connection_id: String,
     db_name: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let pool = main_pool(pools, &connection_id)?;
-
-    match &pool {
-        DbPool::MySQL(pool) => {
-            sqlx::query(&format!("DROP DATABASE {}", quote_ident_mysql(&db_name)))
-                .execute(pool)
-                .await
-                .map_err(|e| format!("删除数据库失败: {e}"))?;
-        }
-        DbPool::Postgres(pool) => {
-            // Our own cached pool for that database would block the DROP.
-            pools.close_database_pool(&connection_id, &db_name).await;
-            sqlx::query(&format!("DROP DATABASE {}", quote_ident_pg(&db_name)))
-                .execute(pool)
-                .await
-                .map_err(|e| format!("删除数据库失败: {e}"))?;
-        }
-    }
-
+    let pool = pools.pool(&connection_id)?;
+    // Our own cached PG pool for that database would block the DROP.
+    pools.close_database_pool(&connection_id, &db_name).await;
+    pool.execute(&format!(
+        "DROP DATABASE {}",
+        pool.dialect().quote_ident(&db_name)
+    ))
+    .await
+    .ctx("删除数据库失败")?;
     Ok(())
 }
 
@@ -159,19 +129,14 @@ pub struct DbPrivilege {
 pub async fn list_users(
     pools: State<'_, PoolManager>,
     connection_id: String,
-) -> Result<Vec<UserInfo>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<Vec<UserInfo>, AppError> {
+    match &pools.pool(&connection_id)? {
         DbPool::MySQL(pool) => {
             let rows: Vec<(String, String, String)> =
                 sqlx::query_as("SELECT user, host, Super_priv FROM mysql.user ORDER BY user, host")
                     .fetch_all(pool)
                     .await
-                    .map_err(|e| format!("查询用户列表失败: {e}"))?;
+                    .ctx("查询用户列表失败")?;
 
             Ok(rows
                 .into_iter()
@@ -192,7 +157,7 @@ pub async fn list_users(
             )
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询角色列表失败: {e}"))?;
+            .ctx("查询角色列表失败")?;
 
             Ok(rows
                 .into_iter()
@@ -215,13 +180,8 @@ pub async fn get_user_grants(
     connection_id: String,
     username: String,
     host: String,
-) -> Result<Vec<DbPrivilege>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<Vec<DbPrivilege>, AppError> {
+    match &pools.pool(&connection_id)? {
         DbPool::MySQL(pool) => {
             // SHOW GRANTS returns rows like:
             // GRANT SELECT, INSERT ON `mydb`.* TO `user`@`host`
@@ -229,7 +189,7 @@ pub async fn get_user_grants(
             let rows: Vec<(String,)> = sqlx::query_as(&sql)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| format!("查询权限失败: {e}"))?;
+                .ctx("查询权限失败")?;
 
             // Parse each line: extract (database, privileges)
             let grants = rows
@@ -250,7 +210,7 @@ pub async fn get_user_grants(
             .bind(&username)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询权限失败: {e}"))?;
+            .ctx("查询权限失败")?;
 
             let grants = rows
                 .into_iter()
@@ -306,7 +266,7 @@ pub async fn create_user(
     username: String,
     host: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     create_user_impl(&pools, connection_id, username, host, password).await
 }
 
@@ -316,13 +276,13 @@ pub async fn create_user_impl(
     username: String,
     host: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let pool = main_pool(pools, &connection_id)?;
+    let pool = pools.pool(&connection_id)?;
 
     match &pool {
         DbPool::MySQL(pool) => {
-            let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
+            let mut conn = pool.acquire().await.ctx("获取连接失败")?;
             let literal = mysql_plain_literal(&mut conn, &password).await?;
             let sql = format!(
                 "CREATE USER {} IDENTIFIED BY {literal}",
@@ -330,7 +290,7 @@ pub async fn create_user_impl(
             );
             sqlx::Executor::execute(&mut *conn, sql.as_str())
                 .await
-                .map_err(|e| format!("创建用户失败: {e}"))?;
+                .ctx("创建用户失败")?;
         }
         DbPool::Postgres(pool) => {
             // PG: CREATE ROLE with LOGIN and PASSWORD
@@ -345,7 +305,7 @@ pub async fn create_user_impl(
             };
             sqlx::Executor::execute(pool, sql.as_str())
                 .await
-                .map_err(|e| format!("创建角色失败: {e}"))?;
+                .ctx("创建角色失败")?;
         }
     }
 
@@ -360,28 +320,17 @@ pub async fn drop_user(
     connection_id: String,
     username: String,
     host: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
-        DbPool::MySQL(pool) => {
-            sqlx::query(&format!("DROP USER {}", mysql_account(&username, &host)))
-                .execute(pool)
-                .await
-                .map_err(|e| format!("删除用户失败: {e}"))?;
-        }
-        DbPool::Postgres(pool) => {
-            sqlx::query(&format!("DROP ROLE {}", quote_ident_pg(&username)))
-                .execute(pool)
-                .await
-                .map_err(|e| format!("删除角色失败: {e}"))?;
-        }
-    }
-
+    let sql = match pools.dialect(&connection_id)? {
+        Dialect::MySQL => format!("DROP USER {}", mysql_account(&username, &host)),
+        Dialect::Postgres => format!("DROP ROLE {}", quote_ident_pg(&username)),
+    };
+    pools
+        .pool(&connection_id)?
+        .execute(&sql)
+        .await
+        .ctx("删除用户失败")?;
     Ok(())
 }
 
@@ -394,40 +343,25 @@ pub async fn grant_privilege(
     username: String,
     host: String,
     database: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
-        DbPool::MySQL(pool) => {
-            sqlx::query(&format!(
-                "GRANT ALL PRIVILEGES ON {}.* TO {}",
-                quote_ident_mysql(&database),
-                mysql_account(&username, &host)
-            ))
-            .execute(pool)
-            .await
-            .map_err(|e| format!("授权失败: {e}"))?;
-            sqlx::query("FLUSH PRIVILEGES")
-                .execute(pool)
-                .await
-                .map_err(|e| format!("刷新权限失败: {e}"))?;
-        }
-        DbPool::Postgres(pool) => {
-            sqlx::query(&format!(
-                "GRANT CONNECT ON DATABASE {} TO {}",
-                quote_ident_pg(&database),
-                quote_ident_pg(&username)
-            ))
-            .execute(pool)
-            .await
-            .map_err(|e| format!("授权失败: {e}"))?;
-        }
+    let pool = pools.pool(&connection_id)?;
+    let sql = match pool.dialect() {
+        Dialect::MySQL => format!(
+            "GRANT ALL PRIVILEGES ON {}.* TO {}",
+            quote_ident_mysql(&database),
+            mysql_account(&username, &host)
+        ),
+        Dialect::Postgres => format!(
+            "GRANT CONNECT ON DATABASE {} TO {}",
+            quote_ident_pg(&database),
+            quote_ident_pg(&username)
+        ),
+    };
+    pool.execute(&sql).await.ctx("授权失败")?;
+    if pool.dialect().is_mysql() {
+        pool.execute("FLUSH PRIVILEGES").await.ctx("刷新权限失败")?;
     }
-
     Ok(())
 }
 
@@ -438,40 +372,25 @@ pub async fn revoke_privilege(
     username: String,
     host: String,
     database: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
-        DbPool::MySQL(pool) => {
-            sqlx::query(&format!(
-                "REVOKE ALL PRIVILEGES ON {}.* FROM {}",
-                quote_ident_mysql(&database),
-                mysql_account(&username, &host)
-            ))
-            .execute(pool)
-            .await
-            .map_err(|e| format!("撤销权限失败: {e}"))?;
-            sqlx::query("FLUSH PRIVILEGES")
-                .execute(pool)
-                .await
-                .map_err(|e| format!("刷新权限失败: {e}"))?;
-        }
-        DbPool::Postgres(pool) => {
-            sqlx::query(&format!(
-                "REVOKE CONNECT ON DATABASE {} FROM {}",
-                quote_ident_pg(&database),
-                quote_ident_pg(&username)
-            ))
-            .execute(pool)
-            .await
-            .map_err(|e| format!("撤销权限失败: {e}"))?;
-        }
+    let pool = pools.pool(&connection_id)?;
+    let sql = match pool.dialect() {
+        Dialect::MySQL => format!(
+            "REVOKE ALL PRIVILEGES ON {}.* FROM {}",
+            quote_ident_mysql(&database),
+            mysql_account(&username, &host)
+        ),
+        Dialect::Postgres => format!(
+            "REVOKE CONNECT ON DATABASE {} FROM {}",
+            quote_ident_pg(&database),
+            quote_ident_pg(&username)
+        ),
+    };
+    pool.execute(&sql).await.ctx("撤销权限失败")?;
+    if pool.dialect().is_mysql() {
+        pool.execute("FLUSH PRIVILEGES").await.ctx("刷新权限失败")?;
     }
-
     Ok(())
 }
 
@@ -519,20 +438,15 @@ type PgProcessRow = (
 pub async fn list_processes(
     pools: State<'_, PoolManager>,
     connection_id: String,
-) -> Result<Vec<ProcessInfo>, String> {
+) -> Result<Vec<ProcessInfo>, AppError> {
     list_processes_impl(&pools, connection_id).await
 }
 
 pub async fn list_processes_impl(
     pools: &PoolManager,
     connection_id: String,
-) -> Result<Vec<ProcessInfo>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<Vec<ProcessInfo>, AppError> {
+    match &pools.pool(&connection_id)? {
         DbPool::MySQL(pool) => {
             // id, user, host, db, command, time, state, info
             let rows: Vec<MysqlProcessRow> = sqlx::query_as(
@@ -543,7 +457,7 @@ pub async fn list_processes_impl(
             )
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询进程列表失败: {e}"))?;
+            .ctx("查询进程列表失败")?;
 
             Ok(rows
                 .into_iter()
@@ -576,7 +490,7 @@ pub async fn list_processes_impl(
             )
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询进程列表失败: {e}"))?;
+            .ctx("查询进程列表失败")?;
 
             Ok(rows
                 .into_iter()
@@ -604,38 +518,20 @@ pub async fn kill_process(
     connection_id: String,
     process_id: i64,
     kill_type: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     pools.ensure_writable(&connection_id)?;
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
-        DbPool::MySQL(pool) => {
-            let sql = if kill_type == "query" {
-                format!("KILL QUERY {process_id}")
-            } else {
-                format!("KILL CONNECTION {process_id}")
-            };
-            sqlx::query(&sql)
-                .execute(pool)
-                .await
-                .map_err(|e| format!("KILL 失败: {e}"))?;
-        }
-        DbPool::Postgres(pool) => {
-            let sql = if kill_type == "query" {
-                format!("SELECT pg_cancel_backend({process_id})")
-            } else {
-                format!("SELECT pg_terminate_backend({process_id})")
-            };
-            sqlx::query(&sql)
-                .execute(pool)
-                .await
-                .map_err(|e| format!("终止进程失败: {e}"))?;
-        }
-    }
-
+    let query_only = kill_type == "query";
+    let sql = match (pools.dialect(&connection_id)?, query_only) {
+        (Dialect::MySQL, true) => format!("KILL QUERY {process_id}"),
+        (Dialect::MySQL, false) => format!("KILL CONNECTION {process_id}"),
+        (Dialect::Postgres, true) => format!("SELECT pg_cancel_backend({process_id})"),
+        (Dialect::Postgres, false) => format!("SELECT pg_terminate_backend({process_id})"),
+    };
+    pools
+        .pool(&connection_id)?
+        .execute(&sql)
+        .await
+        .ctx("终止进程失败")?;
     Ok(())
 }
 
@@ -664,13 +560,8 @@ pub struct TableSizeInfo {
 pub async fn get_disk_usage(
     pools: State<'_, PoolManager>,
     connection_id: String,
-) -> Result<Vec<DbSizeInfo>, String> {
-    let entry = pools
-        .pools
-        .get(&connection_id)
-        .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-
-    match &entry.pool {
+) -> Result<Vec<DbSizeInfo>, AppError> {
+    match &pools.pool(&connection_id)? {
         DbPool::MySQL(pool) => {
             let rows: Vec<(String, i64)> = sqlx::query_as(
                 "SELECT table_schema, \
@@ -681,7 +572,7 @@ pub async fn get_disk_usage(
             )
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询数据库大小失败: {e}"))?;
+            .ctx("查询数据库大小失败")?;
 
             Ok(rows
                 .into_iter()
@@ -700,7 +591,7 @@ pub async fn get_disk_usage(
             )
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询数据库大小失败: {e}"))?;
+            .ctx("查询数据库大小失败")?;
 
             Ok(rows
                 .into_iter()
@@ -720,7 +611,7 @@ pub async fn get_table_sizes(
     connection_id: String,
     database: String,
     schema: Option<String>,
-) -> Result<Vec<TableSizeInfo>, String> {
+) -> Result<Vec<TableSizeInfo>, AppError> {
     get_table_sizes_impl(&pools, connection_id, database, schema).await
 }
 
@@ -729,8 +620,8 @@ pub async fn get_table_sizes_impl(
     connection_id: String,
     database: String,
     schema: Option<String>,
-) -> Result<Vec<TableSizeInfo>, String> {
-    match &main_pool(pools, &connection_id)? {
+) -> Result<Vec<TableSizeInfo>, AppError> {
+    match &pools.pool(&connection_id)? {
         DbPool::MySQL(pool) => {
             let rows: Vec<(String, i64, i64, Option<i64>)> = sqlx::query_as(
                 "SELECT table_name, \
@@ -744,7 +635,7 @@ pub async fn get_table_sizes_impl(
             .bind(&database)
             .fetch_all(pool)
             .await
-            .map_err(|e| format!("查询表大小失败: {e}"))?;
+            .ctx("查询表大小失败")?;
 
             Ok(rows
                 .into_iter()
@@ -780,7 +671,7 @@ pub async fn get_table_sizes_impl(
             .bind(schema_filter)
             .fetch_all(&pool)
             .await
-            .map_err(|e| format!("查询表大小失败: {e}"))?;
+            .ctx("查询表大小失败")?;
 
             Ok(rows
                 .into_iter()
@@ -821,14 +712,8 @@ pub async fn explain_query(
     analyze: bool,
     session_id: Option<String>,
     execution_id: Option<String>,
-) -> Result<ExplainResult, String> {
-    let mysql = {
-        let entry = pools
-            .pools
-            .get(&connection_id)
-            .ok_or_else(|| format!("连接 {connection_id} 未打开"))?;
-        matches!(&entry.pool, DbPool::MySQL(_))
-    };
+) -> Result<ExplainResult, AppError> {
+    let mysql = pools.dialect(&connection_id)?.is_mysql();
     let prefix = if !analyze {
         "EXPLAIN"
     } else if mysql {
@@ -846,8 +731,7 @@ pub async fn explain_query(
         execution_id.as_deref(),
         session_id.as_deref(),
     )
-    .await
-    .map_err(|e| e.to_string())?;
+    .await?;
     Ok(ExplainResult {
         is_text: !mysql || analyze,
         columns: result.columns,

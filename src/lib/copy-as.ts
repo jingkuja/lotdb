@@ -8,8 +8,13 @@ function cellStr(value: unknown): string {
   return String(value);
 }
 
-function quoteTable(database: string, schema: string | undefined, table: string, dbType: DatabaseType): string {
-  return `${quoteIdent(dbType === "postgres" ? schema ?? "public" : database, dbType)}.${quoteIdent(table, dbType)}`;
+function quoteTable(
+  database: string,
+  schema: string | undefined,
+  table: string,
+  dbType: DatabaseType,
+): string {
+  return `${quoteIdent(dbType === "postgres" ? (schema ?? "public") : database, dbType)}.${quoteIdent(table, dbType)}`;
 }
 
 // ─── INSERT ───────────────────────────────────────────────────────

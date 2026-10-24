@@ -1,4 +1,4 @@
-use crate::db::pool::PoolManager;
+use crate::db::pool::{DbPool, PoolManager};
 use crate::db::value::{mysql_value_to_json, pg_value_to_json};
 use crate::error::AppError;
 use crate::models::connection::ConnectionConfig;
@@ -205,7 +205,7 @@ pub async fn open_connection(
 ) -> Result<(), AppError> {
     crate::commands::connection::load_secrets(&mut config).await;
     registry.close_sessions(&config.id);
-    pools.open(&config).await.map_err(AppError::connection)
+    pools.open(&config).await
 }
 
 /// Close an active connection pool.
@@ -252,21 +252,12 @@ pub async fn cancel_query_impl(
         .map(|e| e.value().clone())
         .ok_or_else(|| AppError::sql("查询已结束，无法取消"))?;
 
-    let pool = {
-        let entry = pools
-            .pools
-            .get(&rq.connection_id)
-            .ok_or_else(|| AppError::connection(format!("连接 {} 未打开", rq.connection_id)))?;
-        match &entry.pool {
-            crate::db::pool::DbPool::MySQL(p) => crate::db::pool::DbPool::MySQL(p.clone()),
-            crate::db::pool::DbPool::Postgres(p) => crate::db::pool::DbPool::Postgres(p.clone()),
-        }
-    };
+    let pool = pools.pool(&rq.connection_id)?;
 
     rq.cancelled.store(true, Ordering::Release);
     let result: Result<(), AppError> = async {
         match &pool {
-            crate::db::pool::DbPool::MySQL(pool) => {
+            DbPool::MySQL(pool) => {
                 let mut conn = pool
                     .acquire()
                     .await
@@ -276,7 +267,7 @@ pub async fn cancel_query_impl(
                     .await
                     .map_err(|e| AppError::from_sqlx("取消查询失败", e))?;
             }
-            crate::db::pool::DbPool::Postgres(pool) => {
+            DbPool::Postgres(pool) => {
                 let mut conn = pool
                     .acquire()
                     .await
@@ -408,17 +399,8 @@ pub async fn run_session_query(
     execution_id: Option<&str>,
     session_id: Option<&str>,
 ) -> Result<QueryResult, AppError> {
-    let pool = {
-        let entry = pools
-            .pools
-            .get(connection_id)
-            .ok_or_else(|| AppError::connection(format!("连接 {connection_id} 未打开")))?;
-        match &entry.pool {
-            crate::db::pool::DbPool::MySQL(p) => crate::db::pool::DbPool::MySQL(p.clone()),
-            crate::db::pool::DbPool::Postgres(p) => crate::db::pool::DbPool::Postgres(p.clone()),
-        }
-    };
-    let mysql = matches!(pool, crate::db::pool::DbPool::MySQL(_));
+    let pool = pools.pool(connection_id)?;
+    let mysql = matches!(pool, DbPool::MySQL(_));
     let readonly = pools.is_readonly(connection_id);
     if readonly {
         crate::utils::sql::readonly_sql(sql, mysql).map_err(AppError::sql)?;
@@ -443,7 +425,7 @@ pub async fn run_session_query(
     let mut session = slot.lock().await;
     if session.is_none() {
         *session = Some(match pool.clone() {
-            crate::db::pool::DbPool::MySQL(p) => {
+            DbPool::MySQL(p) => {
                 let mut conn = p
                     .acquire()
                     .await
@@ -452,7 +434,7 @@ pub async fn run_session_query(
                 let pid = mysql_session_id(&mut conn).await?;
                 QuerySession::MySQL(conn, pid)
             }
-            crate::db::pool::DbPool::Postgres(p) => {
+            DbPool::Postgres(p) => {
                 let mut conn = p
                     .acquire()
                     .await
@@ -487,7 +469,7 @@ pub async fn run_session_query(
             let result = run_mysql(conn, sql, kind, max_rows, args).await;
             // Rows past the cap are still on their way; stop the server
             // instead of reading (and discarding) the rest of the table.
-            if let (Ok((_, _, _, true)), crate::db::pool::DbPool::MySQL(p)) = (&result, &pool) {
+            if let (Ok((_, _, _, true)), DbPool::MySQL(p)) = (&result, &pool) {
                 stop_mysql_result(conn, p, pid).await?;
             }
             if readonly {
@@ -518,8 +500,8 @@ pub async fn run_session_query(
                     .map_err(|e| AppError::from_sqlx("开启只读事务失败", e))?;
             }
             let canceller = match &pool {
-                crate::db::pool::DbPool::Postgres(p) => Some((p, pid)),
-                crate::db::pool::DbPool::MySQL(_) => None,
+                DbPool::Postgres(p) => Some((p, pid)),
+                DbPool::MySQL(_) => None,
             };
             let result = run_postgres(conn, sql, kind, max_rows, args, canceller, readonly).await;
             if readonly {
@@ -1067,14 +1049,8 @@ pub async fn configure_session_impl(
     database: Option<&str>,
     schema: Option<&str>,
 ) -> Result<(), AppError> {
-    let pool = pools
-        .pools
-        .get(connection_id)
-        .ok_or_else(|| AppError::connection("连接未打开，请重新连接"))?
-        .pool
-        .clone();
-    let replacement = match pool {
-        crate::db::pool::DbPool::MySQL(pool) => {
+    let replacement = match pools.pool(connection_id)? {
+        DbPool::MySQL(pool) => {
             let mut conn = pool
                 .acquire()
                 .await
@@ -1088,12 +1064,9 @@ pub async fn configure_session_impl(
             let pid = mysql_session_id(&mut conn).await?;
             QuerySession::MySQL(conn, pid)
         }
-        crate::db::pool::DbPool::Postgres(pool) => {
+        DbPool::Postgres(pool) => {
             let pool = if let Some(db) = database.filter(|s| !s.is_empty()) {
-                pools
-                    .pg_pool_for_database(connection_id, db)
-                    .await
-                    .map_err(AppError::connection)?
+                pools.pg_pool_for_database(connection_id, db).await?
             } else {
                 pool
             };

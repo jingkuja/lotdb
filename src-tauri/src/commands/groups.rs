@@ -1,5 +1,6 @@
 //! Connection group CRUD backed by the local SQLite store.
 
+use crate::error::{local_store, AppError};
 use crate::models::connection::ConnectionGroup;
 use sqlx::SqlitePool;
 use tauri::State;
@@ -7,13 +8,13 @@ use tauri::State;
 type DbPool = SqlitePool;
 
 #[tauri::command]
-pub async fn list_groups(pool: State<'_, DbPool>) -> Result<Vec<ConnectionGroup>, String> {
+pub async fn list_groups(pool: State<'_, DbPool>) -> Result<Vec<ConnectionGroup>, AppError> {
     let rows = sqlx::query_as::<_, GroupRow>(
         "SELECT id, name, parent_id FROM connection_groups ORDER BY name",
     )
     .fetch_all(pool.inner())
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(local_store("保存分组失败"))?;
 
     Ok(rows
         .into_iter()
@@ -30,7 +31,7 @@ pub async fn create_group(
     pool: State<'_, DbPool>,
     name: String,
     parent_id: Option<String>,
-) -> Result<ConnectionGroup, String> {
+) -> Result<ConnectionGroup, AppError> {
     if name.trim().is_empty() {
         return Err("分组名称不能为空".into());
     }
@@ -41,7 +42,7 @@ pub async fn create_group(
         .bind(&parent_id)
         .execute(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(local_store("保存分组失败"))?;
 
     Ok(ConnectionGroup {
         id,
@@ -51,7 +52,11 @@ pub async fn create_group(
 }
 
 #[tauri::command]
-pub async fn rename_group(pool: State<'_, DbPool>, id: String, name: String) -> Result<(), String> {
+pub async fn rename_group(
+    pool: State<'_, DbPool>,
+    id: String,
+    name: String,
+) -> Result<(), AppError> {
     if name.trim().is_empty() {
         return Err("分组名称不能为空".into());
     }
@@ -60,24 +65,24 @@ pub async fn rename_group(pool: State<'_, DbPool>, id: String, name: String) -> 
         .bind(&id)
         .execute(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(local_store("保存分组失败"))?;
     Ok(())
 }
 
 /// Delete a group. Member connections are moved to "ungrouped" (group_id
 /// nulled), never deleted.
 #[tauri::command]
-pub async fn delete_group(pool: State<'_, DbPool>, id: String) -> Result<(), String> {
+pub async fn delete_group(pool: State<'_, DbPool>, id: String) -> Result<(), AppError> {
     sqlx::query("UPDATE connections SET group_id = NULL WHERE group_id = ?")
         .bind(&id)
         .execute(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(local_store("保存分组失败"))?;
     sqlx::query("DELETE FROM connection_groups WHERE id = ?")
         .bind(&id)
         .execute(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(local_store("保存分组失败"))?;
     Ok(())
 }
 

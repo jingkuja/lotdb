@@ -26,9 +26,12 @@ export function useCliTask() {
       taskIdRef.current = taskId;
       setProgress(null);
       setCancelling(false);
-      const unlisten = await listen<CliTaskProgress>("backup-progress", (ev) => {
-        if (ev.payload.taskId === taskId) setProgress(ev.payload);
-      });
+      const unlisten = await listen<CliTaskProgress>(
+        "backup-progress",
+        (ev) => {
+          if (ev.payload.taskId === taskId) setProgress(ev.payload);
+        },
+      );
       try {
         return await fn(taskId);
       } finally {

@@ -1,9 +1,9 @@
 //! Categorized application error.
 //!
-//! Tauri commands in the query/data path return `Result<_, AppError>`; the
-//! error serializes to `{ code: "connection" | "sql" | "io", message }` so
-//! the frontend can offer one-click reconnect for connection-class failures
-//! instead of showing a raw driver message.
+//! Every Tauri command returns `Result<_, AppError>`; the error serializes to
+//! `{ code: "connection" | "sql" | "io", message }` so the frontend can offer
+//! one-click reconnect for connection-class failures instead of showing a raw
+//! driver message.
 
 use serde::Serialize;
 
@@ -40,7 +40,6 @@ impl AppError {
         }
     }
 
-    #[allow(dead_code)]
     pub fn io(msg: impl Into<String>) -> Self {
         Self {
             code: ErrorCode::Io,
@@ -56,6 +55,55 @@ impl AppError {
         }
     }
 }
+
+/// Errors from LotDB's own SQLite store are local IO, never "reconnect".
+pub fn local_store(prefix: &str) -> impl FnOnce(sqlx::Error) -> AppError + '_ {
+    move |e| AppError::io(format!("{prefix}: {e}"))
+}
+
+/// Plain messages (validation, "not supported") are statement-level errors.
+impl From<String> for AppError {
+    fn from(message: String) -> Self {
+        Self::sql(message)
+    }
+}
+
+impl From<&str> for AppError {
+    fn from(message: &str) -> Self {
+        Self::sql(message)
+    }
+}
+
+/// `.ctx("查询失败")` turns any error into an [`AppError`] with the prefix,
+/// classified by its source: sqlx errors keep their category (see
+/// [`classify_sqlx`]); file and format errors are local IO.
+pub trait ResultExt<T> {
+    fn ctx(self, prefix: &str) -> Result<T, AppError>;
+}
+
+impl<T> ResultExt<T> for Result<T, sqlx::Error> {
+    fn ctx(self, prefix: &str) -> Result<T, AppError> {
+        self.map_err(|e| AppError::from_sqlx(prefix, e))
+    }
+}
+
+macro_rules! io_context {
+    ($($ty:ty),*) => {$(
+        impl<T> ResultExt<T> for Result<T, $ty> {
+            fn ctx(self, prefix: &str) -> Result<T, AppError> {
+                self.map_err(|e| AppError::io(format!("{prefix}: {e}")))
+            }
+        }
+    )*};
+}
+
+io_context!(
+    std::io::Error,
+    serde_json::Error,
+    csv::Error,
+    rust_xlsxwriter::XlsxError,
+    tokio::task::JoinError
+);
 
 impl std::fmt::Display for AppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

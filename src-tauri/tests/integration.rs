@@ -958,7 +958,10 @@ async fn review_regressions(mut cfg: ConnectionConfig, mysql: bool) {
     )
     .await
     .unwrap_err();
-    assert!(denied.contains("只读"), "deny before reading or truncating");
+    assert!(
+        denied.message.contains("只读"),
+        "deny before reading or truncating"
+    );
     let denied = transfer_table_data_impl(
         None,
         &pools,
@@ -977,7 +980,7 @@ async fn review_regressions(mut cfg: ConnectionConfig, mysql: bool) {
     )
     .await
     .unwrap_err();
-    assert!(denied.contains("只读"));
+    assert!(denied.message.contains("只读"));
     assert_eq!(
         run_session_query(
             &pools,
@@ -1347,7 +1350,7 @@ async fn mysql_p0_regressions() {
     )
     .await
     .unwrap_err();
-    assert!(err.contains("多条语句"), "{err}");
+    assert!(err.message.contains("多条语句"), "{err}");
     let _ = std::fs::remove_file(&path);
 
     // Passwords with URL-reserved characters connect.
@@ -1599,13 +1602,13 @@ async fn p1_import(pools: &PoolManager, reg: &QueryRegistry, id: &str, db: &str,
     )
     .await
     .unwrap_err();
-    assert!(err.contains("nope"), "{err}");
+    assert!(err.message.contains("nope"), "{err}");
     assert_eq!(count().await, "1201");
 
     // With "empty first", a failing row rolls everything back.
     let dup = write("dup.csv", "id,name\n7,a\n7,b\n".into());
     let err = import(dup, true, vec![]).await.unwrap_err();
-    assert!(err.contains("已回滚"), "{err}");
+    assert!(err.message.contains("已回滚"), "{err}");
     assert_eq!(count().await, "1201");
 
     // Without it, only the bad row is lost.
@@ -2037,5 +2040,201 @@ async fn ssh_tunnel_lifecycle() {
         ..key
     });
     let err = pools.open(&cfg).await.unwrap_err();
-    assert!(err.contains("口令"), "{err}");
+    assert!(err.message.contains("口令"), "{err}");
+}
+
+// ─── P2 regressions (2026-10-22 review, section 3) ────────────────
+
+/// Runs `test` on a single-threaded runtime in its own thread and fails if it
+/// does not finish in time. A DashMap guard held across an `.await` makes a
+/// concurrent close block that only thread forever.
+fn finishes_on_one_thread(
+    test: impl FnOnce() -> futures::future::BoxFuture<'static, ()> + Send + 'static,
+) {
+    let (done, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(test());
+        let _ = done.send(());
+    });
+    wait.recv_timeout(std::time::Duration::from_secs(30))
+        .expect("close blocked behind a running query");
+}
+
+/// Exported files always start with the header, even for an empty table
+/// (columns come from describing the query, not from the first row).
+async fn p2_empty_export_has_header(pools: &PoolManager, id: &str, db: &str) {
+    use lotdb_lib::commands::transfer::export_table_data_impl;
+    let path = std::env::temp_dir().join(format!("lotdb_p2_{id}.csv"));
+    let done = export_table_data_impl(
+        None,
+        pools,
+        id.into(),
+        db.into(),
+        None,
+        "empty".into(),
+        "csv".into(),
+        vec![],
+        None,
+        0,
+        path.to_string_lossy().into_owned(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(done.rows_exported, 0);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "\"id\",\"lock\"\n");
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn mysql_p2_regressions() {
+    let Some(mut cfg) = mysql_config() else {
+        return;
+    };
+    cfg.id = "p2-mysql".into();
+    let pools = PoolManager::new();
+    let reg = registry();
+    pools.open(&cfg).await.unwrap();
+    for sql in [
+        "DROP DATABASE IF EXISTS lotdb_p2",
+        "CREATE DATABASE lotdb_p2",
+        "CREATE TABLE lotdb_p2.t (id INT PRIMARY KEY, `set` INT, `lock` VARCHAR(10))",
+        "CREATE TABLE lotdb_p2.empty (id INT, `lock` INT)",
+        "CREATE VIEW lotdb_p2.slow AS SELECT SLEEP(2) AS s",
+    ] {
+        run_query(&pools, &reg, "p2-mysql", sql, None, None)
+            .await
+            .unwrap();
+    }
+    p2_empty_export_has_header(&pools, "p2-mysql", "lotdb_p2").await;
+
+    // Read-only mode lets metadata and keyword-named columns through.
+    let mut ro = cfg.clone();
+    ro.id = "p2-mysql-ro".into();
+    ro.readonly = true;
+    pools.open(&ro).await.unwrap();
+    for sql in [
+        "SHOW CREATE TABLE lotdb_p2.t",
+        "SELECT `set`, `lock` FROM lotdb_p2.t WHERE `set` = 1",
+        "EXPLAIN SELECT * FROM lotdb_p2.t",
+    ] {
+        run_query(&pools, &reg, "p2-mysql-ro", sql, None, None)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+    let err = run_query(&pools, &reg, "p2-mysql-ro", "SELECT 1 INTO @x", None, None)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("只读"), "{err}");
+
+    // Closing while a data-grid query runs must not wait on the map guard.
+    finishes_on_one_thread(move || {
+        Box::pin(async move {
+            let pools = PoolManager::new();
+            pools.open(&cfg).await.unwrap();
+            let page = get_table_data_impl(
+                &pools,
+                "p2-mysql",
+                "lotdb_p2",
+                None,
+                "slow",
+                10,
+                0,
+                None,
+                None,
+                &[],
+            );
+            let close = async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                pools.close("p2-mysql").await;
+            };
+            let _ = tokio::join!(page, close);
+            assert!(!pools.is_open("p2-mysql"));
+        })
+    });
+}
+
+#[tokio::test]
+async fn pg_p2_regressions() {
+    let Some(mut cfg) = pg_config() else {
+        return;
+    };
+    cfg.id = "p2-pg".into();
+    let pools = PoolManager::new();
+    let reg = registry();
+    pools.open(&cfg).await.unwrap();
+    for sql in [
+        "DROP DATABASE IF EXISTS lotdb_p2 WITH (FORCE)",
+        "CREATE DATABASE lotdb_p2",
+    ] {
+        run_query(&pools, &reg, "p2-pg", sql, None, None)
+            .await
+            .unwrap();
+    }
+    let db = pools
+        .pg_pool_for_database("p2-pg", "lotdb_p2")
+        .await
+        .unwrap();
+    for sql in [
+        "CREATE TABLE t (id INT PRIMARY KEY, lock INT, reset TEXT, copy TEXT)",
+        "CREATE TABLE empty (id INT, lock INT)",
+        "CREATE VIEW slow AS SELECT pg_sleep(2)::text AS s",
+    ] {
+        sqlx::query(sql).execute(&db).await.unwrap();
+    }
+    p2_empty_export_has_header(&pools, "p2-pg", "lotdb_p2").await;
+
+    let mut ro = cfg.clone();
+    ro.id = "p2-pg-ro".into();
+    ro.readonly = true;
+    ro.database = Some("lotdb_p2".into());
+    pools.open(&ro).await.unwrap();
+    for sql in [
+        "SELECT lock, reset, copy FROM t WHERE lock = 1",
+        "TABLE t",
+        "EXPLAIN (ANALYZE) SELECT * FROM t",
+    ] {
+        run_query(&pools, &reg, "p2-pg-ro", sql, None, None)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+    let err = run_query(
+        &pools,
+        &reg,
+        "p2-pg-ro",
+        "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x",
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("只读"), "{err}");
+
+    finishes_on_one_thread(move || {
+        Box::pin(async move {
+            let pools = PoolManager::new();
+            pools.open(&cfg).await.unwrap();
+            let page = get_table_data_impl(
+                &pools,
+                "p2-pg",
+                "lotdb_p2",
+                None,
+                "slow",
+                10,
+                0,
+                None,
+                None,
+                &[],
+            );
+            let close = async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                pools.close("p2-pg").await;
+            };
+            let _ = tokio::join!(page, close);
+            assert!(!pools.is_open("p2-pg"));
+        })
+    });
 }

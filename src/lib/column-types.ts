@@ -24,7 +24,14 @@ export const MYSQL_TYPE_GROUPS: TypeGroup[] = [
   },
   {
     label: "二进制",
-    types: ["BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"],
+    types: [
+      "BINARY",
+      "VARBINARY",
+      "TINYBLOB",
+      "BLOB",
+      "MEDIUMBLOB",
+      "LONGBLOB",
+    ],
   },
   {
     label: "其他",
@@ -65,27 +72,46 @@ export function getTypeGroups(dbType: DatabaseType): TypeGroup[] {
 
 /** Types that support a length/precision parameter */
 export const TYPES_WITH_LENGTH = new Set([
-  "CHAR", "VARCHAR", "BINARY", "VARBINARY",
-  "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE",
-  "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT",
+  "CHAR",
+  "VARCHAR",
+  "BINARY",
+  "VARBINARY",
+  "DECIMAL",
+  "NUMERIC",
+  "FLOAT",
+  "DOUBLE",
+  "TINYINT",
+  "SMALLINT",
+  "MEDIUMINT",
+  "INT",
+  "BIGINT",
 ]);
 
 /** Types that support auto_increment (MySQL) / SERIAL (PG via type itself) */
 export const MYSQL_AUTO_INCREMENT_TYPES = new Set([
-  "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT",
+  "TINYINT",
+  "SMALLINT",
+  "MEDIUMINT",
+  "INT",
+  "BIGINT",
 ]);
 
 export const PG_SERIAL_TYPES = new Set(["SERIAL", "BIGSERIAL"]);
 
-export function supportsAutoIncrement(type: string, dbType: DatabaseType): boolean {
+export function supportsAutoIncrement(
+  type: string,
+  dbType: DatabaseType,
+): boolean {
   if (dbType === "postgres") return PG_SERIAL_TYPES.has(type.toUpperCase());
   return MYSQL_AUTO_INCREMENT_TYPES.has(type.toUpperCase());
 }
 
 export function supportsUnsigned(type: string, dbType: DatabaseType): boolean {
   if (dbType === "postgres") return false;
-  return MYSQL_AUTO_INCREMENT_TYPES.has(type.toUpperCase()) ||
-    ["FLOAT", "DOUBLE", "DECIMAL"].includes(type.toUpperCase());
+  return (
+    MYSQL_AUTO_INCREMENT_TYPES.has(type.toUpperCase()) ||
+    ["FLOAT", "DOUBLE", "DECIMAL"].includes(type.toUpperCase())
+  );
 }
 
 export function supportsLength(type: string): boolean {

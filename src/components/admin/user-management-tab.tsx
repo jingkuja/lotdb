@@ -27,6 +27,7 @@ import {
   type DbPrivilege,
 } from "@/services/tauri-commands";
 import type { DatabaseType } from "@/types/database";
+import { formatDbError } from "@/lib/error";
 
 // ─── Create user form (inline panel) ─────────────────────────────
 
@@ -58,7 +59,7 @@ function CreateUserForm({
       await createUser(connectionId, username.trim(), host.trim(), password);
       onSuccess();
     } catch (err) {
-      setError(String(err));
+      setError(formatDbError(err));
     } finally {
       setLoading(false);
     }
@@ -178,7 +179,7 @@ function UserList({
       await dropUser(connectionId, user.username, user.host);
       onRefresh();
     } catch (err) {
-      await alertDialog(String(err), { title: "操作失败" });
+      await alertDialog(formatDbError(err), { title: "操作失败" });
     } finally {
       setDropping(null);
     }
@@ -310,7 +311,7 @@ function DbPrivRow({
       await grantPrivilege(connectionId, username, host, dbName);
       onRefresh();
     } catch (err) {
-      await alertDialog(String(err), { title: "操作失败" });
+      await alertDialog(formatDbError(err), { title: "操作失败" });
     } finally {
       setLoading(null);
     }
@@ -330,7 +331,7 @@ function DbPrivRow({
       await revokePrivilege(connectionId, username, host, dbName);
       onRefresh();
     } catch (err) {
-      await alertDialog(String(err), { title: "操作失败" });
+      await alertDialog(formatDbError(err), { title: "操作失败" });
     } finally {
       setLoading(null);
     }

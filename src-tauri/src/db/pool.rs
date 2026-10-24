@@ -1,10 +1,12 @@
+use crate::db::dialect::Dialect;
 use crate::db::ssh_tunnel::SshTunnel;
+use crate::error::AppError;
 use crate::models::connection::{ConnectionConfig, DbType, SslConfig};
 use dashmap::DashMap;
 use sqlx::{
     mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
-    MySqlPool, PgPool,
+    Column, Executor, MySqlPool, PgPool,
 };
 use std::time::Duration;
 
@@ -36,15 +38,48 @@ impl DbPool {
         }
     }
 
+    pub fn dialect(&self) -> Dialect {
+        match self {
+            DbPool::MySQL(_) => Dialect::MySQL,
+            DbPool::Postgres(_) => Dialect::Postgres,
+        }
+    }
+
     pub async fn close(&self) {
         match self {
             DbPool::MySQL(p) => p.close().await,
             DbPool::Postgres(p) => p.close().await,
         }
     }
+
+    /// Run one statement without arguments, returning rows affected. A bare
+    /// `&str` goes over the text protocol, so DDL that cannot be prepared
+    /// (MySQL rejects some) works too.
+    pub async fn execute(&self, sql: &str) -> Result<u64, sqlx::Error> {
+        Ok(match self {
+            DbPool::MySQL(p) => Executor::execute(p, sql).await?.rows_affected(),
+            DbPool::Postgres(p) => Executor::execute(p, sql).await?.rows_affected(),
+        })
+    }
+
+    /// Result column names of `sql`, without running it.
+    pub async fn describe_columns(&self, sql: &str) -> Result<Vec<String>, sqlx::Error> {
+        fn names<C: Column>(columns: &[C]) -> Vec<String> {
+            columns.iter().map(|c| c.name().to_owned()).collect()
+        }
+        Ok(match self {
+            DbPool::MySQL(p) => names(Executor::describe(p, sql).await?.columns()),
+            DbPool::Postgres(p) => names(Executor::describe(p, sql).await?.columns()),
+        })
+    }
 }
 
 /// Global manager — holds all active connections keyed by connection ID.
+///
+/// The maps are DashMaps: a guard returned by `get` locks its shard, so no
+/// guard may live across an `.await` (a slow query would block disconnect,
+/// reconnect and every other lookup in that shard). Callers use the
+/// accessors below, which clone what they need and drop the guard.
 pub struct PoolManager {
     pub pools: DashMap<String, ActiveConnection>,
     /// Cached per-database sub-pools for PG cross-database access.
@@ -52,6 +87,10 @@ pub struct PoolManager {
     pg_sub_pools: DashMap<String, PgPool>,
     /// Original configs (user/password/ssl) for building PG sub-pools.
     configs: DashMap<String, ConnectionConfig>,
+}
+
+fn not_open(id: &str) -> AppError {
+    AppError::connection(format!("连接 {id} 未打开，请重新连接"))
 }
 
 impl PoolManager {
@@ -64,9 +103,11 @@ impl PoolManager {
     }
 
     /// Open a connection (with optional SSH tunnel + SSL) for the given config.
-    pub async fn open(&self, config: &ConnectionConfig) -> Result<(), String> {
+    pub async fn open(&self, config: &ConnectionConfig) -> Result<(), AppError> {
         self.close(&config.id).await;
-        let conn = build_connection(config).await?;
+        let conn = build_connection(config)
+            .await
+            .map_err(AppError::connection)?;
         self.pools.insert(config.id.clone(), conn);
         self.configs.insert(config.id.clone(), config.clone());
         Ok(())
@@ -91,51 +132,90 @@ impl PoolManager {
         }
     }
 
+    /// The connection's main pool (a cheap clone).
+    pub fn pool(&self, id: &str) -> Result<DbPool, AppError> {
+        self.pools
+            .get(id)
+            .map(|entry| entry.pool.clone())
+            .ok_or_else(|| not_open(id))
+    }
+
+    pub fn dialect(&self, id: &str) -> Result<Dialect, AppError> {
+        self.pools
+            .get(id)
+            .map(|entry| entry.pool.dialect())
+            .ok_or_else(|| not_open(id))
+    }
+
+    /// The pool that runs statements in `database`. MySQL: the main pool —
+    /// statements qualify the database. PostgreSQL: the sub-pool connected to
+    /// that database, since a PG session cannot reach another database.
+    pub async fn pool_for(&self, id: &str, database: &str) -> Result<DbPool, AppError> {
+        match self.pool(id)? {
+            DbPool::MySQL(p) => Ok(DbPool::MySQL(p)),
+            DbPool::Postgres(_) => Ok(DbPool::Postgres(
+                self.pg_pool_for_database(id, database).await?,
+            )),
+        }
+    }
+
+    /// For PostgreSQL-only features (`feature` names it in the error).
+    pub async fn pg_pool(
+        &self,
+        id: &str,
+        database: &str,
+        feature: &str,
+    ) -> Result<PgPool, AppError> {
+        match self.dialect(id)? {
+            Dialect::Postgres => self.pg_pool_for_database(id, database).await,
+            Dialect::MySQL => Err(AppError::sql(format!("{feature}仅支持 PostgreSQL"))),
+        }
+    }
+
     /// For PostgreSQL: return (or lazily build) a PgPool connected to `database`.
     /// Caches sub-pools so repeated calls are cheap.
-    pub async fn pg_pool_for_database(&self, id: &str, database: &str) -> Result<PgPool, String> {
-        let entry = self
-            .pools
-            .get(id)
-            .ok_or_else(|| format!("连接 {id} 未打开"))?;
-
-        let main_pool = match &entry.pool {
-            DbPool::Postgres(p) => p,
-            DbPool::MySQL(_) => return Err("该连接是 MySQL，无法切换 PG 数据库".into()),
+    pub async fn pg_pool_for_database(&self, id: &str, database: &str) -> Result<PgPool, AppError> {
+        let (main_pool, host, port) = {
+            let entry = self.pools.get(id).ok_or_else(|| not_open(id))?;
+            match &entry.pool {
+                DbPool::Postgres(p) => (
+                    p.clone(),
+                    entry.effective_host.clone(),
+                    entry.effective_port,
+                ),
+                DbPool::MySQL(_) => {
+                    return Err(AppError::sql("该连接是 MySQL，无法切换 PG 数据库"))
+                }
+            }
         };
 
         let sub_key = format!("{id}::{database}");
 
         // Return cached sub-pool if already built
-        if let Some(p) = self.pg_sub_pools.get(&sub_key) {
-            return Ok(p.clone());
+        if let Some(p) = self.pg_sub_pools.get(&sub_key).map(|p| p.clone()) {
+            return Ok(p);
         }
 
         // Check whether main pool is already connected to this database
         // by running a quick query — avoids building a new pool for the default db
         let current_db: String = sqlx::query_scalar("SELECT current_database()::text")
-            .fetch_one(main_pool)
+            .fetch_one(&main_pool)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| AppError::from_sqlx("查询当前数据库失败", e))?;
 
         if current_db == database {
-            return Ok(main_pool.clone());
+            return Ok(main_pool);
         }
 
         // Build a new pool for the requested database
         let config = self
             .configs
             .get(id)
-            .ok_or_else(|| format!("找不到连接配置 {id}"))?;
+            .map(|c| c.clone())
+            .ok_or_else(|| not_open(id))?;
 
-        let opts = build_pg_opts(
-            &config.user,
-            &config.password,
-            &entry.effective_host,
-            entry.effective_port,
-            &config,
-        )
-        .database(database);
+        let opts =
+            build_pg_opts(&config.user, &config.password, &host, port, &config).database(database);
 
         let readonly = config.readonly;
         let pool = PgPoolOptions::new()
@@ -153,9 +233,10 @@ impl PoolManager {
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(opts)
             .await
-            .map_err(|e| format!("连接数据库 {database} 失败: {e}"))?;
+            .map_err(|e| AppError::from_sqlx(&format!("连接数据库 {database} 失败"), e))?;
 
-        self.pg_sub_pools.insert(sub_key, pool.clone());
+        // Two callers may race to build the same sub-pool; keep the first.
+        let pool = self.pg_sub_pools.entry(sub_key).or_insert(pool).clone();
         Ok(pool)
     }
 
@@ -169,12 +250,12 @@ impl PoolManager {
         self.pools.contains_key(id)
     }
 
-    pub fn ensure_writable(&self, id: &str) -> Result<(), String> {
+    pub fn ensure_writable(&self, id: &str) -> Result<(), AppError> {
         if !self.is_open(id) {
-            return Err(format!("连接 {id} 未打开"));
+            return Err(not_open(id));
         }
         if self.is_readonly(id) {
-            return Err("该连接为只读模式，已拦截数据或结构变更".into());
+            return Err(AppError::sql("该连接为只读模式，已拦截数据或结构变更"));
         }
         Ok(())
     }
@@ -186,39 +267,17 @@ impl PoolManager {
             .map(|c| (c.user.clone(), c.password.clone()))
     }
 
+    /// Host and port external tools must use (the tunnel's local end for SSH).
+    pub fn effective_address(&self, id: &str) -> Result<(String, u16), AppError> {
+        self.pools
+            .get(id)
+            .map(|e| (e.effective_host.clone(), e.effective_port))
+            .ok_or_else(|| not_open(id))
+    }
+
     /// Whether this connection blocks DML/DDL (readonly mode).
     pub fn is_readonly(&self, id: &str) -> bool {
         self.configs.get(id).map(|c| c.readonly).unwrap_or(false)
-    }
-
-    /// Run a closure with a MySQL pool reference.
-    pub fn with_mysql<F, T>(&self, id: &str, f: F) -> Result<T, String>
-    where
-        F: FnOnce(&MySqlPool) -> T,
-    {
-        let entry = self
-            .pools
-            .get(id)
-            .ok_or_else(|| format!("连接 {id} 未打开"))?;
-        match &entry.pool {
-            DbPool::MySQL(p) => Ok(f(p)),
-            DbPool::Postgres(_) => Err("该连接是 PostgreSQL，不是 MySQL".into()),
-        }
-    }
-
-    /// Run a closure with a Postgres pool reference.
-    pub fn with_postgres<F, T>(&self, id: &str, f: F) -> Result<T, String>
-    where
-        F: FnOnce(&PgPool) -> T,
-    {
-        let entry = self
-            .pools
-            .get(id)
-            .ok_or_else(|| format!("连接 {id} 未打开"))?;
-        match &entry.pool {
-            DbPool::Postgres(p) => Ok(f(p)),
-            DbPool::MySQL(_) => Err("该连接是 MySQL，不是 PostgreSQL".into()),
-        }
     }
 }
 

@@ -1,5 +1,9 @@
 import { useState } from "react";
-import { alertDialog, confirmDialog, promptDialog } from "@/stores/app-dialog-store";
+import {
+  alertDialog,
+  confirmDialog,
+  promptDialog,
+} from "@/stores/app-dialog-store";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -26,6 +30,7 @@ import {
   restartSequence,
 } from "@/services/tauri-commands";
 import { useSequences } from "@/hooks/use-objects";
+import { formatDbError } from "@/lib/error";
 
 interface SequenceManagerTabProps {
   connectionId: string;
@@ -56,7 +61,11 @@ export function SequenceManagerTab({
   database,
   schema,
 }: SequenceManagerTabProps) {
-  const { data: rows = [], isLoading, error } = useSequences(connectionId, database, schema, true);
+  const {
+    data: rows = [],
+    isLoading,
+    error,
+  } = useSequences(connectionId, database, schema, true);
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState<CreateForm>(EMPTY_FORM);
@@ -75,7 +84,7 @@ export function SequenceManagerTab({
       await fn();
       await refresh();
     } catch (e) {
-      setActionError(String(e));
+      setActionError(formatDbError(e));
     } finally {
       setBusy(null);
     }
@@ -109,7 +118,13 @@ export function SequenceManagerTab({
     }
     void withBusy(`restart:${name}`, async () => {
       const v = input.trim();
-      await restartSequence(connectionId, database, schema, name, v ? Number(v) : null);
+      await restartSequence(
+        connectionId,
+        database,
+        schema,
+        name,
+        v ? Number(v) : null,
+      );
     });
   };
 
@@ -165,7 +180,7 @@ export function SequenceManagerTab({
       ) : error ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 text-destructive">
           <AlertCircle className="size-5" />
-          <p className="text-sm">{String(error)}</p>
+          <p className="text-sm">{formatDbError(error)}</p>
         </div>
       ) : rows.length === 0 ? (
         <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
@@ -181,7 +196,9 @@ export function SequenceManagerTab({
                 <th className="px-3 py-1.5 text-right font-medium">当前值</th>
                 <th className="px-3 py-1.5 text-right font-medium">起始</th>
                 <th className="px-3 py-1.5 text-right font-medium">增量</th>
-                <th className="px-3 py-1.5 text-right font-medium">最小/最大</th>
+                <th className="px-3 py-1.5 text-right font-medium">
+                  最小/最大
+                </th>
                 <th className="px-3 py-1.5 text-left font-medium">循环</th>
                 <th className="px-3 py-1.5 text-right font-medium">操作</th>
               </tr>
@@ -195,10 +212,16 @@ export function SequenceManagerTab({
                     (i % 2 === 1 ? "bg-muted/10" : "")
                   }
                 >
-                  <td className="px-3 py-1.5 font-mono font-medium">{s.name}</td>
-                  <td className="px-3 py-1.5 text-muted-foreground">{s.dataType}</td>
+                  <td className="px-3 py-1.5 font-mono font-medium">
+                    {s.name}
+                  </td>
+                  <td className="px-3 py-1.5 text-muted-foreground">
+                    {s.dataType}
+                  </td>
                   <td className="px-3 py-1.5 text-right font-mono">
-                    {s.lastValue ?? <span className="italic opacity-50">未使用</span>}
+                    {s.lastValue ?? (
+                      <span className="italic opacity-50">未使用</span>
+                    )}
                   </td>
                   <td className="px-3 py-1.5 text-right font-mono text-muted-foreground">
                     {s.startValue}
@@ -301,10 +324,17 @@ export function SequenceManagerTab({
             />
           </div>
           <DialogFooter>
-            <Button variant="ghost" size="sm" onClick={() => setCreateOpen(false)}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setCreateOpen(false)}
+            >
               取消
             </Button>
-            <Button onClick={handleCreate} disabled={!form.name.trim() || busy === "create"}>
+            <Button
+              onClick={handleCreate}
+              disabled={!form.name.trim() || busy === "create"}
+            >
               {busy === "create" && <Loader2 className="size-3 animate-spin" />}
               创建
             </Button>

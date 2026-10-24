@@ -11,7 +11,10 @@
  * Trailing semicolon is stripped per statement; whitespace-only results are
  * dropped (including statements that were only comments).
  */
-export function splitStatements(sql: string, dialect: "mysql" | "postgres" = "mysql"): string[] {
+export function splitStatements(
+  sql: string,
+  dialect: "mysql" | "postgres" = "mysql",
+): string[] {
   const out: string[] = [];
   let current = "";
   let i = 0;
@@ -50,7 +53,11 @@ export function splitStatements(sql: string, dialect: "mysql" | "postgres" = "my
       const quote = c;
       let j = i + 1;
       while (j < n) {
-        if (sql[j] === "\\" && quote === "'" && (dialect === "mysql" || (i > 0 && /[eE]/.test(sql[i - 1]!)))) {
+        if (
+          sql[j] === "\\" &&
+          quote === "'" &&
+          (dialect === "mysql" || (i > 0 && /[eE]/.test(sql[i - 1]!)))
+        ) {
           j += 2; // backslash escape inside '...'
           continue;
         }
@@ -100,7 +107,10 @@ export function splitStatements(sql: string, dialect: "mysql" | "postgres" = "my
 }
 
 /** True when the fragment contains nothing but comments and whitespace. */
-function isCommentOnly(fragment: string, dialect: "mysql" | "postgres"): boolean {
+function isCommentOnly(
+  fragment: string,
+  dialect: "mysql" | "postgres",
+): boolean {
   const stripped = fragment
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/--[^\n]*/g, "")

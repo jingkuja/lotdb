@@ -1,9 +1,11 @@
+use crate::db::dialect::Dialect;
 use crate::db::pool::{DbPool, PoolManager};
 use crate::db::value::{mysql_value_to_json, pg_value_to_json};
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
+#[cfg(test)]
 use crate::utils::sql::{quote_ident_mysql, quote_ident_pg};
 use serde::{Deserialize, Serialize};
-use sqlx::{Arguments, Column, Executor, Row};
+use sqlx::{Arguments, Row};
 use tauri::State;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,29 +38,6 @@ fn escape_like(value: &str) -> String {
         }
     }
     out
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum Dialect {
-    MySQL,
-    Postgres,
-}
-
-impl Dialect {
-    /// `?` for MySQL, `$n` for PostgreSQL.
-    fn placeholder(&self, n: usize) -> String {
-        match self {
-            Dialect::MySQL => "?".to_string(),
-            Dialect::Postgres => format!("${n}"),
-        }
-    }
-
-    fn quote_ident(&self, ident: &str) -> String {
-        match self {
-            Dialect::MySQL => quote_ident_mysql(ident),
-            Dialect::Postgres => quote_ident_pg(ident),
-        }
-    }
 }
 
 /// WHERE clause with bind placeholders instead of inlined values.
@@ -205,55 +184,100 @@ pub async fn get_table_page_impl(
     include_count: bool,
     stable_columns: &[String],
 ) -> Result<TableDataResult, AppError> {
-    let entry = pools
-        .pools
-        .get(connection_id)
-        .ok_or_else(|| AppError::connection(format!("连接 {connection_id} 未打开")))?;
+    let pool = pools.pool_for(connection_id, database).await?;
+    let dialect = pool.dialect();
+    let schema = schema.unwrap_or("public");
+    let col_types = match &pool {
+        DbPool::Postgres(p) => pg_column_types(p, schema, table).await?,
+        DbPool::MySQL(_) => Default::default(),
+    };
+    let q_table = dialect.table_ref(database, Some(schema), table);
+    let (where_clause, binds) = build_where(filters, dialect, &col_types);
 
     let dir = match order_dir {
         Some("DESC") => "DESC",
         _ => "ASC",
     };
-
-    match &entry.pool {
-        DbPool::MySQL(pool) => {
-            fetch_mysql(
-                pool,
-                database,
-                table,
-                limit,
-                offset,
-                order_by,
-                dir,
-                filters,
-                include_count,
-                stable_columns,
-            )
-            .await
-        }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = pools
-                .pg_pool_for_database(connection_id, database)
-                .await
-                .map_err(AppError::connection)?;
-            let schema_ref = schema.unwrap_or("public");
-            fetch_postgres(
-                &pool,
-                database,
-                schema_ref,
-                table,
-                limit,
-                offset,
-                order_by,
-                dir,
-                filters,
-                include_count,
-                stable_columns,
-            )
-            .await
+    let mut order_columns: Vec<&str> = order_by.into_iter().collect();
+    for col in stable_columns {
+        if !order_columns.contains(&col.as_str()) {
+            order_columns.push(col);
         }
     }
+    let order_clause = if order_columns.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " ORDER BY {}",
+            order_columns
+                .iter()
+                .map(|col| format!("{} {dir}", dialect.quote_ident(col)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let (limit, offset) = sanitize_page(limit, offset);
+    let count_sql = format!("SELECT COUNT(*) FROM {q_table}{where_clause}");
+    let data_sql = format!(
+        "SELECT * FROM {q_table}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}"
+    );
+    let count_sql = include_count.then_some(count_sql.as_str());
+
+    let (total_count, rows) = match &pool {
+        DbPool::MySQL(p) => {
+            let total = match count_sql {
+                Some(sql) => sqlx::query_scalar_with(sql, build_mysql_args(&binds)?)
+                    .fetch_one(p)
+                    .await
+                    .ctx("计数失败")?,
+                None => -1,
+            };
+            let rows = sqlx::query_with(&data_sql, build_mysql_args(&binds)?)
+                .fetch_all(p)
+                .await
+                .ctx("查询失败")?;
+            (
+                total,
+                rows.iter()
+                    .map(|r| row_json(r, mysql_value_to_json))
+                    .collect(),
+            )
+        }
+        DbPool::Postgres(p) => {
+            let total = match count_sql {
+                Some(sql) => sqlx::query_scalar_with(sql, build_pg_args(&binds)?)
+                    .fetch_one(p)
+                    .await
+                    .ctx("计数失败")?,
+                None => -1,
+            };
+            let rows = sqlx::query_with(&data_sql, build_pg_args(&binds)?)
+                .fetch_all(p)
+                .await
+                .ctx("查询失败")?;
+            (
+                total,
+                rows.iter().map(|r| row_json(r, pg_value_to_json)).collect(),
+            )
+        }
+    };
+    let columns = pool
+        .describe_columns(&data_sql)
+        .await
+        .ctx("获取结果列失败")?;
+
+    Ok(TableDataResult {
+        columns,
+        rows,
+        total_count,
+    })
+}
+
+fn row_json<R: Row>(
+    row: &R,
+    to_json: fn(&R, usize) -> serde_json::Value,
+) -> Vec<serde_json::Value> {
+    (0..row.columns().len()).map(|i| to_json(row, i)).collect()
 }
 
 fn build_mysql_args(binds: &[String]) -> Result<sqlx::mysql::MySqlArguments, AppError> {
@@ -272,168 +296,6 @@ fn build_pg_args(binds: &[String]) -> Result<sqlx::postgres::PgArguments, AppErr
             .map_err(|e| AppError::sql(format!("筛选参数绑定失败: {e}")))?;
     }
     Ok(args)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn fetch_mysql(
-    pool: &sqlx::MySqlPool,
-    database: &str,
-    table: &str,
-    limit: i64,
-    offset: i64,
-    order_by: Option<&str>,
-    order_dir: &str,
-    filters: &[ColumnFilter],
-    include_count: bool,
-    stable_columns: &[String],
-) -> Result<TableDataResult, AppError> {
-    let q_table = format!(
-        "{}.{}",
-        quote_ident_mysql(database),
-        quote_ident_mysql(table)
-    );
-    let (where_clause, binds) = build_where(filters, Dialect::MySQL, &Default::default());
-
-    let count_sql = format!("SELECT COUNT(*) FROM {q_table}{where_clause}");
-    let total_count: i64 = if include_count {
-        sqlx::query_scalar_with(&count_sql, build_mysql_args(&binds)?)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| AppError::from_sqlx("计数失败", e))?
-    } else {
-        -1
-    };
-
-    let mut order_columns: Vec<String> = order_by.into_iter().map(str::to_owned).collect();
-    for col in stable_columns {
-        if !order_columns.contains(col) {
-            order_columns.push(col.clone());
-        }
-    }
-    let order_clause = if order_columns.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " ORDER BY {}",
-            order_columns
-                .iter()
-                .map(|col| format!("{} {order_dir}", quote_ident_mysql(col)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let (limit, offset) = sanitize_page(limit, offset);
-    let data_sql = format!(
-        "SELECT * FROM {q_table}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}"
-    );
-    let rows = sqlx::query_with(&data_sql, build_mysql_args(&binds)?)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| AppError::from_sqlx("查询失败", e))?;
-
-    let columns = pool
-        .describe(&data_sql)
-        .await
-        .map_err(|e| AppError::from_sqlx("获取结果列失败", e))?
-        .columns()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
-
-    let result_rows = rows
-        .iter()
-        .map(|row| {
-            (0..row.columns().len())
-                .map(|i| mysql_value_to_json(row, i))
-                .collect()
-        })
-        .collect();
-
-    Ok(TableDataResult {
-        columns,
-        rows: result_rows,
-        total_count,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn fetch_postgres(
-    pool: &sqlx::PgPool,
-    _database: &str,
-    schema: &str,
-    table: &str,
-    limit: i64,
-    offset: i64,
-    order_by: Option<&str>,
-    order_dir: &str,
-    filters: &[ColumnFilter],
-    include_count: bool,
-    stable_columns: &[String],
-) -> Result<TableDataResult, AppError> {
-    let q_table = format!("{}.{}", quote_ident_pg(schema), quote_ident_pg(table));
-    let col_types = pg_column_types(pool, schema, table).await?;
-    let (where_clause, binds) = build_where(filters, Dialect::Postgres, &col_types);
-
-    let count_sql = format!("SELECT COUNT(*) FROM {q_table}{where_clause}");
-    let total_count: i64 = if include_count {
-        sqlx::query_scalar_with(&count_sql, build_pg_args(&binds)?)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| AppError::from_sqlx("计数失败", e))?
-    } else {
-        -1
-    };
-
-    let mut order_columns: Vec<String> = order_by.into_iter().map(str::to_owned).collect();
-    for col in stable_columns {
-        if !order_columns.contains(col) {
-            order_columns.push(col.clone());
-        }
-    }
-    let order_clause = if order_columns.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " ORDER BY {}",
-            order_columns
-                .iter()
-                .map(|col| format!("{} {order_dir}", quote_ident_pg(col)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let (limit, offset) = sanitize_page(limit, offset);
-    let data_sql = format!(
-        "SELECT * FROM {q_table}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}"
-    );
-    let rows = sqlx::query_with(&data_sql, build_pg_args(&binds)?)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| AppError::from_sqlx("查询失败", e))?;
-
-    let columns = pool
-        .describe(&data_sql)
-        .await
-        .map_err(|e| AppError::from_sqlx("获取结果列失败", e))?
-        .columns()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
-
-    let result_rows = rows
-        .iter()
-        .map(|row| {
-            (0..row.columns().len())
-                .map(|i| pg_value_to_json(row, i))
-                .collect()
-        })
-        .collect();
-
-    Ok(TableDataResult {
-        columns,
-        rows: result_rows,
-        total_count,
-    })
 }
 
 /// Clamp LIMIT/OFFSET to non-negative values before inlining into SQL.
@@ -457,7 +319,7 @@ async fn pg_column_types(
     .bind(table)
     .fetch_all(pool)
     .await
-    .map_err(|e| AppError::from_sqlx("查询列类型失败", e))?;
+    .ctx("查询列类型失败")?;
     Ok(rows.into_iter().collect())
 }
 
@@ -534,93 +396,68 @@ pub async fn execute_checked_statements_impl(
             "该连接为只读模式，已拦截数据变更（可在连接设置中关闭只读）",
         ));
     }
-
-    let entry = pools
-        .pools
-        .get(connection_id)
-        .ok_or_else(|| AppError::connection(format!("连接 {connection_id} 未打开")))?;
-
-    match &entry.pool {
-        DbPool::MySQL(pool) => {
-            let mut tx = pool
-                .begin()
-                .await
-                .map_err(|e| AppError::from_sqlx("开启事务失败", e))?;
+    let pool = match database {
+        Some(db) => pools.pool_for(connection_id, db).await?,
+        None => pools.pool(connection_id)?,
+    };
+    match &pool {
+        DbPool::MySQL(p) => {
+            let mut tx = p.begin().await.ctx("开启事务失败")?;
             for check in checks {
                 let row = sqlx::query(&check.sql)
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|e| AppError::from_sqlx("校验原始数据失败", e))?;
-                let actual = row.as_ref().map(|row| {
-                    (0..row.columns().len())
-                        .map(|i| mysql_value_to_json(row, i))
-                        .collect::<Vec<_>>()
-                });
-                if !actual.is_some_and(|row| same_row(&row, &check.original)) {
-                    return Err(AppError::sql("数据已被其他操作修改或删除，本次提交已回滚。请先保存草稿，再刷新数据并重新编辑。"));
-                }
+                    .ctx("校验原始数据失败")?;
+                ensure_unchanged(
+                    row.as_ref().map(|r| row_json(r, mysql_value_to_json)),
+                    check,
+                )?;
             }
             let mut total: u64 = 0;
             for sql in sqls {
                 let res = sqlx::query(sql)
                     .execute(&mut *tx)
                     .await
-                    .map_err(|e| AppError::from_sqlx(&format!("执行失败\nSQL: {sql}"), e))?;
+                    .ctx(&format!("执行失败\nSQL: {sql}"))?;
                 total += res.rows_affected();
             }
-            tx.commit()
-                .await
-                .map_err(|e| AppError::from_sqlx("提交事务失败", e))?;
+            tx.commit().await.ctx("提交事务失败")?;
             Ok(total)
         }
-        DbPool::Postgres(_) => {
-            drop(entry);
-            let pool = if let Some(db) = database {
-                pools
-                    .pg_pool_for_database(connection_id, db)
-                    .await
-                    .map_err(AppError::connection)?
-            } else {
-                let e = pools
-                    .pools
-                    .get(connection_id)
-                    .ok_or_else(|| AppError::connection(format!("连接 {connection_id} 未打开")))?;
-                match &e.pool {
-                    DbPool::Postgres(p) => p.clone(),
-                    _ => unreachable!(),
-                }
-            };
-            let mut tx = pool
-                .begin()
-                .await
-                .map_err(|e| AppError::from_sqlx("开启事务失败", e))?;
+        DbPool::Postgres(p) => {
+            let mut tx = p.begin().await.ctx("开启事务失败")?;
             for check in checks {
                 let row = sqlx::query(&check.sql)
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|e| AppError::from_sqlx("校验原始数据失败", e))?;
-                let actual = row.as_ref().map(|row| {
-                    (0..row.columns().len())
-                        .map(|i| pg_value_to_json(row, i))
-                        .collect::<Vec<_>>()
-                });
-                if !actual.is_some_and(|row| same_row(&row, &check.original)) {
-                    return Err(AppError::sql("数据已被其他操作修改或删除，本次提交已回滚。请先保存草稿，再刷新数据并重新编辑。"));
-                }
+                    .ctx("校验原始数据失败")?;
+                ensure_unchanged(row.as_ref().map(|r| row_json(r, pg_value_to_json)), check)?;
             }
             let mut total: u64 = 0;
             for sql in sqls {
                 let res = sqlx::query(sql)
                     .execute(&mut *tx)
                     .await
-                    .map_err(|e| AppError::from_sqlx(&format!("执行失败\nSQL: {sql}"), e))?;
+                    .ctx(&format!("执行失败\nSQL: {sql}"))?;
                 total += res.rows_affected();
             }
-            tx.commit()
-                .await
-                .map_err(|e| AppError::from_sqlx("提交事务失败", e))?;
+            tx.commit().await.ctx("提交事务失败")?;
             Ok(total)
         }
+    }
+}
+
+/// The transaction is dropped (rolled back) when this fails.
+fn ensure_unchanged(
+    actual: Option<Vec<serde_json::Value>>,
+    check: &RowCheck,
+) -> Result<(), AppError> {
+    if actual.is_some_and(|row| same_row(&row, &check.original)) {
+        Ok(())
+    } else {
+        Err(AppError::sql(
+            "数据已被其他操作修改或删除，本次提交已回滚。请先保存草稿，再刷新数据并重新编辑。",
+        ))
     }
 }
 

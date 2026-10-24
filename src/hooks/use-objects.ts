@@ -103,9 +103,15 @@ export function useObjectMutation<TArgs, TResult>(
   return useMutation({
     mutationFn,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["triggers", invalidate.connectionId, invalidate.database] });
-      qc.invalidateQueries({ queryKey: ["sequences", invalidate.connectionId, invalidate.database] });
-      qc.invalidateQueries({ queryKey: ["enums", invalidate.connectionId, invalidate.database] });
+      qc.invalidateQueries({
+        queryKey: ["triggers", invalidate.connectionId, invalidate.database],
+      });
+      qc.invalidateQueries({
+        queryKey: ["sequences", invalidate.connectionId, invalidate.database],
+      });
+      qc.invalidateQueries({
+        queryKey: ["enums", invalidate.connectionId, invalidate.database],
+      });
     },
   });
 }

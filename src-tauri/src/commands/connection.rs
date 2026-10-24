@@ -1,3 +1,4 @@
+use crate::error::{local_store, AppError, ResultExt};
 use crate::models::connection::ConnectionConfig;
 use crate::utils::keychain;
 use sqlx::SqlitePool;
@@ -9,7 +10,7 @@ type DbPool = SqlitePool;
 pub async fn create_connection(
     pool: State<'_, DbPool>,
     config: ConnectionConfig,
-) -> Result<ConnectionConfig, String> {
+) -> Result<ConnectionConfig, AppError> {
     store_secrets(&config).await?;
     insert_connection(pool.inner(), &config).await?;
     Ok(config)
@@ -17,13 +18,16 @@ pub async fn create_connection(
 
 /// Passwords go to Keychain; SQLite only ever sees empty strings. An empty
 /// password in `config` means "unchanged", so it never clears a stored one.
-async fn store_secrets(config: &ConnectionConfig) -> Result<(), String> {
+async fn store_secrets(config: &ConnectionConfig) -> Result<(), AppError> {
     if !config.password.is_empty() {
-        keychain::store_password_async(config.id.clone(), config.password.clone()).await?;
+        keychain::store_password_async(config.id.clone(), config.password.clone())
+            .await
+            .map_err(AppError::io)?;
     }
     if let Some(secret) = config.ssh.as_ref().and_then(|s| s.secret()) {
         keychain::store_password_async(keychain::ssh_account(&config.id), secret.to_owned())
-            .await?;
+            .await
+            .map_err(AppError::io)?;
     }
     Ok(())
 }
@@ -51,7 +55,7 @@ fn ssh_json(config: &ConnectionConfig) -> Option<String> {
         .map(|s| serde_json::to_string(&s.without_secrets()).unwrap())
 }
 
-async fn insert_connection(pool: &DbPool, config: &ConnectionConfig) -> Result<(), String> {
+async fn insert_connection(pool: &DbPool, config: &ConnectionConfig) -> Result<(), AppError> {
     let ssl_json = config
         .ssl
         .as_ref()
@@ -75,16 +79,16 @@ async fn insert_connection(pool: &DbPool, config: &ConnectionConfig) -> Result<(
     .bind(&config.color)
     .execute(pool)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(local_store("读取连接配置失败"))?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn get_connections(pool: State<'_, DbPool>) -> Result<Vec<ConnectionConfig>, String> {
+pub async fn get_connections(pool: State<'_, DbPool>) -> Result<Vec<ConnectionConfig>, AppError> {
     let rows = sqlx::query_as::<_, ConnectionRow>("SELECT * FROM connections ORDER BY name")
         .fetch_all(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(local_store("读取连接配置失败"))?;
 
     // Do not touch Keychain here. The packaged .app is a different binary
     // than `tauri dev`, so a sync SecItem read can block forever waiting
@@ -132,7 +136,7 @@ pub async fn update_connection(
     pools: State<'_, crate::db::pool::PoolManager>,
     registry: State<'_, crate::commands::query::QueryRegistry>,
     config: ConnectionConfig,
-) -> Result<ConnectionConfig, String> {
+) -> Result<ConnectionConfig, AppError> {
     store_secrets(&config).await?;
 
     let ssl_json = config
@@ -158,7 +162,7 @@ pub async fn update_connection(
     .bind(&config.id)
     .execute(pool.inner())
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(local_store("读取连接配置失败"))?;
 
     // Saved settings and active sessions must not disagree about readonly.
     registry.close_sessions(&config.id);
@@ -168,15 +172,15 @@ pub async fn update_connection(
 }
 
 #[tauri::command]
-pub async fn delete_connection(pool: State<'_, DbPool>, id: String) -> Result<(), String> {
-    keychain::delete_password(&id);
-    keychain::delete_password(&keychain::ssh_account(&id));
+pub async fn delete_connection(pool: State<'_, DbPool>, id: String) -> Result<(), AppError> {
+    keychain::delete_password_async(id.clone()).await;
+    keychain::delete_password_async(keychain::ssh_account(&id)).await;
 
     sqlx::query("DELETE FROM connections WHERE id=?")
         .bind(&id)
         .execute(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(local_store("读取连接配置失败"))?;
     Ok(())
 }
 
@@ -186,11 +190,11 @@ pub async fn delete_connection(pool: State<'_, DbPool>, id: String) -> Result<()
 pub async fn export_connections(
     pool: State<'_, DbPool>,
     file_path: String,
-) -> Result<usize, String> {
+) -> Result<usize, AppError> {
     let rows = sqlx::query_as::<_, ConnectionRow>("SELECT * FROM connections ORDER BY name")
         .fetch_all(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(local_store("读取连接配置失败"))?;
     let configs: Vec<ConnectionConfig> = rows
         .into_iter()
         .map(|r| {
@@ -199,10 +203,10 @@ pub async fn export_connections(
             c
         })
         .collect();
-    let json = serde_json::to_string_pretty(&configs).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&configs).ctx("序列化连接配置失败")?;
     tokio::fs::write(&file_path, json)
         .await
-        .map_err(|e| format!("写入文件失败: {e}"))?;
+        .ctx("写入文件失败")?;
     Ok(configs.len())
 }
 
@@ -216,7 +220,7 @@ pub struct ImportConnectionsResult {
 pub async fn import_connections(
     pool: State<'_, DbPool>,
     configs: Vec<ConnectionConfig>,
-) -> Result<ImportConnectionsResult, String> {
+) -> Result<ImportConnectionsResult, AppError> {
     let mut imported = 0u32;
     let mut skipped = 0u32;
 
@@ -227,7 +231,7 @@ pub async fn import_connections(
                 .bind(&config.id)
                 .fetch_one(pool.inner())
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(local_store("读取连接配置失败"))?;
 
         if exists {
             skipped += 1;
@@ -244,10 +248,12 @@ pub async fn import_connections(
 }
 
 #[tauri::command]
-pub async fn test_connection(mut config: ConnectionConfig) -> Result<String, String> {
+pub async fn test_connection(mut config: ConnectionConfig) -> Result<String, AppError> {
     load_secrets(&mut config).await;
     // Re-use the same pool builder (includes SSH tunnel + SSL logic).
-    let conn = crate::db::pool::build_connection_pub(&config).await?;
+    let conn = crate::db::pool::build_connection_pub(&config)
+        .await
+        .map_err(AppError::connection)?;
     conn.pool.close().await;
 
     Ok("连接成功".to_string())

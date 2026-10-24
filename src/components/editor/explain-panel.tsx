@@ -5,29 +5,68 @@ import type { ExplainResult } from "@/services/tauri-commands";
 // Best → worst: system/const > eq_ref > ref > range > index > ALL
 
 const ACCESS_TYPE_COLORS: Record<string, { bg: string; text: string }> = {
-  system:           { bg: "bg-green-500/15",  text: "text-green-700 dark:text-green-400" },
-  const:            { bg: "bg-green-500/15",  text: "text-green-700 dark:text-green-400" },
-  eq_ref:           { bg: "bg-emerald-500/15", text: "text-emerald-700 dark:text-emerald-400" },
-  ref:              { bg: "bg-blue-500/15",   text: "text-blue-700 dark:text-blue-400" },
-  fulltext:         { bg: "bg-blue-500/15",   text: "text-blue-700 dark:text-blue-400" },
-  ref_or_null:      { bg: "bg-blue-500/15",   text: "text-blue-700 dark:text-blue-400" },
-  index_merge:      { bg: "bg-sky-500/15",    text: "text-sky-700 dark:text-sky-400" },
-  unique_subquery:  { bg: "bg-yellow-500/15", text: "text-yellow-700 dark:text-yellow-500" },
-  index_subquery:   { bg: "bg-yellow-500/15", text: "text-yellow-700 dark:text-yellow-500" },
-  range:            { bg: "bg-yellow-500/15", text: "text-yellow-700 dark:text-yellow-500" },
-  index:            { bg: "bg-orange-500/15", text: "text-orange-700 dark:text-orange-400" },
-  ALL:              { bg: "bg-red-500/15",    text: "text-red-700 dark:text-red-400" },
+  system: { bg: "bg-green-500/15", text: "text-green-700 dark:text-green-400" },
+  const: { bg: "bg-green-500/15", text: "text-green-700 dark:text-green-400" },
+  eq_ref: {
+    bg: "bg-emerald-500/15",
+    text: "text-emerald-700 dark:text-emerald-400",
+  },
+  ref: { bg: "bg-blue-500/15", text: "text-blue-700 dark:text-blue-400" },
+  fulltext: { bg: "bg-blue-500/15", text: "text-blue-700 dark:text-blue-400" },
+  ref_or_null: {
+    bg: "bg-blue-500/15",
+    text: "text-blue-700 dark:text-blue-400",
+  },
+  index_merge: { bg: "bg-sky-500/15", text: "text-sky-700 dark:text-sky-400" },
+  unique_subquery: {
+    bg: "bg-yellow-500/15",
+    text: "text-yellow-700 dark:text-yellow-500",
+  },
+  index_subquery: {
+    bg: "bg-yellow-500/15",
+    text: "text-yellow-700 dark:text-yellow-500",
+  },
+  range: {
+    bg: "bg-yellow-500/15",
+    text: "text-yellow-700 dark:text-yellow-500",
+  },
+  index: {
+    bg: "bg-orange-500/15",
+    text: "text-orange-700 dark:text-orange-400",
+  },
+  ALL: { bg: "bg-red-500/15", text: "text-red-700 dark:text-red-400" },
 };
 
 // ─── PG node-type keywords ────────────────────────────────────────
 
 const PG_NODE_KEYWORDS = [
-  "Seq Scan", "Index Scan", "Index Only Scan", "Bitmap Index Scan",
-  "Bitmap Heap Scan", "Hash Join", "Merge Join", "Nested Loop",
-  "Hash", "Sort", "Aggregate", "Group", "Gather", "Gather Merge",
-  "Limit", "Append", "Materialize", "Subquery Scan", "Result",
-  "WindowAgg", "Unique", "SetOp", "LockRows", "ModifyTable",
-  "CTE Scan", "Function Scan", "Values Scan",
+  "Seq Scan",
+  "Index Scan",
+  "Index Only Scan",
+  "Bitmap Index Scan",
+  "Bitmap Heap Scan",
+  "Hash Join",
+  "Merge Join",
+  "Nested Loop",
+  "Hash",
+  "Sort",
+  "Aggregate",
+  "Group",
+  "Gather",
+  "Gather Merge",
+  "Limit",
+  "Append",
+  "Materialize",
+  "Subquery Scan",
+  "Result",
+  "WindowAgg",
+  "Unique",
+  "SetOp",
+  "LockRows",
+  "ModifyTable",
+  "CTE Scan",
+  "Function Scan",
+  "Values Scan",
 ];
 
 const PG_NODE_RE = new RegExp(
@@ -38,7 +77,8 @@ const PG_NODE_RE = new RegExp(
 // Highlight cost=X..Y rows=Z and actual time=A..B
 function highlightPgLine(line: string): React.ReactNode {
   // Split by patterns we want to highlight
-  const parts: { text: string; kind: "plain" | "node" | "cost" | "actual" }[] = [];
+  const parts: { text: string; kind: "plain" | "node" | "cost" | "actual" }[] =
+    [];
 
   let remaining = line;
 
@@ -145,10 +185,14 @@ function TableExplainView({
         </thead>
         <tbody>
           {rows.map((row, ri) => (
-            <tr key={ri} className="border-b border-border/50 hover:bg-muted/30">
+            <tr
+              key={ri}
+              className="border-b border-border/50 hover:bg-muted/30"
+            >
               {row.map((cell, ci) => {
                 const isType = ci === typeIdx;
-                const style = isType && cell ? ACCESS_TYPE_COLORS[cell] : undefined;
+                const style =
+                  isType && cell ? ACCESS_TYPE_COLORS[cell] : undefined;
                 return (
                   <td
                     key={ci}
@@ -169,7 +213,7 @@ function TableExplainView({
                         {cell}
                       </span>
                     ) : (
-                      cell ?? "NULL"
+                      (cell ?? "NULL")
                     )}
                   </td>
                 );

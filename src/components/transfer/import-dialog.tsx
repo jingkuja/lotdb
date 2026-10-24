@@ -1,5 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Upload, Loader2, CheckCircle2, AlertCircle, FileText, ChevronRight } from "lucide-react";
+import {
+  Upload,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  FileText,
+  ChevronRight,
+} from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -22,6 +29,7 @@ import {
 } from "@/services/tauri-commands";
 import type { ColumnDef } from "@/services/tauri-commands";
 import { useTaskStore, newTaskId } from "@/stores/task-store";
+import { formatDbError } from "@/lib/error";
 
 // ─── Constants ────────────────────────────────────────────────────
 
@@ -56,8 +64,14 @@ function formatEta(sec: number): string {
   return `${m}m ${s}s`;
 }
 
-function ImportProgressBar({ progress }: { progress: ImportProgressEvent | null }) {
-  const pct = progress ? Math.min(100, (progress.current / progress.total) * 100) : 0;
+function ImportProgressBar({
+  progress,
+}: {
+  progress: ImportProgressEvent | null;
+}) {
+  const pct = progress
+    ? Math.min(100, (progress.current / progress.total) * 100)
+    : 0;
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
@@ -141,7 +155,9 @@ export function ImportDialog({
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   const addTask = useTaskStore((s) => s.addTask);
@@ -190,7 +206,12 @@ export function ImportDialog({
     }
     setStatus("loading");
     try {
-      const preview = await previewImportFile(filePath.trim(), format, hasHeader, 5);
+      const preview = await previewImportFile(
+        filePath.trim(),
+        format,
+        hasHeader,
+        5,
+      );
       setSrcColumns(preview.columns);
       setPreviewRows(preview.rows);
       // Default mapping: try to match source column name to a target column (case-insensitive)
@@ -203,7 +224,11 @@ export function ImportDialog({
       setStep("mapping");
       setStatus("idle");
     } catch (e) {
-      setImportResult({ rowsImported: 0, rowsFailed: 0, errorMessage: String(e) });
+      setImportResult({
+        rowsImported: 0,
+        rowsFailed: 0,
+        errorMessage: formatDbError(e),
+      });
       setStatus("error");
     }
   }, [filePath, format, hasHeader, columnDefs]);
@@ -231,20 +256,25 @@ export function ImportDialog({
     }
 
     // Subscribe to progress events
-    const unlisten = await listen<ImportProgressEvent>("import-progress", (ev) => {
-      const p = ev.payload;
-      if (mountedRef.current) setProgress(p);
-      updateTask(taskId, {
-        progress: p.total > 0 ? Math.min(100, Math.round((p.current / p.total) * 100)) : null,
-        rowsDone: p.current,
-        rowsPerSec: p.rowsPerSec,
-      });
-    });
+    const unlisten = await listen<ImportProgressEvent>(
+      "import-progress",
+      (ev) => {
+        const p = ev.payload;
+        if (mountedRef.current) setProgress(p);
+        updateTask(taskId, {
+          progress:
+            p.total > 0
+              ? Math.min(100, Math.round((p.current / p.total) * 100))
+              : null,
+          rowsDone: p.current,
+          rowsPerSec: p.rowsPerSec,
+        });
+      },
+    );
 
     try {
-      const colMapping = format === "sql"
-        ? []
-        : mapping.map((m) => (m === SKIP ? null : m));
+      const colMapping =
+        format === "sql" ? [] : mapping.map((m) => (m === SKIP ? null : m));
       const res = await importTableData(
         connectionId,
         database,
@@ -257,7 +287,11 @@ export function ImportDialog({
         colMapping,
         taskId,
       );
-      updateTask(taskId, { status: "done", rowsDone: res.rowsImported, progress: 100 });
+      updateTask(taskId, {
+        status: "done",
+        rowsDone: res.rowsImported,
+        progress: 100,
+      });
       if (mountedRef.current) {
         setImportResult(res);
         setStatus("done");
@@ -265,9 +299,13 @@ export function ImportDialog({
         if (res.rowsImported > 0) onSuccess?.();
       }
     } catch (e) {
-      updateTask(taskId, { status: "error", errorMessage: String(e) });
+      updateTask(taskId, { status: "error", errorMessage: formatDbError(e) });
       if (mountedRef.current) {
-        setImportResult({ rowsImported: 0, rowsFailed: 0, errorMessage: String(e) });
+        setImportResult({
+          rowsImported: 0,
+          rowsFailed: 0,
+          errorMessage: formatDbError(e),
+        });
         setStatus("error");
       }
     } finally {
@@ -286,7 +324,8 @@ export function ImportDialog({
     }
   };
 
-  const mappedCount = format === "sql" ? 1 : mapping.filter((m) => m !== SKIP).length;
+  const mappedCount =
+    format === "sql" ? 1 : mapping.filter((m) => m !== SKIP).length;
 
   // ─────────────────────────────────────────────────────────────
   return (
@@ -379,7 +418,9 @@ export function ImportDialog({
                     <AlertCircle className="size-3" />
                     解析失败
                   </div>
-                  <p className="mt-0.5 text-[11px] opacity-80">{importResult.errorMessage}</p>
+                  <p className="mt-0.5 text-[11px] opacity-80">
+                    {importResult.errorMessage}
+                  </p>
                 </div>
               )}
             </>
@@ -409,7 +450,8 @@ export function ImportDialog({
                             const used = new Set<string>();
                             const next = srcColumns.map((col) => {
                               const exact = columnDefs.find(
-                                (c) => c.name.toLowerCase() === col.toLowerCase(),
+                                (c) =>
+                                  c.name.toLowerCase() === col.toLowerCase(),
                               );
                               if (exact && !used.has(exact.name)) {
                                 used.add(exact.name);
@@ -438,7 +480,9 @@ export function ImportDialog({
                             <th className="px-3 py-1.5 text-left font-medium text-muted-foreground">
                               文件列
                             </th>
-                            <th className="px-2 py-1.5 text-center text-muted-foreground">→</th>
+                            <th className="px-2 py-1.5 text-center text-muted-foreground">
+                              →
+                            </th>
                             <th className="px-3 py-1.5 text-left font-medium text-muted-foreground">
                               目标列
                             </th>
@@ -451,7 +495,9 @@ export function ImportDialog({
                               className="border-b border-border/50 last:border-b-0 hover:bg-muted/30"
                             >
                               <td className="px-3 py-1 font-mono">{col}</td>
-                              <td className="px-2 py-1 text-center text-muted-foreground">→</td>
+                              <td className="px-2 py-1 text-center text-muted-foreground">
+                                →
+                              </td>
                               <td className="px-3 py-1">
                                 <select
                                   className={cn(
@@ -517,7 +563,9 @@ export function ImportDialog({
                                     title={cell ?? "NULL"}
                                   >
                                     {cell === null ? (
-                                      <span className="text-muted-foreground italic">NULL</span>
+                                      <span className="text-muted-foreground italic">
+                                        NULL
+                                      </span>
                                     ) : (
                                       cell
                                     )}
@@ -581,7 +629,9 @@ export function ImportDialog({
                     <AlertCircle className="size-3" />
                     导入失败
                   </div>
-                  <p className="mt-0.5 text-[11px] opacity-80">{importResult.errorMessage}</p>
+                  <p className="mt-0.5 text-[11px] opacity-80">
+                    {importResult.errorMessage}
+                  </p>
                 </div>
               )}
             </>
@@ -604,7 +654,9 @@ export function ImportDialog({
               <p className="mt-1 text-[11px]">
                 成功导入 <strong>{importResult.rowsImported}</strong> 行
                 {importResult.rowsFailed > 0 && (
-                  <>，失败 <strong>{importResult.rowsFailed}</strong> 行</>
+                  <>
+                    ，失败 <strong>{importResult.rowsFailed}</strong> 行
+                  </>
                 )}
               </p>
               {importResult.errorMessage && (

@@ -1,5 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { listDatabases, listSchemas, listObjects } from "@/services/tauri-commands";
+import {
+  listDatabases,
+  listSchemas,
+  listObjects,
+} from "@/services/tauri-commands";
 
 export function useDatabases(connectionId: string, enabled = true) {
   return useQuery({
