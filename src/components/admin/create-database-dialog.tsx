@@ -43,6 +43,9 @@ const MYSQL_COLLATIONS: Record<string, { value: string; label: string }[]> = {
   ],
 };
 
+// PostgreSQL encodings offered; "" keeps the server default (template1's).
+const PG_ENCODINGS = ["", "UTF8", "LATIN1", "SQL_ASCII", "EUC_CN", "WIN1252"];
+
 interface CreateDatabaseDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -61,6 +64,9 @@ export function CreateDatabaseDialog({
   const [name, setName] = useState("");
   const [charset, setCharset] = useState("utf8mb4");
   const [collation, setCollation] = useState("utf8mb4_unicode_ci");
+  const [pgEncoding, setPgEncoding] = useState("");
+  const [pgLocale, setPgLocale] = useState("");
+  const [pgOwner, setPgOwner] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -69,6 +75,9 @@ export function CreateDatabaseDialog({
     setName("");
     setCharset("utf8mb4");
     setCollation("utf8mb4_unicode_ci");
+    setPgEncoding("");
+    setPgLocale("");
+    setPgOwner("");
     setLoading(false);
     setError(null);
   }, [open]);
@@ -89,12 +98,16 @@ export function CreateDatabaseDialog({
     setLoading(true);
     setError(null);
     try {
-      await createDatabase(
-        connectionId,
-        trimmed,
-        dbType === "mysql" ? charset : undefined,
-        dbType === "mysql" ? collation : undefined,
-      );
+      if (dbType === "mysql")
+        await createDatabase(connectionId, trimmed, charset, collation);
+      else
+        await createDatabase(
+          connectionId,
+          trimmed,
+          pgEncoding || undefined,
+          pgLocale.trim() || undefined,
+          pgOwner.trim() || undefined,
+        );
       onSuccess();
       onOpenChange(false);
     } catch (e) {
@@ -166,6 +179,57 @@ export function CreateDatabaseDialog({
                   ))}
                 </select>
               </div>
+            </>
+          )}
+
+          {/* PostgreSQL: encoding, locale, owner (all optional) */}
+          {dbType === "postgres" && (
+            <>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                  编码
+                </label>
+                <select
+                  className="h-7 w-full rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary"
+                  value={pgEncoding}
+                  onChange={(e) => setPgEncoding(e.target.value)}
+                >
+                  {PG_ENCODINGS.map((enc) => (
+                    <option key={enc} value={enc}>
+                      {enc || "服务器默认"}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                  区域设置（LC_COLLATE / LC_CTYPE，可选）
+                </label>
+                <Input
+                  className="h-7 font-mono text-xs"
+                  placeholder="例如 en_US.UTF-8、C"
+                  value={pgLocale}
+                  onChange={(e) => setPgLocale(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                  所有者（可选）
+                </label>
+                <Input
+                  className="h-7 font-mono text-xs"
+                  placeholder="默认为当前用户"
+                  value={pgOwner}
+                  onChange={(e) => setPgOwner(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                />
+              </div>
+              {(pgEncoding || pgLocale.trim()) && (
+                <p className="text-[11px] text-muted-foreground">
+                  指定编码或区域设置时以 template0 为模板创建。
+                </p>
+              )}
             </>
           )}
 

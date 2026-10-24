@@ -14,19 +14,60 @@ pub async fn create_database(
     db_name: String,
     charset: Option<String>,
     collation: Option<String>,
+    owner: Option<String>,
 ) -> Result<(), AppError> {
-    pools.ensure_writable(&connection_id)?;
+    create_database_impl(
+        &pools,
+        &connection_id,
+        &db_name,
+        charset.as_deref(),
+        collation.as_deref(),
+        owner.as_deref(),
+    )
+    .await
+}
+
+/// MySQL: `charset` / `collation` are the character set and collation.
+/// PostgreSQL: `charset` is the ENCODING, `collation` sets LC_COLLATE and
+/// LC_CTYPE, and `owner` the owning role.
+pub async fn create_database_impl(
+    pools: &PoolManager,
+    connection_id: &str,
+    db_name: &str,
+    charset: Option<&str>,
+    collation: Option<&str>,
+    owner: Option<&str>,
+) -> Result<(), AppError> {
+    pools.ensure_writable(connection_id)?;
     if db_name.trim().is_empty() {
         return Err("数据库名称不能为空".into());
     }
-    let pool = pools.pool(&connection_id)?;
-    let mut sql = format!("CREATE DATABASE {}", pool.dialect().quote_ident(&db_name));
-    if pool.dialect().is_mysql() {
-        if let Some(cs) = charset.as_deref().filter(|s| !s.is_empty()) {
+    let pool = pools.pool(connection_id)?;
+    let dialect = pool.dialect();
+    let mut sql = format!("CREATE DATABASE {}", dialect.quote_ident(db_name));
+    let charset = charset.filter(|s| !s.is_empty());
+    let collation = collation.filter(|s| !s.is_empty());
+    if dialect.is_mysql() {
+        if let Some(cs) = charset {
             sql.push_str(&format!(" CHARACTER SET {}", charset_name(cs)?));
         }
-        if let Some(co) = collation.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(co) = collation {
             sql.push_str(&format!(" COLLATE {}", charset_name(co)?));
+        }
+    } else {
+        if let Some(owner) = owner.filter(|s| !s.is_empty()) {
+            sql.push_str(&format!(" OWNER {}", dialect.quote_ident(owner)));
+        }
+        if let Some(encoding) = charset {
+            sql.push_str(&format!(" ENCODING {}", string_literal(encoding, false)));
+        }
+        if let Some(locale) = collation {
+            let locale = string_literal(locale, false);
+            sql.push_str(&format!(" LC_COLLATE {locale} LC_CTYPE {locale}"));
+        }
+        // template1 may use another encoding or locale; template0 accepts any.
+        if charset.is_some() || collation.is_some() {
+            sql.push_str(" TEMPLATE template0");
         }
     }
     pool.execute(&sql).await.ctx("创建数据库失败")?;
@@ -701,6 +742,22 @@ pub struct ExplainResult {
     pub is_text: bool,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
+    /// PostgreSQL: the plan as `EXPLAIN (FORMAT JSON)` returns it. `rows`
+    /// is empty then; the text view is drawn from this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<serde_json::Value>,
+    /// MySQL 8.0.16+: the `-> …` operator tree (`FORMAT=TREE`, or what
+    /// EXPLAIN ANALYZE prints). None when the server can't produce one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+}
+
+fn explain_cell(v: serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s),
+        other => Some(other.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -713,40 +770,101 @@ pub async fn explain_query(
     session_id: Option<String>,
     execution_id: Option<String>,
 ) -> Result<ExplainResult, AppError> {
-    let mysql = pools.dialect(&connection_id)?.is_mysql();
-    let prefix = if !analyze {
-        "EXPLAIN"
-    } else if mysql {
-        "EXPLAIN ANALYZE"
-    } else {
-        "EXPLAIN (ANALYZE, BUFFERS)"
-    };
-    let result = crate::commands::query::run_session_query(
+    explain_query_impl(
         &pools,
         &registry,
         &connection_id,
-        &format!("{prefix} {sql}"),
-        &[],
-        Some(0),
-        execution_id.as_deref(),
-        session_id.as_deref(),
+        &sql,
+        analyze,
+        session_id,
+        execution_id,
     )
-    .await?;
-    Ok(ExplainResult {
-        is_text: !mysql || analyze,
-        columns: result.columns,
-        rows: result
+    .await
+}
+
+pub async fn explain_query_impl(
+    pools: &PoolManager,
+    registry: &crate::commands::query::QueryRegistry,
+    connection_id: &str,
+    sql: &str,
+    analyze: bool,
+    session_id: Option<String>,
+    execution_id: Option<String>,
+) -> Result<ExplainResult, AppError> {
+    let mysql = pools.dialect(connection_id)?.is_mysql();
+    let run = |statement: String, execution_id: Option<String>| {
+        let session_id = &session_id;
+        async move {
+            crate::commands::query::run_session_query(
+                pools,
+                registry,
+                connection_id,
+                &statement,
+                &[],
+                Some(0),
+                execution_id.as_deref(),
+                session_id.as_deref(),
+            )
+            .await
+        }
+    };
+
+    if !mysql {
+        // One run gives both views: ANALYZE executes the statement, so it
+        // must not run twice.
+        let options = if analyze {
+            "FORMAT JSON, ANALYZE, BUFFERS"
+        } else {
+            "FORMAT JSON"
+        };
+        let result = run(format!("EXPLAIN ({options}) {sql}"), execution_id).await?;
+        let cell = result
             .rows
             .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(|v| match v {
-                        serde_json::Value::Null => None,
-                        serde_json::Value::String(s) => Some(s),
-                        other => Some(other.to_string()),
-                    })
-                    .collect()
-            })
-            .collect(),
+            .next()
+            .and_then(|row| row.into_iter().next())
+            .unwrap_or(serde_json::Value::Null);
+        let plan = match cell {
+            serde_json::Value::String(s) => serde_json::from_str(&s).ctx("解析执行计划失败")?,
+            other => other,
+        };
+        return Ok(ExplainResult {
+            is_text: true,
+            columns: result.columns,
+            rows: vec![],
+            plan: Some(plan),
+            tree: None,
+        });
+    }
+
+    let prefix = if analyze {
+        "EXPLAIN ANALYZE"
+    } else {
+        "EXPLAIN"
+    };
+    let result = run(format!("{prefix} {sql}"), execution_id).await?;
+    let rows: Vec<Vec<Option<String>>> = result
+        .rows
+        .into_iter()
+        .map(|row| row.into_iter().map(explain_cell).collect())
+        .collect();
+    let tree = if analyze {
+        rows.first().and_then(|r| r.first().cloned().flatten())
+    } else {
+        // Plans only, so a second EXPLAIN is cheap. Older servers and
+        // MariaDB lack FORMAT=TREE; they keep the table view alone.
+        run(format!("EXPLAIN FORMAT=TREE {sql}"), None)
+            .await
+            .ok()
+            .and_then(|r| r.rows.into_iter().next())
+            .and_then(|row| row.into_iter().next())
+            .and_then(explain_cell)
+    };
+    Ok(ExplainResult {
+        is_text: analyze,
+        columns: result.columns,
+        rows,
+        plan: None,
+        tree: tree.filter(|t| t.trim_start().starts_with("->")),
     })
 }

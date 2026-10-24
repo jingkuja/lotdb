@@ -8,4 +8,5 @@ pub mod objects;
 pub mod query;
 pub mod schema;
 pub mod snippets;
+pub mod table_ops;
 pub mod transfer;

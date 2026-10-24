@@ -756,7 +756,7 @@ export function TableDataTab({
             ? "只读连接，无法编辑数据。"
             : pkColumns.length === 0
               ? "此表无主键，无法编辑已有行。"
-              : "双击单元格或点击铅笔编辑；Enter / Tab 暂存并移到下一格，Esc 取消。修改后预览并提交。"}
+              : "双击单元格或按 Enter 编辑，Tab 暂存并移到下一格，Esc 取消；⌘C 复制所选，右键更多操作。修改后预览并提交。"}
         </p>
       )}
       {hasPending && (

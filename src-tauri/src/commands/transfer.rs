@@ -1,6 +1,7 @@
 use crate::db::dialect::Dialect;
 use crate::db::pool::{DbPool, PoolManager};
 use crate::error::{AppError, ResultExt};
+use crate::utils::text_file::{read_text, CsvOptions, FileCsvReader};
 use dashmap::DashMap;
 use futures::{stream::BoxStream, StreamExt};
 use rust_xlsxwriter::{Color, Format, Workbook, Worksheet};
@@ -246,6 +247,8 @@ enum ExportWriter {
 
 impl ExportWriter {
     /// `format`: "csv" (default) | "json" | "sql_insert" | "excel".
+    /// `csv_bom` starts a CSV file with a UTF-8 byte order mark, which Excel
+    /// needs to read non-ASCII text correctly.
     fn new(
         format: &str,
         file: File,
@@ -253,6 +256,7 @@ impl ExportWriter {
         columns: &[String],
         dialect: Dialect,
         table_ref: &str,
+        csv_bom: bool,
     ) -> Result<Self, AppError> {
         let mut out = BufWriter::new(file);
         Ok(match format {
@@ -303,6 +307,9 @@ impl ExportWriter {
                 }
             }
             _ => {
+                if csv_bom {
+                    out.write_all("\u{feff}".as_bytes()).ctx("写入失败")?;
+                }
                 let header = columns.iter().map(|c| serde_json::Value::String(c.clone()));
                 writeln!(out, "{}", csv_line(&header.collect::<Vec<_>>())).ctx("写入失败")?;
                 ExportWriter::Csv(out)
@@ -419,6 +426,7 @@ pub async fn export_table_data(
     where_clause: Option<String>,
     limit: u64,
     file_path: String,
+    csv_bom: Option<bool>,
 ) -> Result<ExportResult, AppError> {
     export_table_data_impl(
         Some(&app),
@@ -432,6 +440,7 @@ pub async fn export_table_data(
         where_clause,
         limit,
         file_path,
+        csv_bom.unwrap_or(false),
     )
     .await
 }
@@ -449,6 +458,7 @@ pub async fn export_table_data_impl(
     where_clause: Option<String>,
     limit: u64,
     file_path: String,
+    csv_bom: bool,
 ) -> Result<ExportResult, AppError> {
     // Route PG queries to the selected database (not the connection default).
     let pool = pools.pool_for(&connection_id, &database).await?;
@@ -464,7 +474,9 @@ pub async fn export_table_data_impl(
     let col_names = pool.describe_columns(&sql).await.ctx("获取结果列失败")?;
 
     let file = File::create(&file_path).ctx("创建文件失败")?;
-    let mut writer = ExportWriter::new(&format, file, &file_path, &col_names, dialect, &table_ref)?;
+    let mut writer = ExportWriter::new(
+        &format, file, &file_path, &col_names, dialect, &table_ref, csv_bom,
+    )?;
 
     let start = Instant::now();
     let mut rows_exported: u64 = 0;
@@ -535,6 +547,7 @@ pub async fn batch_export_tables(
     format: String,
     limit: u64,
     output_dir: String,
+    csv_bom: Option<bool>,
 ) -> Result<Vec<TableExportStatus>, AppError> {
     let ext = ext_for_format(&format);
     let total_tables = tables.len();
@@ -566,6 +579,7 @@ pub async fn batch_export_tables(
             None,
             limit,
             file_path.clone(),
+            csv_bom.unwrap_or(false),
         )
         .await;
         results.push(match result {
@@ -596,14 +610,23 @@ pub async fn preview_import_file(
     format: String,
     has_header: bool,
     preview_rows: usize,
+    options: Option<CsvOptions>,
 ) -> Result<FilePreview, AppError> {
-    let (columns, mut rows): (Vec<String>, Vec<Vec<Option<String>>>) = match format.as_str() {
-        "csv" => parse_csv(&file_path, has_header)?,
-        "json" => parse_json(&file_path)?,
-        _ => return Err("SQL 文件无需预览".into()),
-    };
-    rows.truncate(preview_rows);
-    Ok(FilePreview { columns, rows })
+    let options = options.unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        let (columns, mut rows) = match format.as_str() {
+            "csv" => {
+                let (columns, rows, _) = open_csv_rows(&file_path, has_header, &options, false)?;
+                (columns, rows.take(preview_rows).collect::<Result<_, _>>()?)
+            }
+            "json" => parse_json(&file_path, &options.encoding)?,
+            _ => return Err("SQL 文件无需预览".into()),
+        };
+        rows.truncate(preview_rows);
+        Ok(FilePreview { columns, rows })
+    })
+    .await
+    .ctx("预览任务失败")?
 }
 
 // ─── Import command ───────────────────────────────────────────────
@@ -631,6 +654,7 @@ pub async fn import_table_data(
     has_header: bool,
     truncate_first: bool,
     column_mapping: Vec<Option<String>>,
+    options: Option<CsvOptions>,
 ) -> Result<ImportResult, AppError> {
     let import_id = import_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let control = registry.register(&import_id)?;
@@ -646,6 +670,7 @@ pub async fn import_table_data(
         has_header,
         truncate_first,
         column_mapping,
+        &options.unwrap_or_default(),
         &control,
     )
     .await;
@@ -666,6 +691,7 @@ pub async fn import_table_data_impl(
     has_header: bool,
     truncate_first: bool,
     column_mapping: Vec<Option<String>>,
+    options: CsvOptions,
 ) -> Result<ImportResult, AppError> {
     import_impl(
         app,
@@ -679,6 +705,7 @@ pub async fn import_table_data_impl(
         has_header,
         truncate_first,
         column_mapping,
+        &options,
         &TransferControl::default(),
     )
     .await
@@ -697,6 +724,7 @@ async fn import_impl(
     has_header: bool,
     truncate_first: bool,
     column_mapping: Vec<Option<String>>,
+    options: &CsvOptions,
     control: &TransferControl,
 ) -> Result<ImportResult, AppError> {
     pools.ensure_writable(&connection_id)?;
@@ -706,8 +734,10 @@ async fn import_impl(
 
     // ── SQL: execute statements directly ──────────────────────────
     if format == "sql" {
-        let content = tokio::fs::read_to_string(&file_path)
+        let (path, encoding) = (file_path.clone(), options.encoding.clone());
+        let content = tokio::task::spawn_blocking(move || read_text(&path, &encoding))
             .await
+            .ctx("读取文件失败")?
             .ctx("读取文件失败")?;
 
         let stmts = crate::utils::sql::split_sql(&content, dialect.is_mysql())?;
@@ -780,11 +810,11 @@ async fn import_impl(
     let (col_names, rows, total): (Vec<String>, ImportRowIter, u64) = match format.as_str() {
         // JSON arrays aren't streamable; parse into memory.
         "json" => {
-            let (cols, rows) = parse_json(&file_path)?;
+            let (cols, rows) = parse_json(&file_path, &options.encoding)?;
             let total = rows.len() as u64;
             (cols, Box::new(rows.into_iter().map(Ok)), total)
         }
-        "csv" => open_csv_rows(&file_path, has_header)?,
+        "csv" => open_csv_rows(&file_path, has_header, options, true)?,
         _ => return Err(format!("不支持的格式: {format}").into()),
     };
     if total == 0 {
@@ -875,51 +905,47 @@ impl ImportRowFormatter {
 
 type ImportRowIter = Box<dyn Iterator<Item = Result<Vec<Option<String>>, AppError>> + Send>;
 
-/// Stream CSV records from disk. A first pass counts rows for progress.
+/// Stream CSV records from disk. With `count`, a first pass counts rows
+/// for progress (otherwise the total is 0).
 fn open_csv_rows(
     file_path: &str,
     has_header: bool,
+    options: &CsvOptions,
+    count: bool,
 ) -> Result<(Vec<String>, ImportRowIter, u64), AppError> {
-    let reader = || {
-        csv::ReaderBuilder::new()
-            .has_headers(has_header)
-            .flexible(true)
-            .from_path(file_path)
-            .ctx("CSV 读取失败")
-    };
-    let mut counter = reader()?;
-    let total = counter.records().count() as u64;
-    let mut rdr = reader()?;
+    let reader = || FileCsvReader::open(file_path, options).ctx("CSV 读取失败");
+    let mut total = 0u64;
+    if count {
+        for record in reader()? {
+            record.ctx("CSV 行解析失败")?;
+            total += 1;
+        }
+    }
+    let mut rdr = reader()?.peekable();
     let col_names: Vec<String> = if has_header {
-        rdr.headers()
-            .ctx("读取标题失败")?
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        total = total.saturating_sub(1);
+        match rdr.next() {
+            Some(header) => header
+                .ctx("读取标题失败")?
+                .into_iter()
+                .map(|f| f.text)
+                .collect(),
+            None => vec![],
+        }
     } else {
-        // Column count comes from the first record; `reader()` starts over.
-        let width = first_record_width(reader()?)?;
+        let width = match rdr.peek() {
+            Some(Ok(first)) => first.len(),
+            _ => 0,
+        };
         (1..=width).map(|i| format!("col{i}")).collect()
     };
-    let rows = rdr.into_records().map(|record| {
+    let options = options.clone();
+    let rows = rdr.map(move |record| {
         record
-            .map(|r| {
-                r.iter()
-                    .map(|s| (!s.is_empty()).then(|| s.to_string()))
-                    .collect()
-            })
+            .map(|fields| fields.into_iter().map(|f| options.value(f)).collect())
             .ctx("CSV 行解析失败")
     });
     Ok((col_names, Box::new(rows), total))
-}
-
-fn first_record_width(mut rdr: csv::Reader<File>) -> Result<usize, AppError> {
-    Ok(rdr
-        .records()
-        .next()
-        .transpose()
-        .ctx("CSV 行解析失败")?
-        .map_or(0, |r| r.len()))
 }
 
 /// Rows per INSERT, and a byte cap that keeps statements well under the
@@ -1141,56 +1167,6 @@ async fn run_truncate(
 /// Parsed import file: (columns, rows of optional cell strings)
 type ParsedTable = (Vec<String>, Vec<Vec<Option<String>>>);
 
-fn parse_csv(file_path: &str, has_header: bool) -> Result<ParsedTable, AppError> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(has_header)
-        .flexible(true)
-        .from_path(file_path)
-        .ctx("CSV 读取失败")?;
-
-    let col_names: Vec<String> = if has_header {
-        rdr.headers()
-            .ctx("读取标题失败")?
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    } else {
-        vec![]
-    };
-
-    let mut records: Vec<csv::StringRecord> = Vec::new();
-    for res in rdr.records() {
-        records.push(res.ctx("CSV 行解析失败")?);
-    }
-
-    if records.is_empty() {
-        return Ok((vec![], vec![]));
-    }
-
-    let cols = if col_names.is_empty() {
-        (1..=records[0].len()).map(|i| format!("col{i}")).collect()
-    } else {
-        col_names
-    };
-
-    let rows = records
-        .iter()
-        .map(|r| {
-            r.iter()
-                .map(|s| {
-                    if s.is_empty() {
-                        None
-                    } else {
-                        Some(s.to_string())
-                    }
-                })
-                .collect()
-        })
-        .collect();
-
-    Ok((cols, rows))
-}
-
 // ─── Cross-connection transfer ────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1213,9 +1189,130 @@ pub struct TransferResult {
 struct TransferProgress {
     transfer_id: String,
     current: u64,
+    /// 0 = not known (yet).
     total: u64,
+    /// `total` comes from table statistics, not an exact count.
+    estimated: bool,
     rows_per_sec: f64,
     eta_sec: f64,
+}
+
+/// Source row count for transfer progress, filled in by a background task
+/// while rows already flow: first the catalog estimate (instant, unfiltered
+/// copies only), then an exact COUNT(*).
+#[derive(Default)]
+struct RowTotal {
+    rows: std::sync::atomic::AtomicU64,
+    exact: AtomicBool,
+}
+
+impl RowTotal {
+    /// (total, estimated) for a transfer that has moved `done` rows. An
+    /// estimate below `done` is stale and is not shown.
+    fn get(&self, done: u64) -> (u64, bool) {
+        let rows = self.rows.load(Ordering::Acquire);
+        let exact = self.exact.load(Ordering::Acquire);
+        if rows == 0 || (!exact && rows < done) {
+            (0, false)
+        } else {
+            (rows.max(done), !exact)
+        }
+    }
+}
+
+/// Aborts the counting task when the transfer ends, however it ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn count_source_rows(
+    pool: DbPool,
+    database: String,
+    schema: Option<String>,
+    table: String,
+    where_clause: Option<String>,
+    limit: u64,
+    total: Arc<RowTotal>,
+) -> AbortOnDrop {
+    AbortOnDrop(tokio::spawn(async move {
+        let cap = |n: u64| if limit > 0 { n.min(limit) } else { n };
+        let filtered = where_clause
+            .as_deref()
+            .is_some_and(|w| !w.trim().is_empty());
+        if !filtered {
+            if let Some(n) = estimated_rows(&pool, &database, schema.as_deref(), &table).await {
+                total.rows.store(cap(n), Ordering::Release);
+            }
+        }
+        let count = exact_source_rows(
+            &pool,
+            &database,
+            schema.as_deref(),
+            &table,
+            where_clause.as_deref(),
+            limit,
+        );
+        // A huge filtered table can take long to count; progress just stays
+        // without a total then.
+        if let Ok(Ok(n)) = tokio::time::timeout(std::time::Duration::from_secs(120), count).await {
+            total.rows.store(n, Ordering::Release);
+            total.exact.store(true, Ordering::Release);
+        }
+    }))
+}
+
+/// Rows a transfer of `table` (with its filter and limit) will read.
+pub async fn exact_source_rows(
+    pool: &DbPool,
+    database: &str,
+    schema: Option<&str>,
+    table: &str,
+    where_clause: Option<&str>,
+    limit: u64,
+) -> Result<u64, sqlx::Error> {
+    let source = pool.dialect().table_ref(database, schema, table);
+    let inner = build_select_sql(&source, "1", where_clause, limit);
+    let sql = format!("SELECT COUNT(*) FROM ({inner}) lotdb_count");
+    let n = match pool {
+        DbPool::MySQL(p) => sqlx::query_scalar::<_, i64>(&sql).fetch_one(p).await?,
+        DbPool::Postgres(p) => sqlx::query_scalar::<_, i64>(&sql).fetch_one(p).await?,
+    };
+    Ok(n.max(0) as u64)
+}
+
+/// The catalog's row estimate for a table: instant, but approximate and
+/// None when the server has none yet.
+pub async fn estimated_rows(
+    pool: &DbPool,
+    database: &str,
+    schema: Option<&str>,
+    table: &str,
+) -> Option<u64> {
+    let n: Option<i64> = match pool {
+        DbPool::MySQL(p) => sqlx::query_scalar(
+            "SELECT CAST(TABLE_ROWS AS SIGNED) FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_optional(p)
+        .await
+        .ok()?
+        .flatten(),
+        // reltuples is -1 for a table never vacuumed or analyzed.
+        DbPool::Postgres(p) => {
+            sqlx::query_scalar("SELECT reltuples::bigint FROM pg_class WHERE oid = to_regclass($1)")
+                .bind(Dialect::Postgres.table_ref(database, schema, table))
+                .fetch_optional(p)
+                .await
+                .ok()?
+        }
+    };
+    n.filter(|&n| n > 0).map(|n| n as u64)
 }
 
 /// Transfer rows from one connection/table to another.
@@ -1428,6 +1525,16 @@ async fn transfer_stream_impl(
     if truncate_first {
         run_truncate(&tgt_pool, &tgt_database, tgt_schema.as_deref(), &tgt_table).await?;
     }
+    let total = Arc::new(RowTotal::default());
+    let _counting = count_source_rows(
+        src_pool.clone(),
+        src_database.clone(),
+        src_schema.clone(),
+        src_table.clone(),
+        where_clause.clone(),
+        limit,
+        total.clone(),
+    );
     let mut stream = text_rows(&src_pool, &sql);
     let start = Instant::now();
     let mut rows_transferred = 0;
@@ -1475,15 +1582,21 @@ async fn transfer_stream_impl(
             batch.clear();
             bytes = 0;
             if let Some(app) = app {
+                let rps = rows_transferred as f64 / start.elapsed().as_secs_f64().max(0.001);
+                let (total, estimated) = total.get(rows_transferred);
                 let _ = app.emit(
                     "transfer-progress",
                     TransferProgress {
                         transfer_id: transfer_id.to_owned(),
                         current: rows_transferred,
-                        total: 0,
-                        rows_per_sec: rows_transferred as f64
-                            / start.elapsed().as_secs_f64().max(0.001),
-                        eta_sec: 0.0,
+                        total,
+                        estimated,
+                        rows_per_sec: rps,
+                        eta_sec: if total > 0 && rps > 0.0 {
+                            total.saturating_sub(rows_transferred) as f64 / rps
+                        } else {
+                            0.0
+                        },
                     },
                 );
             }
@@ -1535,8 +1648,8 @@ async fn insert_transfer_batch(pool: &DbPool, sql: &str) -> Result<u64, AppError
     unreachable!()
 }
 
-fn parse_json(file_path: &str) -> Result<ParsedTable, AppError> {
-    let content = std::fs::read_to_string(file_path).ctx("读取文件失败")?;
+fn parse_json(file_path: &str, encoding: &str) -> Result<ParsedTable, AppError> {
+    let content = read_text(file_path, encoding).ctx("读取文件失败")?;
     let value: serde_json::Value = serde_json::from_str(&content).ctx("JSON 解析失败")?;
     let arr = value
         .as_array()
@@ -1636,9 +1749,16 @@ mod tests {
         for format in ["csv", "json", "sql_insert", "excel"] {
             let path = dir.join(format).to_string_lossy().into_owned();
             let file = File::create(&path).unwrap();
-            let mut w =
-                ExportWriter::new(format, file, &path, &columns, Dialect::Postgres, "\"t\"")
-                    .unwrap();
+            let mut w = ExportWriter::new(
+                format,
+                file,
+                &path,
+                &columns,
+                Dialect::Postgres,
+                "\"t\"",
+                false,
+            )
+            .unwrap();
             for row in &rows {
                 w.write_row(row).unwrap();
             }
@@ -1646,6 +1766,13 @@ mod tests {
         }
         let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
         assert_eq!(read("csv"), "\"id\",\"na,me\"\n1,\"x\"\n2,\n");
+        let bom_path = dir.join("bom.csv").to_string_lossy().into_owned();
+        let file = File::create(&bom_path).unwrap();
+        ExportWriter::new("csv", file, &bom_path, &columns, Dialect::MySQL, "", true)
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(read("bom.csv"), "\u{feff}\"id\",\"na,me\"\n");
         let json: serde_json::Value = serde_json::from_str(&read("json")).unwrap();
         assert_eq!(
             json,
@@ -1671,6 +1798,18 @@ mod tests {
     }
 
     #[test]
+    fn row_total_hides_stale_estimates() {
+        let total = RowTotal::default();
+        assert_eq!(total.get(10), (0, false));
+        total.rows.store(100, Ordering::Release);
+        assert_eq!(total.get(10), (100, true));
+        // The estimate was low: no total rather than a wrong one.
+        assert_eq!(total.get(150), (0, false));
+        total.exact.store(true, Ordering::Release);
+        assert_eq!(total.get(150), (150, false));
+    }
+
+    #[test]
     fn ext_for_format_maps() {
         assert_eq!(ext_for_format("csv"), "csv");
         assert_eq!(ext_for_format("excel"), "xlsx");
@@ -1679,20 +1818,26 @@ mod tests {
     }
 }
 
-/// Exports only the already-loaded query result; never silently overwrites a file.
+/// Exports only the already-loaded query result. The path comes from the
+/// native save panel, which has already asked before replacing a file.
 #[tauri::command]
 pub async fn export_query_result(
     columns: Vec<String>,
     rows: Vec<Vec<serde_json::Value>>,
     file_path: String,
+    csv_bom: Option<bool>,
 ) -> Result<(), AppError> {
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&file_path)
-            .ctx("创建文件失败")?;
-        let mut writer = ExportWriter::new("csv", file, &file_path, &columns, Dialect::MySQL, "")?;
+        let file = File::create(&file_path).ctx("创建文件失败")?;
+        let mut writer = ExportWriter::new(
+            "csv",
+            file,
+            &file_path,
+            &columns,
+            Dialect::MySQL,
+            "",
+            csv_bom.unwrap_or(false),
+        )?;
         for row in &rows {
             writer.write_row(row)?;
         }

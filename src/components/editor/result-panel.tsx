@@ -7,6 +7,12 @@ import { exportQueryResult } from "@/services/tauri-commands";
 import { downloadDir, join } from "@tauri-apps/api/path";
 import { Button } from "@/components/ui/button";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Loader2,
   AlertCircle,
   CheckCircle2,
@@ -14,9 +20,10 @@ import {
   TriangleAlert,
   Ban,
   Unplug,
+  ChevronDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { promptDialog } from "@/stores/app-dialog-store";
+import { pickSavePath } from "@/lib/file-dialog";
 import type { QueryResult } from "@/services/tauri-commands";
 import { formatDbError } from "@/lib/error";
 
@@ -167,22 +174,18 @@ function ResultGrid({ result }: { result: QueryResult }) {
   const [cell, setCell] = useState<CellViewTarget | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const exportCsv = async () => {
+  const exportCsv = async (bom: boolean) => {
     setBusy(true);
     try {
-      const defaultPath = await join(
-        await downloadDir(),
-        `query_${Date.now()}.csv`,
-      );
-      const path = (
-        await promptDialog(
-          `导出当前已加载的 ${result.rows.length} 行为 CSV，输入保存路径（文件已存在时不会覆盖）：`,
-          defaultPath,
-          { title: "导出 CSV" },
-        )
-      )?.trim();
+      const name = `query_${Date.now()}.csv`;
+      const defaultPath = await downloadDir()
+        .then((dir) => join(dir, name))
+        .catch(() => name);
+      const path = await pickSavePath(defaultPath, [
+        { name: "CSV", extensions: ["csv"] },
+      ]);
       if (!path) return;
-      await exportQueryResult(result.columns, result.rows, path);
+      await exportQueryResult(result.columns, result.rows, path, bom);
       setMessage(`已导出 ${result.rows.length} 行：${path}`);
     } catch (error) {
       setMessage(`导出失败：${formatDbError(error)}`);
@@ -211,17 +214,31 @@ function ResultGrid({ result }: { result: QueryResult }) {
         >
           复制 CSV
         </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 text-xs"
-          disabled={busy}
-          onClick={() => void exportCsv()}
-        >
-          导出 CSV
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 gap-1 text-xs"
+              disabled={busy}
+              title={`导出当前已加载的 ${result.rows.length} 行`}
+            >
+              导出 CSV
+              <ChevronDown className="size-3" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="text-xs">
+            <DropdownMenuItem onClick={() => void exportCsv(false)}>
+              CSV（UTF-8）
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => void exportCsv(true)}>
+              CSV（UTF-8 带 BOM，Excel 打开不乱码）
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <span role="status" className="text-muted-foreground">
-          {message || "拖动调整列宽 · 点击查看完整值"}
+          {message ||
+            "拖选或 Shift+方向键选择单元格，⌘C 复制；双击查看完整值；右键更多操作"}
         </span>
       </div>
       <DataGrid

@@ -701,6 +701,8 @@ export interface ExportOptions {
   limit: number;
   /** Absolute path to the output file */
   filePath: string;
+  /** CSV only: start the file with a UTF-8 BOM (for Excel) */
+  csvBom?: boolean;
 }
 
 export interface ExportResult {
@@ -721,6 +723,7 @@ export async function exportTableData(
     whereClause: opts.whereClause ?? null,
     limit: opts.limit,
     filePath: opts.filePath,
+    csvBom: opts.csvBom ?? false,
   });
 }
 
@@ -763,17 +766,31 @@ export interface FilePreview {
   rows: (string | null)[][];
 }
 
+/** How an import file is read. */
+export interface ImportFileOptions {
+  /** Encoding label such as "utf-8" or "gbk"; a BOM in the file wins. */
+  encoding: string;
+  /** CSV field separator (one character). */
+  delimiter: string;
+  /** CSV: an unquoted empty field is NULL (else ""); a quoted "" is always "". */
+  emptyIsNull: boolean;
+  /** CSV: unquoted text that also means NULL, e.g. `\N`; "" = none. */
+  nullText: string;
+}
+
 export async function previewImportFile(
   filePath: string,
   format: ImportFormat,
   hasHeader: boolean,
   previewRows?: number,
+  options?: ImportFileOptions,
 ): Promise<FilePreview> {
   return invoke<FilePreview>("preview_import_file", {
     filePath,
     format,
     hasHeader,
     previewRows: previewRows ?? 5,
+    options: options ?? null,
   });
 }
 
@@ -789,6 +806,7 @@ export async function importTableData(
   columnMapping: (string | null)[],
   /** Pass the same id to `cancelTransfer` to stop the import. */
   importId?: string,
+  options?: ImportFileOptions,
 ): Promise<ImportResult> {
   return invoke<ImportResult>("import_table_data", {
     importId,
@@ -801,6 +819,7 @@ export async function importTableData(
     hasHeader,
     truncateFirst,
     columnMapping,
+    options: options ?? null,
   });
 }
 
@@ -812,6 +831,7 @@ export async function batchExportTables(
   format: ExportFormat,
   limit: number,
   outputDir: string,
+  csvBom = false,
 ): Promise<TableExportStatus[]> {
   return invoke<TableExportStatus[]>("batch_export_tables", {
     connectionId,
@@ -821,22 +841,98 @@ export async function batchExportTables(
     format,
     limit,
     outputDir,
+    csvBom,
+  });
+}
+
+// ─── Object-tree maintenance ──────────────────────────────────────
+
+export type DroppableObject = "table" | "view" | "function";
+
+export async function dropObject(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  kind: DroppableObject,
+  name: string,
+): Promise<void> {
+  return invoke<void>("drop_object", {
+    connectionId,
+    database,
+    schema,
+    kind,
+    name,
+  });
+}
+
+export async function truncateTable(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  table: string,
+): Promise<void> {
+  return invoke<void>("truncate_table", {
+    connectionId,
+    database,
+    schema,
+    table,
+  });
+}
+
+export async function renameTable(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  table: string,
+  newName: string,
+): Promise<void> {
+  return invoke<void>("rename_table", {
+    connectionId,
+    database,
+    schema,
+    table,
+    newName,
+  });
+}
+
+/** Create `newName` like `table` (structure and indexes), optionally with its rows. */
+export async function copyTable(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  table: string,
+  newName: string,
+  withData: boolean,
+): Promise<void> {
+  return invoke<void>("copy_table", {
+    connectionId,
+    database,
+    schema,
+    table,
+    newName,
+    withData,
   });
 }
 
 // ─── Database management ──────────────────────────────────────────
 
+/**
+ * MySQL: `charset` / `collation`. PostgreSQL: `charset` is the ENCODING,
+ * `collation` the locale (LC_COLLATE and LC_CTYPE), `owner` the owning role.
+ */
 export async function createDatabase(
   connectionId: string,
   dbName: string,
   charset?: string,
   collation?: string,
+  owner?: string,
 ): Promise<void> {
   return invoke<void>("create_database", {
     connectionId,
     dbName,
     charset,
     collation,
+    owner,
   });
 }
 
@@ -993,6 +1089,10 @@ export interface ExplainResult {
   isText: boolean;
   columns: string[];
   rows: (string | null)[][];
+  /** PostgreSQL: the `EXPLAIN (FORMAT JSON)` document; `rows` is empty. */
+  plan?: unknown;
+  /** MySQL 8.0.16+: the `-> …` operator tree. */
+  tree?: string;
 }
 
 export async function explainQuery(
@@ -1135,8 +1235,9 @@ export function exportQueryResult(
   columns: string[],
   rows: unknown[][],
   filePath: string,
+  csvBom = false,
 ): Promise<void> {
-  return invoke("export_query_result", { columns, rows, filePath });
+  return invoke("export_query_result", { columns, rows, filePath, csvBom });
 }
 
 export function configureQuerySession(

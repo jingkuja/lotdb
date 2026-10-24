@@ -1,6 +1,12 @@
 import { useState, useCallback } from "react";
 import { alertDialog } from "@/stores/app-dialog-store";
-import { Upload, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import {
+  Upload,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  FolderOpen,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { restoreDatabase } from "@/services/tauri-commands";
 import { formatBytes, useCliTask } from "@/hooks/use-cli-task";
 import { formatDbError } from "@/lib/error";
+import { pickOpenPath } from "@/lib/file-dialog";
 
 interface RestoreDialogProps {
   open: boolean;
@@ -90,14 +97,31 @@ export function RestoreDialog({
           <div className="flex flex-col gap-4">
             {/* File path */}
             <div>
-              <Label className="text-xs mb-1 block">备份文件（绝对路径）</Label>
-              <Input
-                value={filePath}
-                onChange={(e) => setFilePath(e.target.value)}
-                placeholder="/path/to/backup.sql"
-                className="h-8 text-xs"
-                disabled={running}
-              />
+              <Label className="text-xs mb-1 block">备份文件</Label>
+              <div className="flex gap-2">
+                <Input
+                  value={filePath}
+                  onChange={(e) => setFilePath(e.target.value)}
+                  placeholder="/path/to/backup.sql"
+                  className="h-8 flex-1 text-xs"
+                  disabled={running}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1 text-xs"
+                  disabled={running}
+                  onClick={async () => {
+                    const path = await pickOpenPath([
+                      { name: "SQL 备份", extensions: ["sql", "dump", "txt"] },
+                    ]);
+                    if (path) setFilePath(path);
+                  }}
+                >
+                  <FolderOpen className="size-3" />
+                  浏览…
+                </Button>
+              </div>
             </div>
 
             {/* Options */}

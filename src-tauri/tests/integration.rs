@@ -751,6 +751,7 @@ async fn review_regressions(mut cfg: ConnectionConfig, mysql: bool) {
         true,
         false,
         vec![],
+        Default::default(),
     )
     .await
     .unwrap();
@@ -781,6 +782,7 @@ async fn review_regressions(mut cfg: ConnectionConfig, mysql: bool) {
         true,
         false,
         vec![],
+        Default::default(),
     )
     .await
     .unwrap();
@@ -809,6 +811,7 @@ async fn review_regressions(mut cfg: ConnectionConfig, mysql: bool) {
             None,
             0,
             path.clone(),
+            false,
         )
         .await
         .unwrap();
@@ -825,6 +828,7 @@ async fn review_regressions(mut cfg: ConnectionConfig, mysql: bool) {
             true,
             true,
             vec![],
+            Default::default(),
         )
         .await
         .unwrap();
@@ -955,6 +959,7 @@ async fn review_regressions(mut cfg: ConnectionConfig, mysql: bool) {
         true,
         true,
         vec![],
+        Default::default(),
     )
     .await
     .unwrap_err();
@@ -1325,6 +1330,7 @@ async fn mysql_p0_regressions() {
         None,
         0,
         path.to_string_lossy().into(),
+        false,
     )
     .await
     .unwrap();
@@ -1347,6 +1353,7 @@ async fn mysql_p0_regressions() {
         Some("1=1; DROP TABLE lotdb_p0.v".into()),
         0,
         path.to_string_lossy().into(),
+        false,
     )
     .await
     .unwrap_err();
@@ -1493,6 +1500,7 @@ async fn pg_p0_regressions() {
         None,
         0,
         path.to_string_lossy().into(),
+        false,
     )
     .await
     .unwrap();
@@ -1580,6 +1588,7 @@ async fn p1_import(pools: &PoolManager, reg: &QueryRegistry, id: &str, db: &str,
             true,
             truncate,
             mapping,
+            Default::default(),
         )
         .await
     };
@@ -2081,6 +2090,7 @@ async fn p2_empty_export_has_header(pools: &PoolManager, id: &str, db: &str) {
         None,
         0,
         path.to_string_lossy().into_owned(),
+        false,
     )
     .await
     .unwrap();
@@ -2237,4 +2247,431 @@ async fn pg_p2_regressions() {
             assert!(!pools.is_open("p2-pg"));
         })
     });
+}
+
+// ─── Missing-feature additions (2026-10-24) ───────────────────────
+
+async fn f_exec(pool: &lotdb_lib::db::pool::DbPool, sql: &str) {
+    pool.execute(sql)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+}
+
+/// One text value (or NULL); the SQL casts it to text itself.
+async fn f_text(pool: &lotdb_lib::db::pool::DbPool, sql: &str) -> Option<String> {
+    use lotdb_lib::db::pool::DbPool;
+    match pool {
+        DbPool::MySQL(p) => sqlx::query_scalar(sql).fetch_one(p).await,
+        DbPool::Postgres(p) => sqlx::query_scalar(sql).fetch_one(p).await,
+    }
+    .unwrap_or_else(|e| panic!("{sql}: {e}"))
+}
+
+/// Object-tree maintenance, CSV encodings / NULLs / BOM, PG database
+/// options, EXPLAIN plans and transfer row totals, against a real server.
+async fn feature_regressions(pools: &PoolManager, reg: &QueryRegistry, id: &str, mysql: bool) {
+    use lotdb_lib::commands::admin::{
+        create_database_impl, drop_database_impl, explain_query_impl,
+    };
+    use lotdb_lib::commands::table_ops::{copy_table_impl, drop_object_impl, rename_table_impl};
+    use lotdb_lib::commands::transfer::{
+        estimated_rows, exact_source_rows, export_table_data_impl, import_table_data_impl,
+    };
+    use lotdb_lib::utils::text_file::CsvOptions;
+
+    let db = "lotdb_feat";
+    let main = pools.pool(id).unwrap();
+    if mysql {
+        f_exec(&main, &format!("DROP DATABASE IF EXISTS {db}")).await;
+    } else {
+        f_exec(&main, &format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)")).await;
+    }
+    f_exec(&main, &format!("CREATE DATABASE {db}")).await;
+    let pool = pools.pool_for(id, db).await.unwrap();
+    let t = |name: &str| {
+        if mysql {
+            format!("`{db}`.`{name}`")
+        } else {
+            format!("\"{name}\"")
+        }
+    };
+    let text = if mysql { "CHAR" } else { "TEXT" };
+    let count = |name: &str| format!("SELECT CAST(COUNT(*) AS {text}) FROM {}", t(name));
+
+    // Generated (and, on PG, GENERATED ALWAYS identity) columns must survive a copy.
+    let create = if mysql {
+        format!(
+            "CREATE TABLE {} (id INT PRIMARY KEY, name VARCHAR(20) NULL, note VARCHAR(20) NULL, \
+             doubled INT GENERATED ALWAYS AS (id * 2) STORED)",
+            t("t")
+        )
+    } else {
+        format!(
+            "CREATE TABLE {} (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name TEXT, note TEXT, \
+             doubled INT GENERATED ALWAYS AS (id * 2) STORED)",
+            t("t")
+        )
+    };
+    f_exec(&pool, &create).await;
+    let insert = if mysql {
+        format!(
+            "INSERT INTO {} (id, name, note) VALUES (1, 'a', NULL), (2, '', NULL), (3, NULL, 'x')",
+            t("t")
+        )
+    } else {
+        format!(
+            "INSERT INTO {} (name, note) VALUES ('a', NULL), ('', NULL), (NULL, 'x')",
+            t("t")
+        )
+    };
+    f_exec(&pool, &insert).await;
+    f_exec(
+        &pool,
+        &format!("CREATE VIEW {} AS SELECT id FROM {}", t("v"), t("t")),
+    )
+    .await;
+    if mysql {
+        f_exec(
+            &pool,
+            &format!(
+                "CREATE FUNCTION {} () RETURNS INT DETERMINISTIC RETURN 1",
+                t("f1")
+            ),
+        )
+        .await;
+        f_exec(&pool, &format!("CREATE PROCEDURE {} () SELECT 1", t("p1"))).await;
+    } else {
+        for sql in [
+            "CREATE FUNCTION f1() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+            "CREATE PROCEDURE p1() LANGUAGE sql AS 'SELECT 1'",
+            "CREATE FUNCTION over(int) RETURNS int LANGUAGE sql AS 'SELECT 1'",
+            "CREATE FUNCTION over(text) RETURNS int LANGUAGE sql AS 'SELECT 2'",
+        ] {
+            f_exec(&pool, sql).await;
+        }
+    }
+
+    // ── Copy / rename / drop ────────────────────────────────────────
+    copy_table_impl(pools, id, db, None, "t", "t_full", true)
+        .await
+        .unwrap();
+    assert_eq!(f_text(&pool, &count("t_full")).await.as_deref(), Some("3"));
+    let doubled = format!("SELECT CAST(SUM(doubled) AS {text}) FROM {}", t("t_full"));
+    assert_eq!(f_text(&pool, &doubled).await.as_deref(), Some("12"));
+    copy_table_impl(pools, id, db, None, "t", "t_empty", false)
+        .await
+        .unwrap();
+    assert_eq!(f_text(&pool, &count("t_empty")).await.as_deref(), Some("0"));
+    assert!(copy_table_impl(pools, id, db, None, "t", "t_full", false)
+        .await
+        .is_err());
+
+    rename_table_impl(pools, id, db, None, "t_empty", "t_renamed")
+        .await
+        .unwrap();
+    assert_eq!(
+        f_text(&pool, &count("t_renamed")).await.as_deref(),
+        Some("0")
+    );
+    assert!(pool.execute(&count("t_empty")).await.is_err());
+
+    for (kind, name) in [
+        ("table", "t_renamed"),
+        ("view", "v"),
+        ("function", "f1"),
+        ("function", "p1"),
+    ] {
+        drop_object_impl(pools, id, db, None, kind, name)
+            .await
+            .unwrap_or_else(|e| panic!("drop {kind} {name}: {e}"));
+    }
+    let routines = if mysql {
+        format!("SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '{db}'")
+    } else {
+        "SELECT COUNT(*)::text FROM pg_proc WHERE proname IN ('f1', 'p1')".to_string()
+    };
+    assert_eq!(f_text(&pool, &routines).await.as_deref(), Some("0"));
+    if !mysql {
+        let err = drop_object_impl(pools, id, db, None, "function", "over")
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("重载"), "{err}");
+    }
+
+    // ── CSV: BOM on export; "" vs NULL round-trips ──────────────────
+    let dir = std::env::temp_dir().join(format!("lotdb-feat-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv = dir.join("t.csv").to_string_lossy().into_owned();
+    export_table_data_impl(
+        None,
+        pools,
+        id.into(),
+        db.into(),
+        None,
+        "t".into(),
+        "csv".into(),
+        vec!["id".into(), "name".into(), "note".into()],
+        None,
+        0,
+        csv.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+    let bytes = std::fs::read(&csv).unwrap();
+    assert!(bytes.starts_with("\u{feff}\"id\"".as_bytes()), "{bytes:?}");
+
+    f_exec(
+        &pool,
+        &format!(
+            "CREATE TABLE {} (id INT PRIMARY KEY, name VARCHAR(20), note VARCHAR(20))",
+            t("rt")
+        ),
+    )
+    .await;
+    let import = |path: String, options: CsvOptions| async move {
+        import_table_data_impl(
+            None,
+            pools,
+            id.into(),
+            db.into(),
+            None,
+            "rt".into(),
+            path,
+            "csv".into(),
+            true,
+            false,
+            vec![],
+            options,
+        )
+        .await
+        .unwrap()
+    };
+    let r = import(csv.clone(), CsvOptions::default()).await;
+    assert_eq!((r.rows_imported, r.rows_failed), (3, 0), "{r:?}");
+    let probe = |cond: &str| {
+        format!(
+            "SELECT CAST(COUNT(*) AS {text}) FROM {} WHERE {cond}",
+            t("rt")
+        )
+    };
+    assert_eq!(
+        f_text(&pool, &probe("name IS NULL")).await.as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        f_text(&pool, &probe("name = ''")).await.as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        f_text(&pool, &probe("note IS NULL")).await.as_deref(),
+        Some("2")
+    );
+
+    // GBK text, `\N` as NULL, empty fields kept as "", semicolons.
+    let (gbk, _, _) = encoding_rs::GBK.encode("id;name;note\n10;张三;\\N\n11;;李四\n");
+    let gbk_path = dir.join("gbk.csv");
+    std::fs::write(&gbk_path, &gbk).unwrap();
+    let r = import(
+        gbk_path.to_string_lossy().into_owned(),
+        CsvOptions {
+            encoding: "gbk".into(),
+            delimiter: ";".into(),
+            empty_is_null: false,
+            null_text: "\\N".into(),
+        },
+    )
+    .await;
+    assert_eq!((r.rows_imported, r.rows_failed), (2, 0), "{r:?}");
+    assert_eq!(
+        f_text(
+            &pool,
+            &format!("SELECT name FROM {} WHERE id = 10", t("rt"))
+        )
+        .await
+        .as_deref(),
+        Some("张三")
+    );
+    assert_eq!(
+        f_text(&pool, &probe("id = 10 AND note IS NULL"))
+            .await
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        f_text(&pool, &probe("id = 11 AND name = ''"))
+            .await
+            .as_deref(),
+        Some("1")
+    );
+    // The same bytes read as UTF-8 are refused, not imported as mojibake.
+    let err = import_table_data_impl(
+        None,
+        pools,
+        id.into(),
+        db.into(),
+        None,
+        "rt".into(),
+        gbk_path.to_string_lossy().into_owned(),
+        "csv".into(),
+        true,
+        false,
+        vec![],
+        CsvOptions {
+            delimiter: ";".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("UTF-8"), "{err}");
+
+    // ── Transfer row totals ─────────────────────────────────────────
+    assert_eq!(
+        exact_source_rows(&pool, db, None, "t", None, 0)
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        exact_source_rows(&pool, db, None, "t", Some("id > 1"), 0)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        exact_source_rows(&pool, db, None, "t", None, 1)
+            .await
+            .unwrap(),
+        1
+    );
+    if !mysql {
+        f_exec(&pool, "ANALYZE t").await;
+        assert_eq!(estimated_rows(&pool, db, None, "t").await, Some(3));
+    }
+
+    // ── EXPLAIN: a plan the graph view can draw ─────────────────────
+    let session = format!("feat-{id}");
+    let configure = if mysql {
+        format!("USE {db}")
+    } else {
+        String::new()
+    };
+    if mysql {
+        session_sql(pools, reg, id, &session, &configure, Some(0))
+            .await
+            .unwrap();
+    }
+    let target = if mysql { "t" } else { "lotdb_explain_probe" };
+    if !mysql {
+        // The PG session runs on the connection's default database.
+        let _ = session_sql(
+            pools,
+            reg,
+            id,
+            &session,
+            "DROP TABLE IF EXISTS lotdb_explain_probe",
+            Some(0),
+        )
+        .await;
+        session_sql(
+            pools,
+            reg,
+            id,
+            &session,
+            "CREATE TABLE lotdb_explain_probe (id INT)",
+            Some(0),
+        )
+        .await
+        .unwrap();
+    }
+    let query = format!("SELECT * FROM {target} a JOIN {target} b ON a.id = b.id WHERE a.id > 1");
+    for analyze in [false, true] {
+        let plan = explain_query_impl(pools, reg, id, &query, analyze, Some(session.clone()), None)
+            .await
+            .unwrap_or_else(|e| panic!("explain analyze={analyze}: {e}"));
+        if mysql {
+            let tree = plan
+                .tree
+                .unwrap_or_else(|| panic!("no tree, analyze={analyze}"));
+            assert!(tree.starts_with("->"), "{tree}");
+            assert_eq!(plan.is_text, analyze);
+            if analyze {
+                assert!(tree.contains("actual time="), "{tree}");
+            }
+        } else {
+            let root = &plan.plan.as_ref().expect("json plan")[0]["Plan"];
+            assert!(root["Node Type"].is_string(), "{root}");
+            assert_eq!(root.get("Actual Total Time").is_some(), analyze, "{root}");
+        }
+    }
+    if !mysql {
+        session_sql(
+            pools,
+            reg,
+            id,
+            &session,
+            "DROP TABLE lotdb_explain_probe",
+            Some(0),
+        )
+        .await
+        .unwrap();
+    }
+    reg.close_sessions(id);
+
+    // ── Create database with options ────────────────────────────────
+    let db2 = "lotdb_feat2";
+    let _ = drop_database_impl(pools, id.into(), db2.into()).await;
+    if mysql {
+        create_database_impl(pools, id, db2, Some("utf8mb4"), Some("utf8mb4_bin"), None)
+            .await
+            .unwrap();
+        let collation = format!(
+            "SELECT DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{db2}'"
+        );
+        assert_eq!(
+            f_text(&main, &collation).await.as_deref(),
+            Some("utf8mb4_bin")
+        );
+    } else {
+        let me = f_text(&main, "SELECT current_user::text").await.unwrap();
+        create_database_impl(pools, id, db2, Some("UTF8"), Some("C"), Some(&me))
+            .await
+            .unwrap();
+        let info = format!(
+            "SELECT pg_encoding_to_char(encoding) || ' ' || datcollate || ' ' || pg_get_userbyid(datdba) \
+             FROM pg_database WHERE datname = '{db2}'"
+        );
+        assert_eq!(f_text(&main, &info).await, Some(format!("UTF8 C {me}")));
+    }
+    drop_database_impl(pools, id.into(), db2.into())
+        .await
+        .unwrap();
+
+    drop_database_impl(pools, id.into(), db.into())
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn mysql_feature_regressions() {
+    let Some(mut cfg) = mysql_config() else {
+        return;
+    };
+    cfg.id = "feat-mysql".into();
+    let pools = PoolManager::new();
+    pools.open(&cfg).await.unwrap();
+    feature_regressions(&pools, &registry(), "feat-mysql", true).await;
+}
+
+#[tokio::test]
+async fn pg_feature_regressions() {
+    let Some(mut cfg) = pg_config() else {
+        return;
+    };
+    cfg.id = "feat-pg".into();
+    let pools = PoolManager::new();
+    pools.open(&cfg).await.unwrap();
+    feature_regressions(&pools, &registry(), "feat-pg", false).await;
 }

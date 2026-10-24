@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Download, Check, Loader2 } from "lucide-react";
+import { Download, Check, Loader2, FolderOpen } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +14,7 @@ import { exportTableData, type ExportFormat } from "@/services/tauri-commands";
 import type { ColumnDef } from "@/services/tauri-commands";
 import { downloadDir, join } from "@tauri-apps/api/path";
 import { formatDbError } from "@/lib/error";
+import { pickSavePath, withExtension } from "@/lib/file-dialog";
 
 // ─── Format options ───────────────────────────────────────────────
 
@@ -65,6 +66,7 @@ function ExportDialogBody({
   const [whereClause, setWhereClause] = useState("");
   const [limit, setLimit] = useState("10000");
   const [filePath, setFilePath] = useState("");
+  const [csvBom, setCsvBom] = useState(false);
   const [status, setStatus] = useState<ExportStatus>("idle");
   const [result, setResult] = useState<{ rows: number; path: string } | null>(
     null,
@@ -110,7 +112,15 @@ function ExportDialogBody({
     formatRef.current = next;
     setFormat(next);
     const ext = FORMATS.find((f) => f.value === next)?.ext ?? "csv";
-    setFilePath((path) => path.replace(/\.[^.]+$/, `.${ext}`));
+    setFilePath((path) => (path ? withExtension(path, ext) : path));
+  };
+
+  const browse = async () => {
+    const f = FORMATS.find((x) => x.value === format)!;
+    const path = await pickSavePath(filePath, [
+      { name: f.label, extensions: [f.ext] },
+    ]);
+    if (path) setFilePath(path);
   };
 
   const toggleCol = (name: string) => {
@@ -146,6 +156,7 @@ function ExportDialogBody({
         whereClause: whereClause.trim() || undefined,
         limit: isNaN(limitNum) || limitNum <= 0 ? 0 : limitNum,
         filePath,
+        csvBom: format === "csv" && csvBom,
       });
       setResult({ rows: res.rowsExported, path: res.filePath });
       setStatus("done");
@@ -189,6 +200,17 @@ function ExportDialogBody({
                 </button>
               ))}
             </div>
+            {format === "csv" && (
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={csvBom}
+                  onChange={(e) => setCsvBom(e.target.checked)}
+                  className="size-3.5 accent-primary"
+                />
+                带 BOM（UTF-8 BOM，Excel 直接打开中文不乱码）
+              </label>
+            )}
           </div>
 
           {/* Columns */}
@@ -262,11 +284,22 @@ function ExportDialogBody({
             <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
               输出文件路径
             </label>
-            <Input
-              className="h-7 font-mono text-xs"
-              value={filePath}
-              onChange={(e) => setFilePath(e.target.value)}
-            />
+            <div className="flex gap-2">
+              <Input
+                className="h-7 flex-1 font-mono text-xs"
+                value={filePath}
+                onChange={(e) => setFilePath(e.target.value)}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 gap-1 text-xs"
+                onClick={() => void browse()}
+              >
+                <FolderOpen className="size-3" />
+                选择…
+              </Button>
+            </div>
           </div>
 
           {/* Result / Error */}

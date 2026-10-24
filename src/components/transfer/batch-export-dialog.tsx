@@ -26,6 +26,7 @@ import {
 import { downloadDir } from "@tauri-apps/api/path";
 import { useTaskStore, newTaskId } from "@/stores/task-store";
 import { formatDbError } from "@/lib/error";
+import { pickDirectory } from "@/lib/file-dialog";
 
 // ─── Format options ───────────────────────────────────────────────
 
@@ -61,6 +62,7 @@ export function BatchExportDialog({
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
   const [limit, setLimit] = useState("0");
   const [outputDir, setOutputDir] = useState("");
+  const [csvBom, setCsvBom] = useState(false);
   const [status, setStatus] = useState<ExportStatus>("idle");
   const [results, setResults] = useState<TableExportStatus[]>([]);
   const [exportProgress, setExportProgress] =
@@ -146,6 +148,7 @@ export function BatchExportDialog({
         format,
         isNaN(limitNum) || limitNum < 0 ? 0 : limitNum,
         outputDir,
+        format === "csv" && csvBom,
       );
       const successCount = res.filter((r) => r.error === null).length;
       const failCount = res.filter((r) => r.error !== null).length;
@@ -218,6 +221,17 @@ export function BatchExportDialog({
                 </button>
               ))}
             </div>
+            {format === "csv" && (
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={csvBom}
+                  onChange={(e) => setCsvBom(e.target.checked)}
+                  className="size-3.5 accent-primary"
+                />
+                带 BOM（UTF-8 BOM，Excel 直接打开中文不乱码）
+              </label>
+            )}
           </div>
 
           {/* Table selection */}
@@ -289,12 +303,12 @@ export function BatchExportDialog({
                 variant="outline"
                 className="h-7 gap-1 text-xs"
                 onClick={async () => {
-                  const dir = await downloadDir().catch(() => "");
-                  setOutputDir(dir);
+                  const dir = await pickDirectory(outputDir);
+                  if (dir) setOutputDir(dir);
                 }}
               >
                 <FolderOpen className="size-3" />
-                下载目录
+                选择…
               </Button>
             </div>
             <p className="mt-1 text-[11px] text-muted-foreground">

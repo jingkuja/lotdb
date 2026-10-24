@@ -8,7 +8,6 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   Dialog,
   DialogContent,
@@ -26,10 +25,12 @@ import {
   type ImportFormat,
   type ImportResult,
   type ImportProgressEvent,
+  type ImportFileOptions,
 } from "@/services/tauri-commands";
 import type { ColumnDef } from "@/services/tauri-commands";
 import { useTaskStore, newTaskId } from "@/stores/task-store";
 import { formatDbError } from "@/lib/error";
+import { pickOpenPath } from "@/lib/file-dialog";
 
 // ─── Constants ────────────────────────────────────────────────────
 
@@ -40,6 +41,29 @@ const FORMATS: { value: ImportFormat; label: string; exts: string[] }[] = [
 ];
 
 const SKIP = "__skip__";
+
+const ENCODINGS = [
+  { value: "utf-8", label: "UTF-8" },
+  { value: "gbk", label: "GBK（简体中文 Windows / Excel）" },
+  { value: "gb18030", label: "GB18030" },
+  { value: "big5", label: "Big5（繁体中文）" },
+  { value: "shift_jis", label: "Shift_JIS（日文）" },
+  { value: "utf-16le", label: "UTF-16 LE" },
+];
+
+const DELIMITERS = [
+  { value: ",", label: "逗号 ," },
+  { value: "\t", label: "制表符 Tab" },
+  { value: ";", label: "分号 ;" },
+  { value: "|", label: "竖线 |" },
+];
+
+const DEFAULT_FILE_OPTIONS: ImportFileOptions = {
+  encoding: "utf-8",
+  delimiter: ",",
+  emptyIsNull: true,
+  nullText: "",
+};
 
 function detectFormat(path: string): ImportFormat {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
@@ -132,6 +156,12 @@ export function ImportDialog({
   const [format, setFormat] = useState<ImportFormat>("csv");
   const [hasHeader, setHasHeader] = useState(true);
   const [truncateFirst, setTruncateFirst] = useState(false);
+  const [fileOptions, setFileOptions] =
+    useState<ImportFileOptions>(DEFAULT_FILE_OPTIONS);
+  const setFileOption = <K extends keyof ImportFileOptions>(
+    key: K,
+    value: ImportFileOptions[K],
+  ) => setFileOptions((prev) => ({ ...prev, [key]: value }));
 
   // ── Step / status ─────────────────────────────────────────────
   const [step, setStep] = useState<Step>("config");
@@ -170,6 +200,7 @@ export function ImportDialog({
     setFormat("csv");
     setHasHeader(true);
     setTruncateFirst(false);
+    setFileOptions(DEFAULT_FILE_OPTIONS);
     setStep("config");
     setStatus("idle");
     setSrcColumns([]);
@@ -179,22 +210,21 @@ export function ImportDialog({
     setProgress(null);
   }, [open]);
 
-  // Auto-detect format when path changes
+  // Auto-detect format (and the TSV separator) when the path changes
   useEffect(() => {
-    if (filePath) setFormat(detectFormat(filePath));
+    if (!filePath) return;
+    setFormat(detectFormat(filePath));
+    if (/\.tsv$/i.test(filePath))
+      setFileOptions((prev) => ({ ...prev, delimiter: "\t" }));
   }, [filePath]);
 
   // `<input type="file">` only exposes the bare file name in the Tauri
   // webview, so the native open panel is the only way to get a full path.
   const handleBrowse = async () => {
-    const path = await openFileDialog({
-      multiple: false,
-      directory: false,
-      filters: [
-        { name: "数据文件", extensions: ["csv", "tsv", "txt", "json", "sql"] },
-      ],
-    });
-    if (typeof path === "string") setFilePath(path);
+    const path = await pickOpenPath([
+      { name: "数据文件", extensions: ["csv", "tsv", "txt", "json", "sql"] },
+    ]);
+    if (path) setFilePath(path);
   };
 
   // ── Parse file → go to mapping step ──────────────────────────
@@ -211,6 +241,7 @@ export function ImportDialog({
         format,
         hasHeader,
         5,
+        fileOptions,
       );
       setSrcColumns(preview.columns);
       setPreviewRows(preview.rows);
@@ -231,7 +262,7 @@ export function ImportDialog({
       });
       setStatus("error");
     }
-  }, [filePath, format, hasHeader, columnDefs]);
+  }, [filePath, format, hasHeader, columnDefs, fileOptions]);
 
   // ── Execute import ────────────────────────────────────────────
   const handleImport = async () => {
@@ -286,6 +317,7 @@ export function ImportDialog({
         truncateFirst,
         colMapping,
         taskId,
+        fileOptions,
       );
       updateTask(taskId, {
         status: "done",
@@ -393,10 +425,32 @@ export function ImportDialog({
                 </div>
               </div>
 
+              {/* Encoding (all formats) */}
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                  文件编码
+                </label>
+                <select
+                  className="h-7 w-full rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary"
+                  aria-label="文件编码"
+                  value={fileOptions.encoding}
+                  onChange={(e) => setFileOption("encoding", e.target.value)}
+                >
+                  {ENCODINGS.map((enc) => (
+                    <option key={enc.value} value={enc.value}>
+                      {enc.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  文件带 BOM 时以 BOM 为准。
+                </p>
+              </div>
+
               {/* CSV options */}
               {format === "csv" && (
-                <div>
-                  <label className="mb-2 block text-xs font-medium text-muted-foreground">
+                <div className="flex flex-col gap-2">
+                  <label className="block text-xs font-medium text-muted-foreground">
                     CSV 选项
                   </label>
                   <label className="flex cursor-pointer items-center gap-2 text-xs">
@@ -408,6 +462,50 @@ export function ImportDialog({
                     />
                     首行为列名（标题行）
                   </label>
+                  <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs">
+                    <span className="text-muted-foreground">分隔符</span>
+                    <select
+                      className="h-7 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary"
+                      aria-label="分隔符"
+                      value={fileOptions.delimiter}
+                      onChange={(e) =>
+                        setFileOption("delimiter", e.target.value)
+                      }
+                    >
+                      {DELIMITERS.map((d) => (
+                        <option key={d.value} value={d.value}>
+                          {d.label}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-muted-foreground">空字段</span>
+                    <select
+                      className="h-7 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary"
+                      aria-label="空字段"
+                      value={fileOptions.emptyIsNull ? "null" : "empty"}
+                      onChange={(e) =>
+                        setFileOption("emptyIsNull", e.target.value === "null")
+                      }
+                    >
+                      <option value="null">导入为 NULL</option>
+                      <option value="empty">导入为空字符串</option>
+                    </select>
+                    <span className="text-muted-foreground">NULL 标记</span>
+                    <Input
+                      className="h-7 font-mono text-xs"
+                      aria-label="NULL 标记"
+                      placeholder="可选，例如 \N 或 NULL"
+                      value={fileOptions.nullText}
+                      onChange={(e) =>
+                        setFileOption("nullText", e.target.value)
+                      }
+                    />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    带引号的 "" 始终是空字符串；未加引号的空字段和 NULL
+                    标记按上面的设置处理。LotDB 导出的 CSV
+                    用这套规则即可原样导回。
+                  </p>
                 </div>
               )}
 

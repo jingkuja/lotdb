@@ -7,6 +7,7 @@ import {
   type Table,
   type SortingState,
   type ColumnOrderState,
+  type ColumnSizingState,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -16,9 +17,28 @@ import {
   Trash2,
   Eye,
   Pencil,
+  Copy,
+  Columns3,
+  CircleSlash,
+  Filter,
+  FilterX,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ColumnFilter } from "@/services/tauri-commands";
+import {
+  cellDisplay,
+  fitColumnWidth,
+  MIN_COLUMN_WIDTH,
+  toTsv,
+} from "@/lib/grid-utils";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 export type GridRow = unknown[];
 export type SortDir = "ASC" | "DESC";
@@ -166,7 +186,14 @@ function CellEditor({
     }
   }, [isNull]);
 
-  const commit = () => onCommit(isNull ? null : val);
+  // Finishing moves focus back to the grid, which blurs the input; the
+  // blur must not commit a second time (or after Escape).
+  const finished = useRef(false);
+  const commit = () => {
+    if (finished.current) return;
+    finished.current = true;
+    onCommit(isNull ? null : val);
+  };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" || e.key === "Tab") {
@@ -175,6 +202,7 @@ function CellEditor({
       onMoveNext();
     } else if (e.key === "Escape") {
       e.preventDefault();
+      finished.current = true;
       onCancel();
     }
   };
@@ -209,8 +237,11 @@ function CellEditor({
           e.preventDefault();
         }}
         onClick={() => {
-          if (!isNull) onCommit(null);
-          else setIsNull(false);
+          if (isNull) setIsNull(false);
+          else if (!finished.current) {
+            finished.current = true;
+            onCommit(null);
+          }
         }}
       >
         N
@@ -221,43 +252,36 @@ function CellEditor({
 
 // ─── Cell display ─────────────────────────────────────────────────
 
-interface CellDisplayInfo {
-  text: string;
-  kind: "null" | "empty" | "normal";
-}
-
-function cellDisplay(value: unknown): CellDisplayInfo {
-  if (value === null || value === undefined)
-    return { text: "NULL", kind: "null" };
-  if (typeof value === "string" && value === "")
-    return { text: "", kind: "empty" };
-  if (typeof value === "boolean")
-    return { text: value ? "true" : "false", kind: "normal" };
-  if (typeof value === "object")
-    return { text: JSON.stringify(value), kind: "normal" };
-  return { text: String(value), kind: "normal" };
-}
-
 function GridCell({
   value,
   isEditing,
   isEdited,
   isDeleted,
+  isSelected,
+  isFocused,
   onStartEdit,
   onCommit,
   onCancel,
   onMoveNext,
   onView,
+  onMouseDown,
+  onMouseEnter,
+  onContextMenu,
 }: {
   value: unknown;
   isEditing: boolean;
   isEdited: boolean;
   isDeleted: boolean;
+  isSelected: boolean;
+  isFocused: boolean;
   onStartEdit?: () => void;
   onCommit: (v: string | null) => void;
   onCancel: () => void;
   onMoveNext: () => void;
   onView?: () => void;
+  onMouseDown: (e: React.MouseEvent) => void;
+  onMouseEnter: (e: React.MouseEvent) => void;
+  onContextMenu: () => void;
 }) {
   const { text, kind } = cellDisplay(value);
 
@@ -275,12 +299,14 @@ function GridCell({
   return (
     <div
       className={cn(
-        "group/cell flex h-full w-full cursor-pointer items-center overflow-hidden px-2 py-1 text-xs",
+        "group/cell flex h-full w-full cursor-default items-center overflow-hidden px-2 py-1 text-xs",
         kind === "null" && !isEdited && "italic text-muted-foreground/50",
         kind === "empty" && !isEdited && "text-muted-foreground/40",
         isEdited && "bg-amber-500/15",
         isDeleted && "line-through opacity-40",
-        !isEdited && !isDeleted && "hover:bg-primary/10",
+        isSelected && !isEdited && "bg-primary/15",
+        !isSelected && !isEdited && !isDeleted && "hover:bg-primary/10",
+        isFocused && "ring-1 ring-primary ring-inset",
       )}
       title={
         kind === "null"
@@ -289,19 +315,11 @@ function GridCell({
             ? "(empty string)"
             : text.slice(0, 512)
       }
-      tabIndex={!isDeleted && (onStartEdit || onView) ? 0 : undefined}
-      onKeyDown={(e) => {
-        if (
-          !isDeleted &&
-          (onStartEdit || onView) &&
-          (e.key === "Enter" || e.key === "F2")
-        ) {
-          e.preventDefault();
-          (onStartEdit ?? onView)?.();
-        }
-      }}
-      onClick={!isDeleted && !onStartEdit ? onView : undefined}
-      onDoubleClick={!isDeleted ? onStartEdit : undefined}
+      data-selected={isSelected || undefined}
+      onMouseDown={onMouseDown}
+      onMouseEnter={onMouseEnter}
+      onContextMenu={onContextMenu}
+      onDoubleClick={!isDeleted ? (onStartEdit ?? onView) : undefined}
     >
       {isEdited && (
         <span className="mr-1 size-1.5 shrink-0 rounded-full bg-amber-500" />
@@ -316,11 +334,12 @@ function GridCell({
         </span>
       )}
       {!isDeleted && (onStartEdit || onView) && (
-        <span className="ml-auto flex shrink-0 opacity-0 group-hover/cell:opacity-100 group-focus-within/cell:opacity-100">
+        <span className="ml-auto flex shrink-0 opacity-0 group-hover/cell:opacity-100">
           {onStartEdit && (
             <button
               title="编辑单元格"
               className="p-0.5"
+              onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
                 onStartEdit();
@@ -333,6 +352,7 @@ function GridCell({
             <button
               title="查看单元格"
               className="p-0.5"
+              onMouseDown={(e) => e.stopPropagation()}
               onDoubleClick={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
@@ -400,6 +420,47 @@ function NewRowCell({
 const ROW_HEIGHT = 28;
 const HEADER_HEIGHT = 32;
 const FILTER_ROW_HEIGHT = 28;
+/** Font size the width estimate assumes (cells render at text-xs). */
+const GRID_FONT_PX = 12;
+
+// ─── Selection ────────────────────────────────────────────────────
+
+/** A cell by row index and *visual* column index (after reordering). */
+interface CellPos {
+  row: number;
+  col: number;
+}
+
+interface GridSelection {
+  anchor: CellPos;
+  focus: CellPos;
+}
+
+interface SelectionRect {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+function selectionRect(sel: GridSelection): SelectionRect {
+  return {
+    top: Math.min(sel.anchor.row, sel.focus.row),
+    bottom: Math.max(sel.anchor.row, sel.focus.row),
+    left: Math.min(sel.anchor.col, sel.focus.col),
+    right: Math.max(sel.anchor.col, sel.focus.col),
+  };
+}
+
+function inRect(rect: SelectionRect | null, row: number, col: number) {
+  return (
+    !!rect &&
+    row >= rect.top &&
+    row <= rect.bottom &&
+    col >= rect.left &&
+    col <= rect.right
+  );
+}
 
 // ─── DataGrid ─────────────────────────────────────────────────────
 
@@ -432,22 +493,27 @@ interface DataGridProps {
   onCellView?: (target: CellViewTarget) => void;
 }
 
+const EMPTY_FILTERS: Record<string, ColumnFilter> = {};
+const EMPTY_EDITS: Record<string, PendingEdit> = {};
+const EMPTY_SET = new Set<number>();
+const EMPTY_NEW_ROWS: NewRow[] = [];
+
 export function DataGrid({
-  columns,
+  columns: columnsProp,
   rows,
   sort,
   onSort,
-  filters = {},
+  filters = EMPTY_FILTERS,
   onFilterChange,
   showFilterRow = false,
-  pendingEdits = {},
+  pendingEdits = EMPTY_EDITS,
   onEditCommit,
-  pendingDeletes = new Set(),
+  pendingDeletes = EMPTY_SET,
   onDeleteToggle,
-  newRows = [],
+  newRows = EMPTY_NEW_ROWS,
   onNewRowChange,
   onCellView,
-  selectedRows = new Set(),
+  selectedRows = EMPTY_SET,
   onRowSelectToggle,
   onSelectAll,
 }: DataGridProps) {
@@ -457,31 +523,75 @@ export function DataGrid({
     rowIndex: number;
     colIndex: number;
   } | null>(null);
+  const [selection, setSelection] = useState<GridSelection | null>(null);
+  const draggingSelection = useRef(false);
   const [columnOrder, setColumnOrder] = useState<ColumnOrderState>([]);
   const [draggingColId, setDraggingColId] = useState<string | null>(null);
   const [dragOverColId, setDragOverColId] = useState<string | null>(null);
 
-  // Reset edit + column order when columns list changes (different table)
+  // Each page arrives as a new array with the same names; keep one identity
+  // per column set so widths and order survive paging.
+  const columnsKey = JSON.stringify(columnsProp);
+  const columns = useMemo(
+    () => JSON.parse(columnsKey) as string[],
+    [columnsKey],
+  );
+  // Duplicate names (a.id, b.id) get distinct ids.
+  const colIds = useMemo(
+    () =>
+      columns.map((col, i) =>
+        columns.indexOf(col) === i ? col || String(i) : `${col} (${i + 1})`,
+      ),
+    [columns],
+  );
+
+  // Widths fitted to the first rows a column set arrives with; resizing (or
+  // double-clicking a resize handle) adjusts them afterwards.
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
+  const [sizedFor, setSizedFor] = useState<string[] | null>(null);
+  if (sizedFor !== colIds) {
+    setSizedFor(colIds);
+    setColumnSizing(
+      Object.fromEntries(
+        colIds.map((id, i) => [
+          id,
+          fitColumnWidth(
+            columns[i] ?? "",
+            rows.map((row) => row[i]),
+            GRID_FONT_PX,
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // Reset edit + selection when the rows change; order when the columns do.
   useEffect(() => {
     setActiveEdit(null);
+    setSelection(null);
   }, [rows]);
   useEffect(() => {
     setColumnOrder([]);
   }, [columns]);
+  useEffect(() => {
+    const stop = () => {
+      draggingSelection.current = false;
+    };
+    window.addEventListener("mouseup", stop);
+    return () => window.removeEventListener("mouseup", stop);
+  }, []);
 
   const colDefs = useMemo<ColumnDef<GridRow>[]>(
     () =>
-      columns.map((col, colIdx) => ({
-        id:
-          columns.indexOf(col) === colIdx
-            ? col || String(colIdx)
-            : `${col} (${colIdx + 1})`,
+      colIds.map((id, colIdx) => ({
+        id,
         accessorFn: (row: GridRow) => row[colIdx],
-        header: col,
+        header: columns[colIdx],
         size: 140,
-        minSize: 60,
+        minSize: MIN_COLUMN_WIDTH,
+        maxSize: 2000,
       })),
-    [columns],
+    [colIds, columns],
   );
 
   const sortingState: SortingState = sort
@@ -493,13 +603,17 @@ export function DataGrid({
     columns: colDefs,
     getCoreRowModel: getCoreRowModel(),
     columnResizeMode: "onChange",
-    state: { sorting: sortingState, columnOrder },
+    state: { sorting: sortingState, columnOrder, columnSizing },
     onColumnOrderChange: setColumnOrder,
+    onColumnSizingChange: setColumnSizing,
     manualSorting: true,
     enableSortingRemoval: true,
   });
 
   const { rows: tableRows } = table.getRowModel();
+  /** Leaf columns in display order. */
+  const visibleColumns = table.getVisibleLeafColumns();
+  const originalIndex = (colId: string) => colIds.indexOf(colId);
 
   const virtualizer = useVirtualizer({
     count: tableRows.length,
@@ -557,6 +671,19 @@ export function DataGrid({
     setDragOverColId(null);
   }, []);
 
+  const autoFitColumn = (colId: string) => {
+    const i = originalIndex(colId);
+    if (i < 0) return;
+    setColumnSizing((prev) => ({
+      ...prev,
+      [colId]: fitColumnWidth(
+        columns[i] ?? "",
+        rows.map((row) => row[i]),
+        GRID_FONT_PX,
+      ),
+    }));
+  };
+
   const handleCommit = useCallback(
     (rowIndex: number, colIndex: number, newValue: string | null) => {
       const colName = columns[colIndex] ?? "";
@@ -579,24 +706,204 @@ export function DataGrid({
     [columns, rows, onEditCommit, pendingEdits],
   );
 
-  const moveNext = useCallback(
-    (rowIndex: number, colIndex: number) => {
-      const nextCol = colIndex + 1;
-      if (nextCol < columns.length) {
-        setActiveEdit({ rowIndex, colIndex: nextCol });
-      } else if (rowIndex + 1 < rows.length) {
-        setActiveEdit({ rowIndex: rowIndex + 1, colIndex: 0 });
-        virtualizer.scrollToIndex(rowIndex + 1);
-      } else {
-        setActiveEdit(null);
+  /** Tab / Enter in the editor: next column in display order, then next row. */
+  const moveNext = (rowIndex: number, colIndex: number) => {
+    const visual = visibleColumns.findIndex(
+      (c) => originalIndex(c.id) === colIndex,
+    );
+    const next = visibleColumns[visual + 1];
+    if (next) {
+      setActiveEdit({ rowIndex, colIndex: originalIndex(next.id) });
+      setSelection({
+        anchor: { row: rowIndex, col: visual + 1 },
+        focus: { row: rowIndex, col: visual + 1 },
+      });
+    } else if (rowIndex + 1 < rows.length && visibleColumns[0]) {
+      setActiveEdit({
+        rowIndex: rowIndex + 1,
+        colIndex: originalIndex(visibleColumns[0].id),
+      });
+      setSelection({
+        anchor: { row: rowIndex + 1, col: 0 },
+        focus: { row: rowIndex + 1, col: 0 },
+      });
+      virtualizer.scrollToIndex(rowIndex + 1);
+    } else {
+      setActiveEdit(null);
+      containerRef.current?.focus();
+    }
+  };
+
+  // ── Selection helpers ─────────────────────────────────────────────
+
+  const rect = selection ? selectionRect(selection) : null;
+  /** Value shown in a cell: a staged edit wins over the loaded one. */
+  const valueAt = (row: number, colId: string) => {
+    const pending = pendingEdits[editKey(row, colId)];
+    return pending !== undefined
+      ? pending.newValue
+      : rows[row]?.[originalIndex(colId)];
+  };
+
+  const scrollIntoView = (pos: CellPos) => {
+    virtualizer.scrollToIndex(pos.row, { align: "auto" });
+    const el = containerRef.current;
+    if (!el) return;
+    let left = (onRowSelectToggle ? 32 : 0) + 40;
+    for (let c = 0; c < pos.col; c++) left += visibleColumns[c]?.getSize() ?? 0;
+    const right = left + (visibleColumns[pos.col]?.getSize() ?? 0);
+    if (left < el.scrollLeft) el.scrollLeft = left;
+    else if (right > el.scrollLeft + el.clientWidth)
+      el.scrollLeft = right - el.clientWidth;
+  };
+
+  const copySelection = (withHeaders = false) => {
+    if (!rect) return;
+    const cols = visibleColumns.slice(rect.left, rect.right + 1);
+    const block: unknown[][] = [];
+    if (withHeaders) block.push(cols.map((c) => columns[originalIndex(c.id)]));
+    for (let r = rect.top; r <= rect.bottom; r++)
+      block.push(cols.map((c) => valueAt(r, c.id)));
+    void navigator.clipboard.writeText(toTsv(block));
+  };
+
+  const focusCell = selection?.focus;
+  const focusColumn = focusCell ? visibleColumns[focusCell.col] : undefined;
+  const canEditFocus =
+    !!onEditCommit &&
+    !!focusCell &&
+    !!focusColumn &&
+    !pendingDeletes.has(focusCell.row);
+
+  const startEditAtFocus = () => {
+    if (!focusCell || !focusColumn) return;
+    if (canEditFocus)
+      setActiveEdit({
+        rowIndex: focusCell.row,
+        colIndex: originalIndex(focusColumn.id),
+      });
+    else
+      onCellView?.({
+        columnName: focusColumn.id,
+        value: valueAt(focusCell.row, focusColumn.id),
+      });
+  };
+
+  const setSelectionNull = () => {
+    if (!rect || !onEditCommit) return;
+    for (let r = rect.top; r <= rect.bottom; r++) {
+      if (pendingDeletes.has(r)) continue;
+      for (let c = rect.left; c <= rect.right; c++) {
+        const col = visibleColumns[c];
+        if (col) handleCommit(r, originalIndex(col.id), null);
       }
-    },
-    [columns.length, rows.length, virtualizer],
-  );
+    }
+  };
+
+  const toggleDeleteSelectedRows = () => {
+    if (!rect || !onDeleteToggle) return;
+    for (let r = rect.top; r <= rect.bottom; r++) onDeleteToggle(r);
+  };
+
+  const filterByFocus = (op: "=" | "!=") => {
+    if (!focusCell || !focusColumn || !onFilterChange) return;
+    const value = valueAt(focusCell.row, focusColumn.id);
+    const isNull = value === null || value === undefined;
+    onFilterChange(focusColumn.id, {
+      column: focusColumn.id,
+      op: isNull ? (op === "=" ? "IS NULL" : "IS NOT NULL") : op,
+      value: isNull ? "" : cellDisplay(value).text,
+    });
+  };
+
+  const handleGridKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // Keys typed into the cell editor or a new-row input stay there.
+    if (e.target !== e.currentTarget) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const lastRow = rows.length - 1;
+    const lastCol = visibleColumns.length - 1;
+    if (lastRow < 0 || lastCol < 0) return;
+
+    if (mod && e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      setSelection({
+        anchor: { row: 0, col: 0 },
+        focus: { row: lastRow, col: lastCol },
+      });
+      return;
+    }
+    if (mod && e.key.toLowerCase() === "c") {
+      if (!selection) return;
+      e.preventDefault();
+      copySelection();
+      return;
+    }
+    if (e.key === "Escape") {
+      setSelection(null);
+      return;
+    }
+    if (!selection) {
+      if (e.key.startsWith("Arrow")) {
+        e.preventDefault();
+        setSelection({
+          anchor: { row: 0, col: 0 },
+          focus: { row: 0, col: 0 },
+        });
+      }
+      return;
+    }
+    if (e.key === "Enter" || e.key === "F2") {
+      e.preventDefault();
+      startEditAtFocus();
+      return;
+    }
+    if ((e.key === "Delete" || e.key === "Backspace") && onEditCommit) {
+      e.preventDefault();
+      setSelectionNull();
+      return;
+    }
+
+    const page = Math.max(
+      1,
+      Math.floor((containerRef.current?.clientHeight ?? 0) / ROW_HEIGHT) - 1,
+    );
+    const { row, col } = selection.focus;
+    const moves: Record<string, CellPos> = {
+      ArrowUp: { row: mod ? 0 : row - 1, col },
+      ArrowDown: { row: mod ? lastRow : row + 1, col },
+      ArrowLeft: { row, col: mod ? 0 : col - 1 },
+      ArrowRight: { row, col: mod ? lastCol : col + 1 },
+      Home: { row: mod ? 0 : row, col: 0 },
+      End: { row: mod ? lastRow : row, col: lastCol },
+      PageUp: { row: row - page, col },
+      PageDown: { row: row + page, col },
+      Tab: e.shiftKey
+        ? col > 0
+          ? { row, col: col - 1 }
+          : { row: row - 1, col: lastCol }
+        : col < lastCol
+          ? { row, col: col + 1 }
+          : { row: row + 1, col: 0 },
+    };
+    const target = moves[e.key];
+    if (!target) return;
+    e.preventDefault();
+    const next = {
+      row: Math.min(lastRow, Math.max(0, target.row)),
+      col: Math.min(lastCol, Math.max(0, target.col)),
+    };
+    const extend = e.shiftKey && e.key !== "Tab";
+    setSelection({ anchor: extend ? selection.anchor : next, focus: next });
+    scrollIntoView(next);
+  };
 
   const headerHeight = showFilterRow
     ? HEADER_HEIGHT + FILTER_ROW_HEIGHT
     : HEADER_HEIGHT;
+
+  const multiCell =
+    !!rect && (rect.top !== rect.bottom || rect.left !== rect.right);
+  const rowCount = rect ? rect.bottom - rect.top + 1 : 0;
 
   return (
     <div
@@ -675,13 +982,20 @@ export function DataGrid({
                     )}
                   </span>
                 )}
-                {/* Column resize handle — prevents drag from starting here */}
+                {/* Column resize handle — prevents drag from starting here;
+                    double-click fits the column to its content. */}
                 <div
                   className={cn(
                     "absolute right-0 top-0 h-full w-1.5 cursor-col-resize touch-none opacity-0 hover:bg-primary hover:opacity-100",
                     header.column.getIsResizing() && "bg-primary opacity-100",
                   )}
+                  title="拖动调整列宽，双击按内容适应"
                   draggable={false}
+                  onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    autoFitColumn(colId);
+                  }}
                   onMouseDown={(e) => {
                     e.stopPropagation();
                     header.getResizeHandler()(e);
@@ -719,156 +1033,308 @@ export function DataGrid({
       </div>
 
       {/* Scrollable body */}
-      <div
-        ref={containerRef}
-        className="flex-1 overflow-auto"
-        onScroll={() => {
-          if (headerRef.current && containerRef.current) {
-            headerRef.current.scrollLeft = containerRef.current.scrollLeft;
-          }
-        }}
-      >
-        <div style={{ height: totalHeight, position: "relative" }}>
-          {paddingTop > 0 && <div style={{ height: paddingTop }} />}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            ref={containerRef}
+            className="flex-1 overflow-auto outline-none"
+            tabIndex={0}
+            role="grid"
+            aria-label="数据表格"
+            aria-rowcount={rows.length}
+            onKeyDown={handleGridKeyDown}
+            onScroll={() => {
+              if (headerRef.current && containerRef.current) {
+                headerRef.current.scrollLeft = containerRef.current.scrollLeft;
+              }
+            }}
+          >
+            <div style={{ height: totalHeight, position: "relative" }}>
+              {paddingTop > 0 && <div style={{ height: paddingTop }} />}
 
-          {virtualItems.map((virtualRow) => {
-            const row = tableRows[virtualRow.index]!;
-            const rowIdx = virtualRow.index;
-            const isEven = rowIdx % 2 === 0;
-            const isDeleted = pendingDeletes.has(rowIdx);
+              {virtualItems.map((virtualRow) => {
+                const row = tableRows[virtualRow.index]!;
+                const rowIdx = virtualRow.index;
+                const isEven = rowIdx % 2 === 0;
+                const isDeleted = pendingDeletes.has(rowIdx);
 
-            return (
+                return (
+                  <div
+                    key={row.id}
+                    className={cn(
+                      "group flex border-b border-border/50",
+                      isDeleted
+                        ? "bg-destructive/10"
+                        : isEven
+                          ? "bg-background"
+                          : "bg-muted/20",
+                      !isDeleted && "hover:bg-primary/5",
+                    )}
+                    style={{ height: ROW_HEIGHT }}
+                  >
+                    {/* Row checkbox */}
+                    {onRowSelectToggle && (
+                      <div className="flex w-8 shrink-0 items-center justify-center border-r border-border/50">
+                        <input
+                          type="checkbox"
+                          className="size-3 cursor-pointer accent-primary"
+                          checked={selectedRows.has(rowIdx)}
+                          onChange={() => onRowSelectToggle(rowIdx)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </div>
+                    )}
+                    <div
+                      className={cn(
+                        "relative flex w-10 shrink-0 items-center justify-center border-r border-border/50 text-[10px] text-muted-foreground/50 select-none",
+                        onDeleteToggle && "cursor-pointer",
+                      )}
+                      onClick={() => onDeleteToggle?.(rowIdx)}
+                      title={
+                        onDeleteToggle
+                          ? isDeleted
+                            ? "取消删除"
+                            : "标记删除"
+                          : undefined
+                      }
+                    >
+                      <span
+                        className={cn(onDeleteToggle && "group-hover:hidden")}
+                      >
+                        {rowIdx + 1}
+                      </span>
+                      {onDeleteToggle && (
+                        <Trash2
+                          className={cn(
+                            "hidden size-3 group-hover:block",
+                            isDeleted
+                              ? "text-destructive"
+                              : "text-muted-foreground/60",
+                          )}
+                        />
+                      )}
+                    </div>
+
+                    {row.getVisibleCells().map((cell, visualCol) => {
+                      const colName = cell.column.id;
+                      const originalColIdx = originalIndex(colName);
+                      const key = editKey(rowIdx, colName);
+                      const isEditing =
+                        activeEdit?.rowIndex === rowIdx &&
+                        activeEdit?.colIndex === originalColIdx;
+                      const pending = pendingEdits[key];
+                      const displayValue =
+                        pending !== undefined
+                          ? pending.newValue
+                          : cell.getValue();
+                      const pos = { row: rowIdx, col: visualCol };
+
+                      return (
+                        <div
+                          key={cell.id}
+                          className="shrink-0 border-r border-border/50"
+                          style={{ width: cell.column.getSize() }}
+                        >
+                          <GridCell
+                            value={displayValue}
+                            isEditing={isEditing}
+                            isEdited={!!pending}
+                            isDeleted={isDeleted}
+                            isSelected={inRect(rect, rowIdx, visualCol)}
+                            isFocused={
+                              focusCell?.row === rowIdx &&
+                              focusCell?.col === visualCol
+                            }
+                            onStartEdit={
+                              onEditCommit
+                                ? () => {
+                                    setSelection({ anchor: pos, focus: pos });
+                                    setActiveEdit({
+                                      rowIndex: rowIdx,
+                                      colIndex: originalColIdx,
+                                    });
+                                  }
+                                : undefined
+                            }
+                            onCommit={(v) =>
+                              handleCommit(rowIdx, originalColIdx, v)
+                            }
+                            onCancel={() => {
+                              setActiveEdit(null);
+                              containerRef.current?.focus();
+                            }}
+                            onMoveNext={() => moveNext(rowIdx, originalColIdx)}
+                            onView={
+                              onCellView
+                                ? () =>
+                                    onCellView({
+                                      columnName: colName,
+                                      value: displayValue,
+                                    })
+                                : undefined
+                            }
+                            onMouseDown={(e) => {
+                              if (e.button !== 0) return;
+                              draggingSelection.current = true;
+                              setSelection((prev) =>
+                                e.shiftKey && prev
+                                  ? { anchor: prev.anchor, focus: pos }
+                                  : { anchor: pos, focus: pos },
+                              );
+                              // Keep keyboard focus on the grid, not lost to
+                              // the body, so arrows and Cmd+C work next.
+                              e.preventDefault();
+                              containerRef.current?.focus();
+                            }}
+                            onMouseEnter={(e) => {
+                              if (draggingSelection.current && e.buttons === 1)
+                                setSelection((prev) =>
+                                  prev
+                                    ? { anchor: prev.anchor, focus: pos }
+                                    : prev,
+                                );
+                            }}
+                            onContextMenu={() => {
+                              // Right-click inside the selection keeps it;
+                              // elsewhere it selects that cell.
+                              if (!inRect(rect, rowIdx, visualCol))
+                                setSelection({ anchor: pos, focus: pos });
+                              containerRef.current?.focus();
+                            }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+
+              {paddingBottom > 0 && <div style={{ height: paddingBottom }} />}
+            </div>
+
+            {/* New rows */}
+            {newRows.map((newRow, newRowIdx) => (
               <div
-                key={row.id}
-                className={cn(
-                  "group flex border-b border-border/50",
-                  isDeleted
-                    ? "bg-destructive/10"
-                    : isEven
-                      ? "bg-background"
-                      : "bg-muted/20",
-                  !isDeleted && "hover:bg-primary/5",
-                )}
+                key={`new-${newRowIdx}`}
+                className="flex border-b border-emerald-500/30 bg-emerald-500/10"
                 style={{ height: ROW_HEIGHT }}
               >
-                {/* Row checkbox */}
                 {onRowSelectToggle && (
-                  <div className="flex w-8 shrink-0 items-center justify-center border-r border-border/50">
-                    <input
-                      type="checkbox"
-                      className="size-3 cursor-pointer accent-primary"
-                      checked={selectedRows.has(rowIdx)}
-                      onChange={() => onRowSelectToggle(rowIdx)}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </div>
+                  <div className="w-8 shrink-0 border-r border-emerald-500/20" />
                 )}
-                <div
-                  className="relative flex w-10 shrink-0 cursor-pointer items-center justify-center border-r border-border/50 text-[10px] text-muted-foreground/50 select-none"
-                  onClick={() => onDeleteToggle?.(rowIdx)}
-                  title={isDeleted ? "取消删除" : "标记删除"}
-                >
-                  <span className="group-hover:hidden">{rowIdx + 1}</span>
-                  <Trash2
-                    className={cn(
-                      "hidden size-3 group-hover:block",
-                      isDeleted
-                        ? "text-destructive"
-                        : "text-muted-foreground/60",
-                    )}
-                  />
+                <div className="flex w-10 shrink-0 items-center justify-center border-r border-emerald-500/20 text-[10px] text-emerald-600 select-none dark:text-emerald-400">
+                  +{newRowIdx + 1}
                 </div>
-
-                {row.getVisibleCells().map((cell) => {
-                  const colName = cell.column.id;
-                  const originalColIdx = columns.indexOf(colName);
-                  const key = editKey(rowIdx, colName);
-                  const isEditing =
-                    activeEdit?.rowIndex === rowIdx &&
-                    activeEdit?.colIndex === originalColIdx;
-                  const pending = pendingEdits[key];
-                  const displayValue =
-                    pending !== undefined ? pending.newValue : cell.getValue();
-
+                {headerGroups[0]?.headers.map((header) => {
+                  const col = header.column.id;
+                  const width = header.getSize();
                   return (
                     <div
-                      key={cell.id}
-                      className="shrink-0 border-r border-border/50"
-                      style={{ width: cell.column.getSize() }}
+                      key={col}
+                      className="shrink-0 border-r border-emerald-500/20"
+                      style={{ width }}
                     >
-                      <GridCell
-                        value={displayValue}
-                        isEditing={isEditing}
-                        isEdited={!!pending}
-                        isDeleted={isDeleted}
-                        onStartEdit={
-                          onEditCommit
-                            ? () => {
-                                setActiveEdit({
-                                  rowIndex: rowIdx,
-                                  colIndex: originalColIdx,
-                                });
-                              }
-                            : undefined
-                        }
-                        onCommit={(v) =>
-                          handleCommit(rowIdx, originalColIdx, v)
-                        }
-                        onCancel={() => setActiveEdit(null)}
-                        onMoveNext={() => moveNext(rowIdx, originalColIdx)}
-                        onView={
-                          onCellView
-                            ? () =>
-                                onCellView({
-                                  columnName: colName,
-                                  value: displayValue,
-                                })
-                            : undefined
-                        }
+                      <NewRowCell
+                        column={col}
+                        value={newRow[col]}
+                        onChange={(v) => onNewRowChange?.(newRowIdx, col, v)}
                       />
                     </div>
                   );
                 })}
               </div>
-            );
-          })}
-
-          {paddingBottom > 0 && <div style={{ height: paddingBottom }} />}
-        </div>
-
-        {/* New rows */}
-        {newRows.map((newRow, newRowIdx) => (
-          <div
-            key={`new-${newRowIdx}`}
-            className="flex border-b border-emerald-500/30 bg-emerald-500/10"
-            style={{ height: ROW_HEIGHT }}
-          >
-            {onRowSelectToggle && (
-              <div className="w-8 shrink-0 border-r border-emerald-500/20" />
-            )}
-            <div className="flex w-10 shrink-0 items-center justify-center border-r border-emerald-500/20 text-[10px] text-emerald-600 select-none dark:text-emerald-400">
-              +{newRowIdx + 1}
-            </div>
-            {headerGroups[0]?.headers.map((header) => {
-              const col = header.column.id;
-              const width = header.getSize();
-              return (
-                <div
-                  key={col}
-                  className="shrink-0 border-r border-emerald-500/20"
-                  style={{ width }}
-                >
-                  <NewRowCell
-                    column={col}
-                    value={newRow[col]}
-                    onChange={(v) => onNewRowChange?.(newRowIdx, col, v)}
-                  />
-                </div>
-              );
-            })}
+            ))}
           </div>
-        ))}
-      </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem disabled={!rect} onSelect={() => copySelection()}>
+            <Copy />
+            复制
+            <ContextMenuShortcut>⌘C</ContextMenuShortcut>
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={!rect}
+            onSelect={() => copySelection(true)}
+          >
+            <Copy />
+            复制（含列名）
+          </ContextMenuItem>
+          {focusColumn && (
+            <ContextMenuItem
+              onSelect={() =>
+                void navigator.clipboard.writeText(
+                  columns[originalIndex(focusColumn.id)] ?? "",
+                )
+              }
+            >
+              <Columns3 />
+              复制列名
+            </ContextMenuItem>
+          )}
+          {(onCellView || onEditCommit) && focusColumn && (
+            <ContextMenuSeparator />
+          )}
+          {onCellView && focusCell && focusColumn && (
+            <ContextMenuItem
+              onSelect={() =>
+                onCellView({
+                  columnName: focusColumn.id,
+                  value: valueAt(focusCell.row, focusColumn.id),
+                })
+              }
+            >
+              <Eye />
+              查看值
+            </ContextMenuItem>
+          )}
+          {onEditCommit && focusColumn && (
+            <>
+              <ContextMenuItem
+                disabled={!canEditFocus || multiCell}
+                onSelect={startEditAtFocus}
+              >
+                <Pencil />
+                编辑
+                <ContextMenuShortcut>↵</ContextMenuShortcut>
+              </ContextMenuItem>
+              <ContextMenuItem onSelect={setSelectionNull}>
+                <CircleSlash />
+                设为 NULL
+                <ContextMenuShortcut>⌫</ContextMenuShortcut>
+              </ContextMenuItem>
+            </>
+          )}
+          {onFilterChange && focusColumn && !multiCell && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuItem onSelect={() => filterByFocus("=")}>
+                <Filter />
+                按此值筛选
+              </ContextMenuItem>
+              <ContextMenuItem onSelect={() => filterByFocus("!=")}>
+                <FilterX />
+                排除此值
+              </ContextMenuItem>
+            </>
+          )}
+          {onDeleteToggle && rect && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                variant="destructive"
+                onSelect={toggleDeleteSelectedRows}
+              >
+                <Trash2 />
+                {rowCount > 1
+                  ? `标记删除 / 取消删除 ${rowCount} 行`
+                  : pendingDeletes.has(rect.top)
+                    ? "取消删除此行"
+                    : "删除此行"}
+              </ContextMenuItem>
+            </>
+          )}
+        </ContextMenuContent>
+      </ContextMenu>
     </div>
   );
 }

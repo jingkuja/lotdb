@@ -100,7 +100,7 @@ macro_rules! io_context {
 io_context!(
     std::io::Error,
     serde_json::Error,
-    csv::Error,
+    String,
     rust_xlsxwriter::XlsxError,
     tokio::task::JoinError
 );

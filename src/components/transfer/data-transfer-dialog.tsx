@@ -40,13 +40,21 @@ function formatSpeed(rps: number): string {
 function formatEta(sec: number): string {
   if (sec < 1) return "< 1 秒";
   if (sec < 60) return `${Math.round(sec)} 秒`;
-  return `${Math.round(sec / 60)} 分钟`;
+  if (sec < 3600) {
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return s ? `${m} 分 ${s} 秒` : `${m} 分钟`;
+  }
+  return `${Math.floor(sec / 3600)} 小时 ${Math.round((sec % 3600) / 60)} 分`;
 }
 
 interface TransferProgressEvent {
   transferId: string;
   current: number;
+  /** 0 while the source row count is unknown. */
   total: number;
+  /** `total` is the table-statistics estimate, not an exact count. */
+  estimated: boolean;
   rowsPerSec: number;
   etaSec: number;
 }
@@ -314,6 +322,7 @@ export function DataTransferDialog({
   const [progress, setProgress] = useState(0);
   const [rowsDone, setRowsDone] = useState(0);
   const [rowsTotal, setRowsTotal] = useState(0);
+  const [totalEstimated, setTotalEstimated] = useState(false);
   const [speed, setSpeed] = useState(0);
   const [eta, setEta] = useState(0);
   const [resultError, setResultError] = useState<string | null>(null);
@@ -451,6 +460,7 @@ export function DataTransferDialog({
             setProgress(pct);
             setRowsDone(p.current);
             setRowsTotal(p.total);
+            setTotalEstimated(p.estimated);
             setSpeed(p.rowsPerSec);
             setEta(p.etaSec);
           }
@@ -652,11 +662,16 @@ export function DataTransferDialog({
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>
                   {rowsDone.toLocaleString()} /{" "}
-                  {rowsTotal > 0 ? rowsTotal.toLocaleString() : "?"} 行
+                  {rowsTotal > 0
+                    ? `${totalEstimated ? "约 " : ""}${rowsTotal.toLocaleString()}`
+                    : "统计中…"}{" "}
+                  行{rowsTotal > 0 ? `（${progress}%）` : ""}
                 </span>
                 <span>
                   {formatSpeed(speed)}
-                  {eta > 0 ? `，剩余 ${formatEta(eta)}` : ""}
+                  {eta > 0
+                    ? `，${totalEstimated ? "预计" : ""}剩余 ${formatEta(eta)}`
+                    : ""}
                 </span>
               </div>
               <div className="h-2 w-full rounded-full bg-muted overflow-hidden">

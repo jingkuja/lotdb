@@ -79,6 +79,11 @@ pub fn run() {
             commands::objects::create_enum_type,
             commands::objects::add_enum_value,
             commands::objects::drop_enum_type,
+            // Object-tree maintenance
+            commands::table_ops::drop_object,
+            commands::table_ops::truncate_table,
+            commands::table_ops::rename_table,
+            commands::table_ops::copy_table,
             // Connection groups
             commands::groups::list_groups,
             commands::groups::create_group,

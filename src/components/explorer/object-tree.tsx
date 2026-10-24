@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { createContext, useContext, useState } from "react";
 import {
   ChevronRight,
   ChevronDown,
@@ -27,11 +27,24 @@ import {
   ExternalLink,
   Hash,
   FileCode,
+  Copy,
+  Eraser,
+  TextCursorInput,
+  Search,
+  X,
+  Settings2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatabases, useSchemas, useObjects } from "@/hooks/use-schema";
 import { useTriggers, useSequences, useEnums } from "@/hooks/use-objects";
-import { dropTrigger } from "@/services/tauri-commands";
+import {
+  copyTable,
+  dropObject,
+  dropTrigger,
+  renameTable,
+  truncateTable,
+  type DroppableObject,
+} from "@/services/tauri-commands";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { DatabaseType } from "@/types/database";
 import { BatchExportDialog } from "@/components/transfer/batch-export-dialog";
@@ -41,10 +54,39 @@ import { RestoreDialog } from "@/components/transfer/restore-dialog";
 import { CreateDatabaseDialog } from "@/components/admin/create-database-dialog";
 import { dropDatabase, openConnection } from "@/services/tauri-commands";
 import { useConnectionStore } from "@/stores/connection-store";
-import { alertDialog, confirmDialog } from "@/stores/app-dialog-store";
+import {
+  alertDialog,
+  confirmDialog,
+  promptDialog,
+} from "@/stores/app-dialog-store";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { useQueryClient } from "@tanstack/react-query";
 import { useConnections } from "@/hooks/use-connections";
 import { formatDbError, isConnectionError } from "@/lib/error";
+
+// ─── Filter ───────────────────────────────────────────────────────
+
+/** Lower-cased text of the tree's filter box; "" shows everything. */
+const TreeFilterContext = createContext("");
+
+function matchesFilter(name: string, filter: string) {
+  return !filter || name.toLowerCase().includes(filter);
+}
+
+/** Schemas every MySQL server has; listed apart from user databases. */
+const MYSQL_SYSTEM_DATABASES = new Set([
+  "information_schema",
+  "mysql",
+  "performance_schema",
+  "sys",
+]);
 
 // ─── TreeRow — generic row with indent, icon, label ──────────────
 
@@ -226,24 +268,226 @@ function ObjectLeaf({
     </button>
   );
 
+  const ops = useObjectOperations(connectionId, database, schema, tabId);
+  const typeLabel = type === "table" ? "表" : type === "view" ? "视图" : "函数";
+
   return (
-    <TreeRow
-      level={level}
-      icon={icon}
-      label={name}
-      expandable={false}
-      onClick={handleClick}
-    >
-      {type === "table" && (
-        <>
-          {action("查看结构", "table-structure", <Hash className="size-3" />)}
-          {action("在设计器中编辑", "designer", <Pencil className="size-3" />)}
-        </>
-      )}
-      {type === "view" &&
-        action("查看定义", "object-ddl", <FileCode className="size-3" />)}
-    </TreeRow>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div>
+          <TreeRow
+            level={level}
+            icon={icon}
+            label={name}
+            expandable={false}
+            loading={ops.busy}
+            onClick={handleClick}
+          >
+            {type === "table" && (
+              <>
+                {action(
+                  "查看结构",
+                  "table-structure",
+                  <Hash className="size-3" />,
+                )}
+                {action(
+                  "在设计器中编辑",
+                  "designer",
+                  <Pencil className="size-3" />,
+                )}
+              </>
+            )}
+            {type === "view" &&
+              action("查看定义", "object-ddl", <FileCode className="size-3" />)}
+          </TreeRow>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuLabel>{name}</ContextMenuLabel>
+        {type !== "function" && (
+          <ContextMenuItem onSelect={() => openTab("table-data")}>
+            <Table2 />
+            打开数据
+          </ContextMenuItem>
+        )}
+        {type === "table" && (
+          <>
+            <ContextMenuItem onSelect={() => openTab("table-structure")}>
+              <Hash />
+              查看结构
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => openTab("designer")}>
+              <Pencil />
+              在设计器中编辑
+            </ContextMenuItem>
+          </>
+        )}
+        {type !== "table" && (
+          <ContextMenuItem onSelect={() => openTab("object-ddl")}>
+            <FileCode />
+            查看定义
+          </ContextMenuItem>
+        )}
+        <ContextMenuItem
+          onSelect={() => void navigator.clipboard.writeText(name)}
+        >
+          <Copy />
+          复制名称
+        </ContextMenuItem>
+        {type === "table" && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              disabled={ops.readonly}
+              onSelect={() => void ops.rename(name)}
+            >
+              <TextCursorInput />
+              重命名…
+            </ContextMenuItem>
+            <ContextMenuItem
+              disabled={ops.readonly}
+              onSelect={() => void ops.copy(name, false)}
+            >
+              <Copy />
+              复制表（仅结构）…
+            </ContextMenuItem>
+            <ContextMenuItem
+              disabled={ops.readonly}
+              onSelect={() => void ops.copy(name, true)}
+            >
+              <Copy />
+              复制表（结构和数据）…
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              disabled={ops.readonly}
+              onSelect={() => void ops.truncate(name)}
+            >
+              <Eraser />
+              清空表…
+            </ContextMenuItem>
+          </>
+        )}
+        {type !== "table" && <ContextMenuSeparator />}
+        <ContextMenuItem
+          variant="destructive"
+          disabled={ops.readonly}
+          onSelect={() => void ops.drop(type, name)}
+        >
+          <Trash2 />
+          删除{typeLabel}…
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
+}
+
+/**
+ * Drop / truncate / rename / copy for one object-tree leaf. Each asks first
+ * (in-app dialogs: native ones don't work in the webview), refreshes the
+ * object list, and closes tabs of an object that no longer exists.
+ */
+function useObjectOperations(
+  connectionId: string,
+  database: string,
+  schema: string | undefined,
+  tabPrefix: string,
+) {
+  const queryClient = useQueryClient();
+  const { data: connections = [] } = useConnections();
+  const readonly = !!connections.find((c) => c.id === connectionId)?.readonly;
+  const [busy, setBusy] = useState(false);
+
+  const run = async (title: string, work: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await work();
+      await queryClient.invalidateQueries({
+        queryKey: ["objects", connectionId, database],
+      });
+    } catch (err) {
+      await alertDialog(formatDbError(err), { title });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const closeTabs = async () => {
+    const { tabs, removeTab } = useWorkspaceStore.getState();
+    for (const tab of tabs) {
+      if (tab.id === tabPrefix || tab.id.startsWith(`${tabPrefix}/`))
+        await removeTab(tab.id);
+    }
+  };
+
+  /** The entered name, or null when cancelled, empty or still `current`. */
+  const askName = async (
+    message: string,
+    initial: string,
+    title: string,
+    current: string,
+  ) => {
+    const value = (await promptDialog(message, initial, { title }))?.trim();
+    return value && value !== current ? value : null;
+  };
+
+  return {
+    readonly,
+    busy,
+    drop: async (kind: DroppableObject, name: string) => {
+      const label = kind === "table" ? "表" : kind === "view" ? "视图" : "函数";
+      if (
+        !(await confirmDialog(
+          `确定要删除${label} "${name}" 吗？此操作不可撤销！`,
+          { title: `删除${label}`, confirmLabel: "删除", destructive: true },
+        ))
+      )
+        return;
+      await run("删除失败", async () => {
+        await dropObject(connectionId, database, schema, kind, name);
+        await closeTabs();
+      });
+    },
+    truncate: async (name: string) => {
+      if (
+        !(await confirmDialog(
+          `确定要清空表 "${name}" 的全部数据吗？此操作不可撤销！`,
+          { title: "清空表", confirmLabel: "清空", destructive: true },
+        ))
+      )
+        return;
+      await run("清空失败", async () => {
+        await truncateTable(connectionId, database, schema, name);
+        await queryClient.invalidateQueries({
+          queryKey: ["table-data", connectionId, database],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["table-count", connectionId, database],
+        });
+      });
+    },
+    rename: async (name: string) => {
+      const next = await askName("输入新的表名：", name, "重命名表", name);
+      if (!next) return;
+      await run("重命名失败", async () => {
+        await renameTable(connectionId, database, schema, name, next);
+        await closeTabs();
+      });
+    },
+    copy: async (name: string, withData: boolean) => {
+      const next = await askName(
+        withData ? "复制表结构和数据到新表：" : "复制表结构到新表：",
+        `${name}_copy`,
+        "复制表",
+        name,
+      );
+      if (!next) return;
+      await run("复制失败", () =>
+        copyTable(connectionId, database, schema, name, next, withData),
+      );
+    },
+  };
 }
 
 // ─── CategoryNode — "Tables" / "Views" / "Functions" folder ───────
@@ -269,18 +513,30 @@ function CategoryNode({
 }: CategoryNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const [batchExportOpen, setBatchExportOpen] = useState(false);
+  const filter = useContext(TreeFilterContext);
 
   if (items.length === 0) return null;
+  const shown = filter
+    ? items.filter((name) => matchesFilter(name, filter))
+    : items;
+  // While filtering, a folder with matches opens by itself; one without
+  // matches disappears.
+  if (filter && shown.length === 0) return null;
+  const open = expanded || !!filter;
 
   return (
     <>
       <TreeRow
         level={level}
         icon={<Folder className="size-3" />}
-        label={`${label} (${items.length})`}
+        label={
+          filter
+            ? `${label} (${shown.length}/${items.length})`
+            : `${label} (${items.length})`
+        }
         expandable
-        expanded={expanded}
-        onClick={() => setExpanded((v) => !v)}
+        expanded={open}
+        onClick={() => setExpanded(!open)}
       >
         {type === "table" && (
           <button
@@ -295,8 +551,8 @@ function CategoryNode({
           </button>
         )}
       </TreeRow>
-      {expanded &&
-        items.map((name) => (
+      {open &&
+        shown.map((name) => (
           <ObjectLeaf
             key={name}
             name={name}
@@ -666,19 +922,10 @@ interface MySqlDbNodeProps {
   level: number;
 }
 
-function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
-  const [expanded, setExpanded] = useState(false);
+/** Asks, drops the database, and refreshes the database list. */
+function useDropDatabase(connectionId: string, database: string) {
   const [dropping, setDropping] = useState(false);
-  const [backupOpen, setBackupOpen] = useState(false);
-  const [restoreOpen, setRestoreOpen] = useState(false);
-  const { data, isLoading, isError } = useObjects(
-    connectionId,
-    database,
-    undefined,
-    expanded,
-  );
   const queryClient = useQueryClient();
-
   const handleDrop = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (
@@ -702,6 +949,24 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
       setDropping(false);
     }
   };
+  return { dropping, handleDrop };
+}
+
+function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const { data, isLoading, isError } = useObjects(
+    connectionId,
+    database,
+    undefined,
+    expanded,
+  );
+  const { dropping, handleDrop } = useDropDatabase(connectionId, database);
+  const filter = useContext(TreeFilterContext);
+
+  // An open database stays, so its tables can be filtered.
+  if (!expanded && !matchesFilter(database, filter)) return null;
 
   return (
     <>
@@ -810,6 +1075,10 @@ function PgDbNode({ database, connectionId, level }: PgDbNodeProps) {
     isLoading,
     isError,
   } = useSchemas(connectionId, database, expanded);
+  const { dropping, handleDrop } = useDropDatabase(connectionId, database);
+  const filter = useContext(TreeFilterContext);
+
+  if (!expanded && !matchesFilter(database, filter)) return null;
 
   return (
     <>
@@ -819,7 +1088,7 @@ function PgDbNode({ database, connectionId, level }: PgDbNodeProps) {
         label={database}
         expandable
         expanded={expanded}
-        loading={expanded && isLoading}
+        loading={(expanded && isLoading) || dropping}
         error={isError}
         onClick={() => setExpanded((v) => !v)}
       >
@@ -842,6 +1111,13 @@ function PgDbNode({ database, connectionId, level }: PgDbNodeProps) {
           }}
         >
           <ArchiveRestore className="size-3" />
+        </button>
+        <button
+          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-destructive"
+          title="删除数据库"
+          onClick={handleDrop}
+        >
+          <Trash2 className="size-3" />
         </button>
       </TreeRow>
       <BackupDialog
@@ -888,6 +1164,8 @@ export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
   const [reconnecting, setReconnecting] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
+  const [filterText, setFilterText] = useState("");
+  const [systemOpen, setSystemOpen] = useState(false);
   const queryClient = useQueryClient();
   const { data: connections = [] } = useConnections();
   const addTab = useWorkspaceStore((s) => s.addTab);
@@ -1006,6 +1284,28 @@ export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
     );
   }
 
+  const filter = filterText.trim().toLowerCase();
+  const isSystem = (db: string) =>
+    dbType === "mysql" && MYSQL_SYSTEM_DATABASES.has(db.toLowerCase());
+  const userDatabases = databases.filter((db) => !isSystem(db));
+  const systemDatabases = databases.filter(isSystem);
+  const renderDatabase = (db: string, level: number) =>
+    dbType === "mysql" ? (
+      <MySqlDbNode
+        key={db}
+        database={db}
+        connectionId={connectionId}
+        level={level}
+      />
+    ) : (
+      <PgDbNode
+        key={db}
+        database={db}
+        connectionId={connectionId}
+        level={level}
+      />
+    );
+
   return (
     <>
       <div className="py-0.5">
@@ -1050,34 +1350,57 @@ export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
             >
               <Users className="size-3" />
             </button>
-            {dbType === "mysql" && (
-              <button
-                className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-                title="新建数据库"
-                onClick={() => setCreateOpen(true)}
-              >
-                <Plus className="size-3" />
-              </button>
-            )}
+            <button
+              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+              title="新建数据库"
+              onClick={() => setCreateOpen(true)}
+            >
+              <Plus className="size-3" />
+            </button>
           </div>
         </div>
-        {databases.map((db) =>
-          dbType === "mysql" ? (
-            <MySqlDbNode
-              key={db}
-              database={db}
-              connectionId={connectionId}
-              level={1}
-            />
-          ) : (
-            <PgDbNode
-              key={db}
-              database={db}
-              connectionId={connectionId}
-              level={1}
-            />
-          ),
-        )}
+
+        {/* Filter: databases by name; inside open databases, objects by name */}
+        <div className="relative mx-2 mb-0.5">
+          <Search className="pointer-events-none absolute left-1.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+          <input
+            className="h-6 w-full rounded border border-sidebar-border bg-transparent pl-5 pr-5 text-xs outline-none placeholder:text-muted-foreground/70 focus:border-primary"
+            placeholder="过滤数据库 / 表"
+            aria-label="过滤对象"
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setFilterText("");
+            }}
+          />
+          {filterText && (
+            <button
+              className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+              title="清除过滤"
+              onClick={() => setFilterText("")}
+            >
+              <X className="size-3" />
+            </button>
+          )}
+        </div>
+
+        <TreeFilterContext.Provider value={filter}>
+          {userDatabases.map((db) => renderDatabase(db, 1))}
+          {systemDatabases.length > 0 && (
+            <>
+              <TreeRow
+                level={1}
+                icon={<Settings2 className="size-3" />}
+                label={`系统库 (${systemDatabases.length})`}
+                expandable
+                expanded={systemOpen || !!filter}
+                onClick={() => setSystemOpen((v) => !v)}
+              />
+              {(systemOpen || !!filter) &&
+                systemDatabases.map((db) => renderDatabase(db, 2))}
+            </>
+          )}
+        </TreeFilterContext.Provider>
       </div>
 
       <CreateDatabaseDialog

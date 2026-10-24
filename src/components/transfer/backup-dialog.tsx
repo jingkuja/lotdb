@@ -1,6 +1,12 @@
 import { useState, useCallback, useEffect } from "react";
 import { alertDialog } from "@/stores/app-dialog-store";
-import { Download, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import {
+  Download,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  FolderOpen,
+} from "lucide-react";
 import { downloadDir, join } from "@tauri-apps/api/path";
 import {
   Dialog,
@@ -15,6 +21,7 @@ import { Label } from "@/components/ui/label";
 import { backupDatabase } from "@/services/tauri-commands";
 import { formatBytes, useCliTask } from "@/hooks/use-cli-task";
 import { formatDbError } from "@/lib/error";
+import { pickSavePath } from "@/lib/file-dialog";
 
 interface BackupDialogProps {
   open: boolean;
@@ -112,14 +119,31 @@ export function BackupDialog({
           <div className="flex flex-col gap-4">
             {/* File path */}
             <div>
-              <Label className="text-xs mb-1 block">输出文件（绝对路径）</Label>
-              <Input
-                value={filePath}
-                onChange={(e) => setFilePath(e.target.value)}
-                placeholder="/path/to/backup.sql"
-                className="h-8 text-xs"
-                disabled={running}
-              />
+              <Label className="text-xs mb-1 block">输出文件</Label>
+              <div className="flex gap-2">
+                <Input
+                  value={filePath}
+                  onChange={(e) => setFilePath(e.target.value)}
+                  placeholder="/path/to/backup.sql"
+                  className="h-8 flex-1 text-xs"
+                  disabled={running}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1 text-xs"
+                  disabled={running}
+                  onClick={async () => {
+                    const path = await pickSavePath(filePath, [
+                      { name: "SQL", extensions: ["sql"] },
+                    ]);
+                    if (path) setFilePath(path);
+                  }}
+                >
+                  <FolderOpen className="size-3" />
+                  选择…
+                </Button>
+              </div>
             </div>
 
             {/* Content mode */}

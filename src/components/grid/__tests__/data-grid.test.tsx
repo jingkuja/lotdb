@@ -198,3 +198,118 @@ it("keeps filter drafts focused until Enter and ignores IME confirmation", () =>
     vi.useRealTimers();
   }
 });
+
+function mockClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText },
+    configurable: true,
+  });
+  return writeText;
+}
+
+it("selects a range with the mouse and keyboard and copies it as TSV", () => {
+  const writeText = mockClipboard();
+  render(
+    <DataGrid
+      columns={["id", "name"]}
+      rows={[
+        [10, "Alice"],
+        [20, null],
+        [30, "Carol"],
+      ]}
+    />,
+  );
+  const grid = screen.getByRole("grid");
+  fireEvent.mouseDown(screen.getByText("Alice"));
+  expect(document.activeElement).toBe(grid);
+  fireEvent.keyDown(grid, { key: "c", metaKey: true });
+  expect(writeText).toHaveBeenLastCalledWith("Alice");
+
+  // Shift+click extends; arrows move the focus cell.
+  fireEvent.mouseDown(screen.getByText("10"), { shiftKey: true });
+  fireEvent.keyDown(grid, { key: "ArrowDown", shiftKey: true });
+  fireEvent.keyDown(grid, { key: "c", metaKey: true });
+  expect(writeText).toHaveBeenLastCalledWith("10\tAlice\n20\t");
+  expect(document.querySelectorAll("[data-selected]").length).toBe(4);
+
+  fireEvent.keyDown(grid, { key: "ArrowDown" });
+  fireEvent.keyDown(grid, { key: "ArrowRight" });
+  fireEvent.keyDown(grid, { key: "c", metaKey: true });
+  expect(writeText).toHaveBeenLastCalledWith("Carol");
+
+  fireEvent.keyDown(grid, { key: "a", metaKey: true });
+  expect(document.querySelectorAll("[data-selected]").length).toBe(6);
+  fireEvent.keyDown(grid, { key: "Escape" });
+  expect(document.querySelectorAll("[data-selected]").length).toBe(0);
+});
+
+it("edits the focused cell with Enter and stages NULL with Delete", () => {
+  const onEditCommit = vi.fn();
+  render(
+    <DataGrid
+      columns={["id", "name"]}
+      rows={[[10, "Alice"]]}
+      onEditCommit={onEditCommit}
+    />,
+  );
+  const grid = screen.getByRole("grid");
+  fireEvent.mouseDown(screen.getByText("Alice"));
+  fireEvent.keyDown(grid, { key: "Enter" });
+  const input = screen.getByRole("textbox");
+  fireEvent.change(input, { target: { value: "Bob" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(onEditCommit).toHaveBeenCalledExactlyOnceWith({
+    rowIndex: 0,
+    column: "name",
+    originalValue: "Alice",
+    newValue: "Bob",
+  });
+  expect(document.activeElement).toBe(grid);
+  fireEvent.mouseDown(screen.getByText("10"));
+  fireEvent.keyDown(grid, { key: "Delete" });
+  expect(onEditCommit).toHaveBeenLastCalledWith({
+    rowIndex: 0,
+    column: "id",
+    originalValue: 10,
+    newValue: null,
+  });
+});
+
+it("filters by a cell value from the context menu", async () => {
+  const onFilterChange = vi.fn();
+  render(
+    <DataGrid
+      columns={["name"]}
+      rows={[["Alice"], [null]]}
+      onFilterChange={onFilterChange}
+    />,
+  );
+  fireEvent.contextMenu(screen.getByText("Alice"));
+  fireEvent.click(await screen.findByText("按此值筛选"));
+  expect(onFilterChange).toHaveBeenLastCalledWith("name", {
+    column: "name",
+    op: "=",
+    value: "Alice",
+  });
+  fireEvent.contextMenu(screen.getByText("NULL"));
+  fireEvent.click(await screen.findByText("排除此值"));
+  expect(onFilterChange).toHaveBeenLastCalledWith("name", {
+    column: "name",
+    op: "IS NOT NULL",
+    value: "",
+  });
+});
+
+it("sizes columns from their content", () => {
+  render(
+    <DataGrid
+      columns={["id", "created_at"]}
+      rows={[[1, "2026-10-24 12:34:56.123456"]]}
+    />,
+  );
+  const width = (text: string) =>
+    parseFloat(screen.getByText(text).parentElement!.style.width);
+  expect(width("id")).toBe(60);
+  expect(width("created_at")).toBeGreaterThan(140);
+});
