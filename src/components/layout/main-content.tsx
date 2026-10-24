@@ -55,7 +55,7 @@ const SchemaDiffTab = lazy(() =>
 import { useConnections } from "@/hooks/use-connections";
 import { useQuery } from "@tanstack/react-query";
 import { getTableDesignerState } from "@/lib/designer-loader";
-import { Database, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import type { DatabaseType } from "@/types/database";
 import type { DesignerState } from "@/types/designer";
 import { formatDbError } from "@/lib/error";
@@ -120,7 +120,12 @@ export function MainContent() {
   if (!activeTabId) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
-        <Database className="size-12 opacity-30" />
+        <img
+          src="/app-icon.png"
+          alt=""
+          className="size-20 select-none drop-shadow-sm"
+          draggable={false}
+        />
         <p className="text-lg font-medium text-foreground">
           继续你的数据库工作
         </p>
