@@ -483,6 +483,8 @@ pnpm package
 
 - 构建当前架构的 `.app` 和 `.dmg`，会复用 Rust 的编译缓存。Tauri 会先执行 `pnpm build`（`tsc -b && vite build`）。
 - 默认使用 `/Library/Developer/CommandLineTools`；如果已经设置了 `DEVELOPER_DIR`，就沿用它。
+- 默认用 `Apple Development: jingkuja@163.com (VXB9LVYBDU)` 签名；设置了 `APPLE_SIGNING_IDENTITY` 就用它。ad-hoc 签名的包每次构建后钥匙串都认不出，用开发证书签名后，在钥匙串弹窗里点一次“始终允许”，之后重新打包也不会再问。
+- `PATH` 里优先用 `/usr/bin`，因为 Homebrew 装的 `xattr` 不支持 Tauri 需要的 `-r` 参数。
 - 产物位置：
   - `src-tauri/target/release/bundle/macos/LotDB.app`
   - `src-tauri/target/release/bundle/dmg/LotDB_<版本>_aarch64.dmg`
@@ -498,7 +500,7 @@ pnpm package
 | `pnpm package:icons` | 重新生成图标并打包 |
 | `pnpm tauri build --debug --bundles app` | 只构建调试版 `.app`，速度快，会自动打开 DevTools，方便检查 CSP 和界面 |
 
-本地构建的包**没有签名**。发给别人时，对方第一次打开需要右键选择“打开”，或在“系统设置 → 隐私与安全性”里允许。这样的包只适合自己用或小范围测试。
+本地构建的包只有开发证书签名，**没有 Developer ID 签名，也没有公证**。发给别人时，对方第一次打开需要右键选择“打开”，或在“系统设置 → 隐私与安全性”里允许。这样的包只适合自己用或小范围测试。
 
 ### 4.1 不影响真实数据地验证打包结果
 
@@ -709,6 +711,8 @@ brew install mysql-client postgresql@16
 | `cargo test` 报找不到 `frontendDist` | 先运行 `pnpm vite build` 生成 `dist/`，或者设置 `TAURI_CONFIG='{"build":{"frontendDist":"<含 index.html 的目录>"}}'` |
 | 打包后弹窗、确认框没有反应 | 代码里用了原生 `confirm`、`alert` 或 `<a download>`，改用应用内对话框和 `lib/file-dialog.ts`（见第一部分 5.3） |
 | 打包后页面空白或样式丢失 | 被 CSP 拦截了。用调试版 `.app` 打开 DevTools 查看控制台，再调整 `tauri.conf.json` 的 `security.csp` |
+| 每次打开都要输入钥匙串密码 | 包是 ad-hoc 签名，钥匙串只认这一次构建。用 `pnpm package` 打包（会用开发证书签名），然后在弹窗里点“始终允许” |
+| `pnpm package` 报 `failed to run xattr` | PATH 里有不兼容的 `xattr`（如 Homebrew 装的），`pnpm package` 已经优先使用 `/usr/bin`；直接运行 `tauri build` 时需要自己处理 |
 | Dock 中还是旧图标 | 图标缓存问题，运行 `killall Dock`；必要时把 `.app` 重新拷进“应用程序” |
 | 别人打开时提示“已损坏”或“无法验证开发者” | 包没有签名或公证，按第 6 节处理 |
 | 备份时提示找不到 mysqldump 或 pg_dump | 用户机器上没装客户端工具，见第 4.3 节 |

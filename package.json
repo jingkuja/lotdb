@@ -14,7 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "package": "DEVELOPER_DIR=\"${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}\" tauri build",
+    "package": "PATH=\"/usr/bin:$PATH\" DEVELOPER_DIR=\"${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}\" APPLE_SIGNING_IDENTITY=\"${APPLE_SIGNING_IDENTITY:-Apple Development: jingkuja@163.com (VXB9LVYBDU)}\" tauri build",
     "package:clean": "rm -rf src-tauri/target dist && pnpm package",
     "package:universal": "rustup target add aarch64-apple-darwin x86_64-apple-darwin && pnpm package --target universal-apple-darwin",
     "icons": "tauri icon src-tauri/icons/app-icon-source.png",
