@@ -2,6 +2,8 @@ import { Button } from "@/components/ui/button";
 import { lazy, Suspense } from "react";
 import { TabActiveContext } from "@/hooks/use-tab-active";
 import { RecentPanel } from "./recent-panel";
+import { ClosedQueriesList } from "./closed-queries";
+import { useRecentStore } from "@/stores/recent-store";
 import { useWorkspaceStore, type Tab } from "@/stores/workspace-store";
 import { TableStructurePanel } from "@/components/explorer/table-structure-panel";
 const ObjectDdlTab = lazy(() =>
@@ -113,6 +115,8 @@ function DesignerLoader({
 
 export function MainContent() {
   const { tabs, activeTabId } = useWorkspaceStore();
+  const hasRecent = useRecentStore((s) => s.items.length > 0);
+  const hasClosed = useWorkspaceStore((s) => s.closedQueries.length > 0);
   if (!activeTabId) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -121,7 +125,7 @@ export function MainContent() {
           继续你的数据库工作
         </p>
         <p className="text-sm">
-          从左侧连接数据库，按 Cmd+N 创建查询。SQL 草稿随工作区自动恢复。
+          从左侧连接数据库，按 ⌘N 创建查询。SQL 草稿随工作区自动恢复。
         </p>
         <Button
           onClick={() =>
@@ -130,9 +134,12 @@ export function MainContent() {
         >
           新建连接
         </Button>
-        <div className="mt-4 w-full max-w-lg rounded-lg border bg-card p-3">
-          <RecentPanel limit={8} />
-        </div>
+        {(hasRecent || hasClosed) && (
+          <div className="mt-4 w-full max-w-lg rounded-lg border bg-card p-3">
+            <RecentPanel limit={8} />
+            <ClosedQueriesList />
+          </div>
+        )}
       </div>
     );
   }

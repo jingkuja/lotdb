@@ -31,6 +31,26 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  ContextMenu,
+  ContextMenuButton,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ConnectionDialog } from "@/components/connection/connection-dialog";
 import { ImportExportConnectionsDialog } from "@/components/connection/import-export-connections-dialog";
 import { ObjectTree } from "@/components/explorer/object-tree";
@@ -62,7 +82,7 @@ import {
 } from "@/stores/app-dialog-store";
 import { formatDbError } from "@/lib/error";
 
-const THEME_CYCLE: ThemeMode[] = ["light", "dark", "system"];
+const THEME_MODES: ThemeMode[] = ["light", "dark", "system"];
 const THEME_ICONS: Record<ThemeMode, React.ElementType> = {
   light: Sun,
   dark: Moon,
@@ -86,12 +106,6 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
   const [importExportOpen, setImportExportOpen] = useState(false);
   const themeMode = useThemeStore((s) => s.mode);
   const setThemeMode = useThemeStore((s) => s.setMode);
-  const ThemeIcon = THEME_ICONS[themeMode];
-  const cycleTheme = () => {
-    const idx = THEME_CYCLE.indexOf(themeMode);
-    const next = THEME_CYCLE[(idx + 1) % THEME_CYCLE.length];
-    if (next) setThemeMode(next);
-  };
   const [editingConn, setEditingConn] = useState<ConnectionConfig | undefined>(
     undefined,
   );
@@ -123,6 +137,8 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
   } = useConnectionStore();
 
   const addTab = useWorkspaceStore((s) => s.addTab);
+  const activeOpen =
+    !!activeConnectionId && openPoolIds.has(activeConnectionId);
 
   const handleNewDesigner = (connId?: string) => {
     const id = connId ?? activeConnectionId;
@@ -296,95 +312,53 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
 
   return (
     <div className="flex h-full flex-col bg-sidebar-background text-sidebar-foreground">
-      {/* Toolbar */}
+      {/* Toolbar: create on the left; search and app settings on the right */}
       <div className="flex items-center gap-1 border-b border-sidebar-border px-2 py-1.5">
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="新建连接或分组"
+                >
+                  <Plus className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">新建连接 / 分组</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="start" className="text-xs">
+            <DropdownMenuItem onSelect={handleNewConnection}>
+              <Database className="size-3.5" />
+              新建连接…
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void handleNewGroup()}>
+              <FolderOpen className="size-3.5" />
+              新建分组…
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => setImportExportOpen(true)}>
+              <ArrowLeftRight className="size-3.5" />
+              导入 / 导出连接配置…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
               variant="ghost"
               size="icon-xs"
-              onClick={handleNewConnection}
-            >
-              <Plus className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">新建连接</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              onClick={() => void handleNewGroup()}
-            >
-              <FolderOpen className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">新建分组</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-xs"
+              aria-label="新建查询"
               onClick={() => handleNewQuery()}
-              disabled={
-                !activeConnectionId || !openPoolIds.has(activeConnectionId)
-              }
+              disabled={!activeOpen}
             >
               <Terminal className="size-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="bottom">新建查询</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              onClick={() => handleNewDesigner()}
-              disabled={
-                !activeConnectionId || !openPoolIds.has(activeConnectionId)
-              }
-            >
-              <Table2 className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">新建表</TooltipContent>
-        </Tooltip>
-        <div className="flex-1" />
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              onClick={() => onSearchOpenChange(true)}
-            >
-              <Search className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">搜索对象 (⌘K)</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              onClick={() => setImportExportOpen(true)}
-            >
-              <ArrowLeftRight className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">导入/导出连接配置</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="ghost" size="icon-xs" onClick={cycleTheme}>
-              <ThemeIcon className="size-4" />
-            </Button>
-          </TooltipTrigger>
           <TooltipContent side="bottom">
-            当前：{THEME_LABELS[themeMode]}（点击切换）
+            {activeOpen ? "新建查询 (⌘N)" : "新建查询（先连接数据库）"}
           </TooltipContent>
         </Tooltip>
         <Tooltip>
@@ -392,30 +366,78 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
             <Button
               variant="ghost"
               size="icon-xs"
-              onClick={() => {
-                /* dispatched via global shortcut — trigger via key event */
-                window.dispatchEvent(
-                  new KeyboardEvent("keydown", { key: "?", bubbles: true }),
-                );
-              }}
+              aria-label="新建表"
+              onClick={() => handleNewDesigner()}
+              disabled={!activeOpen}
             >
-              <Keyboard className="size-4" />
+              <Table2 className="size-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="bottom">快捷键帮助 (?)</TooltipContent>
+          <TooltipContent side="bottom">
+            {activeOpen ? "新建表" : "新建表（先连接数据库）"}
+          </TooltipContent>
         </Tooltip>
+        <div className="flex-1" />
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
               variant="ghost"
               size="icon-xs"
-              onClick={() => setPrefsOpen(true)}
+              aria-label="搜索对象"
+              onClick={() => onSearchOpenChange(true)}
             >
-              <Settings className="size-4" />
+              <Search className="size-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="bottom">偏好设置</TooltipContent>
+          <TooltipContent side="bottom">搜索对象 (⌘K)</TooltipContent>
         </Tooltip>
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-xs" aria-label="设置">
+                  <Settings className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">设置</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="end" className="w-44 text-xs">
+            <DropdownMenuLabel className="text-xs text-muted-foreground">
+              外观
+            </DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={themeMode}
+              onValueChange={(mode) => setThemeMode(mode as ThemeMode)}
+            >
+              {THEME_MODES.map((mode) => {
+                const Icon = THEME_ICONS[mode];
+                return (
+                  <DropdownMenuRadioItem key={mode} value={mode}>
+                    <Icon className="size-3.5" />
+                    {THEME_LABELS[mode]}
+                  </DropdownMenuRadioItem>
+                );
+              })}
+            </DropdownMenuRadioGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() =>
+                window.dispatchEvent(
+                  new KeyboardEvent("keydown", { key: "?", bubbles: true }),
+                )
+              }
+            >
+              <Keyboard className="size-3.5" />
+              快捷键
+              <DropdownMenuShortcut>?</DropdownMenuShortcut>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setPrefsOpen(true)}>
+              <Settings className="size-3.5" />
+              偏好设置…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {/* Tree */}
@@ -453,7 +475,7 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
           {!isLoading && !isError && connections.length === 0 && (
             <div className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground">
               <Database className="size-4" />
-              <span>暂无连接，点击 + 新建</span>
+              <span>暂无连接，点击左上角 + 新建</span>
             </div>
           )}
 
@@ -465,114 +487,113 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
 
               return (
                 <div key={conn.id}>
-                  {/* Connection row */}
-                  <div
-                    className={cn(
-                      "group flex items-center gap-1.5 rounded-md px-1 py-1 text-sm cursor-pointer",
-                      isActive
-                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                        : "hover:bg-sidebar-accent/50",
-                    )}
-                    onClick={() => {
-                      setActiveConnection(conn.id);
-                      if (isOpen) {
-                        toggleExpand(conn.id);
-                      } else {
-                        handleConnect(conn);
-                      }
-                    }}
-                  >
-                    {/* Expand chevron */}
-                    <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
-                      {isOpen ? (
-                        isExpanded ? (
-                          <ChevronDown className="size-3.5" />
-                        ) : (
-                          <ChevronRight className="size-3.5" />
-                        )
-                      ) : null}
-                    </span>
+                  {/* Connection row — actions in the context menu */}
+                  <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                      <div
+                        className={cn(
+                          "group flex items-center gap-1.5 rounded-md px-1 py-1 text-sm cursor-pointer",
+                          isActive
+                            ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                            : "hover:bg-sidebar-accent/50",
+                        )}
+                        onClick={() => {
+                          setActiveConnection(conn.id);
+                          if (isOpen) {
+                            toggleExpand(conn.id);
+                          } else {
+                            handleConnect(conn);
+                          }
+                        }}
+                      >
+                        {/* Expand chevron */}
+                        <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
+                          {isOpen ? (
+                            isExpanded ? (
+                              <ChevronDown className="size-3.5" />
+                            ) : (
+                              <ChevronRight className="size-3.5" />
+                            )
+                          ) : null}
+                        </span>
 
-                    {/* DB type badge */}
-                    <span
-                      className={cn(
-                        "flex size-5 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white",
-                        conn.dbType === "mysql" ? "bg-blue-600" : "bg-sky-700",
-                        isOpen && "ring-2 ring-green-400",
-                      )}
-                    >
-                      {dbBadge(conn.dbType)}
-                    </span>
+                        {/* DB type badge */}
+                        <span
+                          className={cn(
+                            "flex size-5 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white",
+                            conn.dbType === "mysql"
+                              ? "bg-blue-600"
+                              : "bg-sky-700",
+                            isOpen && "ring-2 ring-green-400",
+                          )}
+                        >
+                          {dbBadge(conn.dbType)}
+                        </span>
 
-                    <span className="min-w-0 flex-1 truncate text-sm">
-                      {conn.name}
-                    </span>
-                    {conn.readonly && (
-                      <Lock
-                        className="size-3 shrink-0 text-amber-500"
-                        aria-label="只读模式"
-                      />
-                    )}
-
-                    {/* Action buttons — visible on hover */}
-                    <div className="flex shrink-0 gap-0.5 opacity-0 group-hover:opacity-100">
+                        <span className="min-w-0 flex-1 truncate text-sm">
+                          {conn.name}
+                        </span>
+                        {conn.readonly && (
+                          <Lock
+                            className="size-3 shrink-0 text-amber-500"
+                            aria-label="只读模式"
+                          />
+                        )}
+                        <ContextMenuButton
+                          label={`${conn.name} 的操作`}
+                          className="shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                        />
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuLabel>{conn.name}</ContextMenuLabel>
                       {isOpen ? (
                         <>
-                          <button
-                            className="rounded p-0.5 hover:bg-sidebar-border"
-                            title="新建查询"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleNewQuery(conn.id);
-                            }}
+                          <ContextMenuItem
+                            onSelect={() => handleNewQuery(conn.id)}
                           >
-                            <Terminal className="size-3" />
-                          </button>
-                          <button
-                            className="rounded p-0.5 hover:bg-sidebar-border"
-                            title="断开连接"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDisconnect(conn.id);
-                            }}
+                            <Terminal />
+                            新建查询
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={conn.readonly}
+                            onSelect={() => handleNewDesigner(conn.id)}
                           >
-                            <Unplug className="size-3" />
-                          </button>
+                            <Table2 />
+                            新建表
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            onSelect={() => void handleDisconnect(conn.id)}
+                          >
+                            <Unplug />
+                            断开连接
+                          </ContextMenuItem>
                         </>
                       ) : (
-                        <button
-                          className="rounded p-0.5 hover:bg-sidebar-border"
-                          title="连接"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleConnect(conn);
-                          }}
+                        <ContextMenuItem
+                          onSelect={() => void handleConnect(conn)}
                         >
-                          <Wifi className="size-3" />
-                        </button>
+                          <Wifi />
+                          连接
+                        </ContextMenuItem>
                       )}
-                      <button
-                        className="rounded p-0.5 hover:bg-sidebar-border"
-                        title="编辑"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleEditConnection(conn);
-                        }}
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        onSelect={() => handleEditConnection(conn)}
                       >
-                        <Pencil className="size-3" />
-                      </button>
-                      <button
-                        className="rounded p-0.5 hover:bg-destructive/20 hover:text-destructive"
-                        title="删除"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleDelete(conn);
-                        }}
+                        <Pencil />
+                        编辑连接…
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        variant="destructive"
+                        onSelect={() => void handleDelete(conn)}
                       >
-                        <Trash2 className="size-3" />
-                      </button>
-                    </div>
-                  </div>
+                        <Trash2 />
+                        删除连接…
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
 
                   {/* Object tree — shown when connected + expanded */}
                   {isOpen && isExpanded && (
@@ -594,49 +615,56 @@ export function Sidebar({ searchOpen, onSearchOpenChange }: SidebarProps) {
                   return (
                     <div key={g.id}>
                       {/* Group folder row */}
-                      <div
-                        className="group flex items-center gap-1.5 rounded-md px-1 py-1 text-sm cursor-pointer hover:bg-sidebar-accent/50"
-                        onClick={() => toggleGroup(g.id)}
-                      >
-                        <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
-                          {groupConns.length > 0 ? (
-                            gExpanded ? (
-                              <ChevronDown className="size-3.5" />
-                            ) : (
-                              <ChevronRight className="size-3.5" />
-                            )
-                          ) : null}
-                        </span>
-                        <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-                        <span className="min-w-0 flex-1 truncate font-medium">
-                          {g.name}
-                        </span>
-                        <span className="shrink-0 text-[10px] text-muted-foreground">
-                          {groupConns.length}
-                        </span>
-                        <div className="flex shrink-0 gap-0.5 opacity-0 group-hover:opacity-100">
-                          <button
-                            className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border"
-                            title="重命名分组"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleRenameGroup(g.id, g.name);
-                            }}
+                      <ContextMenu>
+                        <ContextMenuTrigger asChild>
+                          <div
+                            className="group flex items-center gap-1.5 rounded-md px-1 py-1 text-sm cursor-pointer hover:bg-sidebar-accent/50"
+                            onClick={() => toggleGroup(g.id)}
                           >
-                            <Pencil className="size-3" />
-                          </button>
-                          <button
-                            className="rounded p-0.5 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
-                            title="删除分组"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleDeleteGroup(g.id, g.name);
-                            }}
+                            <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
+                              {groupConns.length > 0 ? (
+                                gExpanded ? (
+                                  <ChevronDown className="size-3.5" />
+                                ) : (
+                                  <ChevronRight className="size-3.5" />
+                                )
+                              ) : null}
+                            </span>
+                            <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+                            <span className="min-w-0 flex-1 truncate font-medium">
+                              {g.name}
+                            </span>
+                            <span className="shrink-0 text-[10px] text-muted-foreground">
+                              {groupConns.length}
+                            </span>
+                            <ContextMenuButton
+                              label={`分组 ${g.name} 的操作`}
+                              className="shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                            />
+                          </div>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent>
+                          <ContextMenuLabel>{g.name}</ContextMenuLabel>
+                          <ContextMenuItem
+                            onSelect={() =>
+                              void handleRenameGroup(g.id, g.name)
+                            }
                           >
-                            <Trash2 className="size-3" />
-                          </button>
-                        </div>
-                      </div>
+                            <Pencil />
+                            重命名分组…
+                          </ContextMenuItem>
+                          <ContextMenuSeparator />
+                          <ContextMenuItem
+                            variant="destructive"
+                            onSelect={() =>
+                              void handleDeleteGroup(g.id, g.name)
+                            }
+                          >
+                            <Trash2 />
+                            删除分组…
+                          </ContextMenuItem>
+                        </ContextMenuContent>
+                      </ContextMenu>
                       {gExpanded &&
                         groupConns.map((conn) => renderConnection(conn))}
                     </div>

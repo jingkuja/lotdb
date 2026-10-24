@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronRightIcon } from "lucide-react";
+import { ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { ContextMenu as ContextMenuPrimitive } from "radix-ui";
 
 import { cn } from "@/lib/utils";
@@ -15,6 +15,45 @@ function ContextMenuTrigger({
 }: React.ComponentProps<typeof ContextMenuPrimitive.Trigger>) {
   return (
     <ContextMenuPrimitive.Trigger data-slot="context-menu-trigger" {...props} />
+  );
+}
+
+/**
+ * A "more" button inside a ContextMenuTrigger that opens the same menu below
+ * itself, so a row's actions can be found without right-clicking.
+ */
+function ContextMenuButton({
+  className,
+  label = "更多操作",
+  ...props
+}: Omit<React.ComponentProps<"button">, "onClick"> & { label?: string }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      className={cn(
+        "rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground",
+        className,
+      )}
+      onClick={(e) => {
+        e.stopPropagation();
+        const rect = e.currentTarget.getBoundingClientRect();
+        e.currentTarget
+          .closest('[data-slot="context-menu-trigger"]')
+          ?.dispatchEvent(
+            new MouseEvent("contextmenu", {
+              bubbles: true,
+              cancelable: true,
+              clientX: rect.left,
+              clientY: rect.bottom,
+            }),
+          );
+      }}
+      {...props}
+    >
+      <EllipsisIcon className="size-3" />
+    </button>
   );
 }
 
@@ -146,6 +185,7 @@ function ContextMenuSubContent({
 export {
   ContextMenu,
   ContextMenuTrigger,
+  ContextMenuButton,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,

@@ -71,8 +71,9 @@ export function fitColumnWidth(
   values: Iterable<unknown>,
   fontPx: number,
 ): number {
-  // Header: padding plus the sort icon; cells: padding.
-  let widest = textWidth(header, fontPx) + 36;
+  // Header (always 12px medium): padding, gap and the sort icon; cells:
+  // padding.
+  let widest = textWidth(header, 12) * 1.08 + 40;
   let sampled = 0;
   for (const value of values) {
     if (++sampled > 200) break;

@@ -11,13 +11,22 @@ import { useRef, useState, useEffect, useCallback } from "react";
 import {
   Play,
   Square,
-  Database,
   WandSparkles,
   History,
   Bookmark,
-  Search,
+  BookmarkPlus,
+  ChevronDown,
+  ListTree,
+  Timer,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
 import { QuerySplit } from "./query-split";
 import { SqlEditor, type SqlEditorHandle } from "./sql-editor";
 import {
@@ -615,10 +624,11 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
             size="sm"
             className="h-7 gap-1.5 px-2.5 text-xs"
             disabled={contextBusy}
+            title="执行光标所在语句或选中的 SQL（⌘↩）"
             onClick={handleRun}
           >
             <Play className="size-3" />
-            执行当前 / 选区
+            执行
           </Button>
         )}
 
@@ -638,6 +648,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           variant="ghost"
           size="sm"
           className="h-7 gap-1.5 px-2.5 text-xs"
+          title="格式化 SQL（⇧⌥F）"
           onClick={handleFormatClick}
         >
           <WandSparkles className="size-3" />
@@ -650,9 +661,9 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           className="h-7 gap-1.5 px-2.5 text-xs"
           disabled={explaining}
           onClick={() => handleExplain(false)}
-          title="执行 EXPLAIN（不含实际运行时间）"
+          title="查看执行计划，不实际执行（⌘⇧E）"
         >
-          <Search className="size-3" />
+          <ListTree className="size-3" />
           Explain
         </Button>
 
@@ -662,9 +673,9 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           className="h-7 gap-1.5 px-2.5 text-xs"
           disabled={explaining}
           onClick={() => handleExplain(true)}
-          title="执行 EXPLAIN ANALYZE（实际运行，含耗时）"
+          title="EXPLAIN ANALYZE：实际执行语句，显示真实耗时和行数"
         >
-          <Search className="size-3" />
+          <Timer className="size-3" />
           Analyze
         </Button>
 
@@ -678,39 +689,78 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           历史
         </Button>
 
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 gap-1.5 px-2.5 text-xs"
-          onClick={handleSnippetsOpen}
-        >
-          <Bookmark className="size-3" />
-          片段
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2.5 text-xs"
+            >
+              <Bookmark className="size-3" />
+              片段
+              <ChevronDown className="size-3 opacity-60" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="text-xs">
+            <DropdownMenuItem onClick={handleSnippetsOpen}>
+              <Bookmark className="size-3.5" />
+              浏览片段…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={handleSaveAsSnippet}>
+              <BookmarkPlus className="size-3.5" />
+              将当前 SQL 存为片段…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 gap-1 px-2 text-xs text-muted-foreground"
-          title="将当前 SQL 另存为片段"
-          onClick={handleSaveAsSnippet}
-        >
-          <Bookmark className="size-3" />+
-        </Button>
-
-        <span className="text-xs text-muted-foreground">
-          Cmd+Enter 当前/选区 · SQL 草稿自动保存
-        </span>
         <div className="flex-1" />
+
+        {transaction !== "idle" && (
+          <>
+            <span
+              className={cn(
+                "rounded px-2 py-1 text-xs",
+                transaction === "error"
+                  ? "bg-destructive/15 text-destructive"
+                  : "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+              )}
+            >
+              {transaction === "error" ? "事务出错，请回滚" : "事务进行中"}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={
+                running || explaining || contextBusy || transaction === "error"
+              }
+              onClick={() => void runQuery("COMMIT")}
+            >
+              提交
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={running || explaining || contextBusy}
+              onClick={() => void runQuery("ROLLBACK")}
+            >
+              回滚
+            </Button>
+          </>
+        )}
 
         <select
           aria-label="查询数据库"
+          title="切换查询使用的数据库"
           value={database}
           disabled={running || explaining || contextBusy}
           onChange={(e) => void changeContext(e.target.value, "")}
           className="max-w-48 rounded border bg-background px-2 py-1 text-xs"
         >
-          <option value="">连接默认数据库</option>
+          <option value="">
+            {conn?.database ? `${conn.database}（默认）` : "连接默认数据库"}
+          </option>
           {databases.map((db) => (
             <option key={db} value={db}>
               {db}
@@ -720,6 +770,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
         {dbType === "postgres" && (
           <select
             aria-label="查询 schema"
+            title="切换查询使用的 schema"
             value={schema}
             disabled={running || explaining || contextBusy}
             onChange={(e) => void changeContext(database, e.target.value)}
@@ -733,38 +784,6 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
             ))}
           </select>
         )}
-        {transaction !== "idle" && (
-          <span className="rounded bg-amber-500/15 px-2 py-1 text-xs text-amber-700 dark:text-amber-400">
-            {transaction === "error"
-              ? "显式事务中 · 有错误，请回滚"
-              : "显式事务中 · 尚未提交"}
-          </span>
-        )}
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 text-xs"
-          disabled={running || explaining || contextBusy}
-          onClick={() => void runQuery("COMMIT")}
-        >
-          提交事务
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 text-xs"
-          disabled={running || explaining || contextBusy}
-          onClick={() => void runQuery("ROLLBACK")}
-        >
-          回滚事务
-        </Button>
-        {conn && (
-          <span className="flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-            <Database className="size-3" />
-            {conn.name}
-            {database || conn.database ? ` · ${database || conn.database}` : ""}
-          </span>
-        )}
       </div>
 
       <QuerySplit
@@ -777,6 +796,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
             schema={completionSchema}
             onChange={(v) => setContent(tabId, v)}
             onExecute={runQuery}
+            onExplain={() => void handleExplain(false)}
             onFormat={handleFormat}
             fontSize={editorFontSize}
             fontFamily={editorFontFamily}
@@ -787,7 +807,7 @@ export function QueryTab({ tabId, connectionId }: QueryTabProps) {
           <ExplainPanel result={explainResult} analyzed={explainAnalyzed} />
         ) : resultMode === "explain" && explaining ? (
           <div className="flex flex-1 items-center justify-center gap-2 text-muted-foreground text-xs">
-            <Search className="size-3.5 animate-pulse" />
+            <ListTree className="size-3.5 animate-pulse" />
             正在执行 EXPLAIN…
           </div>
         ) : (

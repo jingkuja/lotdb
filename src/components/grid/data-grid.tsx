@@ -22,6 +22,7 @@ import {
   CircleSlash,
   Filter,
   FilterX,
+  ChevronDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ColumnFilter } from "@/services/tauri-commands";
@@ -39,6 +40,13 @@ import {
   ContextMenuShortcut,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { usePreferencesStore } from "@/stores/preferences-store";
 
 export type GridRow = unknown[];
 export type SortDir = "ASC" | "DESC";
@@ -217,7 +225,7 @@ function CellEditor({
         <input
           ref={inputRef}
           aria-label="编辑单元格"
-          className="h-full min-w-0 flex-1 bg-background px-2 text-xs outline-none"
+          className="h-full min-w-0 flex-1 bg-background px-2 outline-none"
           value={val}
           onChange={(e) => setVal(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -299,7 +307,7 @@ function GridCell({
   return (
     <div
       className={cn(
-        "group/cell flex h-full w-full cursor-default items-center overflow-hidden px-2 py-1 text-xs",
+        "group/cell relative flex h-full w-full cursor-default items-center overflow-hidden px-2 py-1",
         kind === "null" && !isEdited && "italic text-muted-foreground/50",
         kind === "empty" && !isEdited && "text-muted-foreground/40",
         isEdited && "bg-amber-500/15",
@@ -334,7 +342,8 @@ function GridCell({
         </span>
       )}
       {!isDeleted && (onStartEdit || onView) && (
-        <span className="ml-auto flex shrink-0 opacity-0 group-hover/cell:opacity-100">
+        // Overlaid, so hidden buttons don't take width from the text.
+        <span className="absolute inset-y-0 right-0 flex items-center bg-background/90 pl-0.5 pr-1 opacity-0 group-hover/cell:opacity-100">
           {onStartEdit && (
             <button
               title="编辑单元格"
@@ -382,7 +391,7 @@ function NewRowCell({
   return (
     <div className="flex h-full w-full items-center bg-emerald-500/5">
       <input
-        className="h-full min-w-0 flex-1 bg-transparent px-2 text-xs outline-none"
+        className="h-full min-w-0 flex-1 bg-transparent px-2 outline-none"
         aria-label={column}
         value={value ?? ""}
         placeholder={
@@ -390,27 +399,28 @@ function NewRowCell({
         }
         onChange={(e) => onChange(e.target.value)}
       />
-      <button
-        className="px-1 text-[10px]"
-        title="设为 NULL"
-        onClick={() => onChange(null)}
-      >
-        N
-      </button>
-      <button
-        className="px-1 text-[10px]"
-        title="使用默认值"
-        onClick={() => onChange(undefined)}
-      >
-        D
-      </button>
-      <button
-        className="px-1 text-[10px]"
-        title="设为空字符串"
-        onClick={() => onChange("")}
-      >
-        E
-      </button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            className="shrink-0 px-1 text-muted-foreground hover:text-foreground"
+            aria-label={`${column} 的取值方式`}
+            title="使用默认值、设为 NULL 或空字符串"
+          >
+            <ChevronDown className="size-3" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="text-xs">
+          <DropdownMenuItem onClick={() => onChange(undefined)}>
+            使用默认值（DEFAULT）
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onChange(null)}>
+            设为 NULL
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onChange("")}>
+            设为空字符串
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
@@ -420,8 +430,6 @@ function NewRowCell({
 const ROW_HEIGHT = 28;
 const HEADER_HEIGHT = 32;
 const FILTER_ROW_HEIGHT = 28;
-/** Font size the width estimate assumes (cells render at text-xs). */
-const GRID_FONT_PX = 12;
 
 // ─── Selection ────────────────────────────────────────────────────
 
@@ -519,6 +527,7 @@ export function DataGrid({
 }: DataGridProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
+  const fontSize = usePreferencesStore((s) => s.prefs.gridFontSize);
   const [activeEdit, setActiveEdit] = useState<{
     rowIndex: number;
     colIndex: number;
@@ -548,9 +557,12 @@ export function DataGrid({
   // Widths fitted to the first rows a column set arrives with; resizing (or
   // double-clicking a resize handle) adjusts them afterwards.
   const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
-  const [sizedFor, setSizedFor] = useState<string[] | null>(null);
-  if (sizedFor !== colIds) {
-    setSizedFor(colIds);
+  const [sizedFor, setSizedFor] = useState<{
+    colIds: string[];
+    fontSize: number;
+  } | null>(null);
+  if (sizedFor?.colIds !== colIds || sizedFor.fontSize !== fontSize) {
+    setSizedFor({ colIds, fontSize });
     setColumnSizing(
       Object.fromEntries(
         colIds.map((id, i) => [
@@ -558,7 +570,7 @@ export function DataGrid({
           fitColumnWidth(
             columns[i] ?? "",
             rows.map((row) => row[i]),
-            GRID_FONT_PX,
+            fontSize,
           ),
         ]),
       ),
@@ -679,7 +691,7 @@ export function DataGrid({
       [colId]: fitColumnWidth(
         columns[i] ?? "",
         rows.map((row) => row[i]),
-        GRID_FONT_PX,
+        fontSize,
       ),
     }));
   };
@@ -906,10 +918,7 @@ export function DataGrid({
   const rowCount = rect ? rect.bottom - rect.top + 1 : 0;
 
   return (
-    <div
-      className="flex h-full flex-col overflow-hidden"
-      style={{ fontSize: "var(--grid-font-size, 12px)" }}
-    >
+    <div className="flex h-full flex-col overflow-hidden" style={{ fontSize }}>
       {/* Sticky header */}
       <div
         ref={headerRef}

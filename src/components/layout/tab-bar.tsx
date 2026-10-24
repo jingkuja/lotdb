@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useWorkspaceStore, type Tab } from "@/stores/workspace-store";
 import { cn } from "@/lib/utils";
+import { ClosedQueriesMenu } from "./closed-queries";
 
 function TabItem({ tab }: { tab: Tab }) {
   const { activeTabId, setActiveTab, removeTab } = useWorkspaceStore();
@@ -105,14 +106,17 @@ export function TabBar() {
   if (tabs.length === 0) return null;
 
   return (
-    <div
-      role="tablist"
-      aria-label="工作区标签"
-      className="flex h-8 shrink-0 items-center overflow-x-auto border-b border-border bg-muted/30"
-    >
-      {tabs.map((tab) => (
-        <TabItem key={tab.id} tab={tab} />
-      ))}
+    <div className="flex h-8 shrink-0 items-center border-b border-border bg-muted/30">
+      <div
+        role="tablist"
+        aria-label="工作区标签"
+        className="flex h-full min-w-0 flex-1 items-center overflow-x-auto"
+      >
+        {tabs.map((tab) => (
+          <TabItem key={tab.id} tab={tab} />
+        ))}
+      </div>
+      <ClosedQueriesMenu />
     </div>
   );
 }

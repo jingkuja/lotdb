@@ -33,6 +33,9 @@ import {
   Search,
   X,
   Settings2,
+  Terminal,
+  RefreshCw,
+  Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatabases, useSchemas, useObjects } from "@/hooks/use-schema";
@@ -61,12 +64,20 @@ import {
 } from "@/stores/app-dialog-store";
 import {
   ContextMenu,
+  ContextMenuButton,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useQueryClient } from "@tanstack/react-query";
 import { useConnections } from "@/hooks/use-connections";
 import { formatDbError, isConnectionError } from "@/lib/error";
@@ -87,6 +98,39 @@ const MYSQL_SYSTEM_DATABASES = new Set([
   "performance_schema",
   "sys",
 ]);
+
+// ─── RowMenu — right-click (or ⋯) actions for one tree row ────────
+
+/** True inside a RowMenu: the TreeRow shows a ⋯ button for the menu. */
+const RowMenuContext = createContext(false);
+
+function RowMenu({
+  label,
+  items,
+  children,
+}: {
+  label: string;
+  /** Menu items; a falsy value renders the row without a menu. */
+  items: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  if (!items) return <>{children}</>;
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div>
+          <RowMenuContext.Provider value={true}>
+            {children}
+          </RowMenuContext.Provider>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuLabel>{label}</ContextMenuLabel>
+        {items}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
 
 // ─── TreeRow — generic row with indent, icon, label ──────────────
 
@@ -115,6 +159,7 @@ function TreeRow({
   onClick,
   children,
 }: TreeRowProps) {
+  const hasMenu = useContext(RowMenuContext);
   return (
     <div
       className={cn(
@@ -153,9 +198,10 @@ function TreeRow({
       <span className="min-w-0 flex-1 truncate">{label}</span>
 
       {/* Hover actions */}
-      {children && (
-        <span className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100">
+      {(children || hasMenu) && (
+        <span className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 has-focus-visible:opacity-100">
           {children}
+          {hasMenu && <ContextMenuButton label={`${label} 的操作`} />}
         </span>
       )}
     </div>
@@ -182,8 +228,6 @@ function ObjectLeaf({
   schema,
 }: ObjectLeafProps) {
   const addTab = useWorkspaceStore((s) => s.addTab);
-  const tabs = useWorkspaceStore((s) => s.tabs);
-  const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
 
   const tabId = [connectionId, database, schema, type, name]
     .filter(Boolean)
@@ -214,34 +258,30 @@ function ObjectLeaf({
           : tabType === "object-ddl"
             ? `${tabId}/ddl`
             : tabId;
-    const existing = tabs.find((t) => t.id === id);
-    if (existing) {
-      setActiveTab(id);
-    } else {
-      addTab({
-        id,
-        title:
-          tabType === "table-data"
-            ? `${name} (数据)`
-            : tabType === "designer"
-              ? `${name} (设计)`
-              : name,
-        type: tabType,
-        connectionId,
-        metadata: {
-          database,
-          schema,
-          objectName: name,
-          objectType: type,
-          ddlKind:
-            tabType === "object-ddl"
-              ? type === "view"
-                ? "view"
-                : "function"
-              : undefined,
-        },
-      });
-    }
+    // addTab switches to the tab when it is already open.
+    addTab({
+      id,
+      title:
+        tabType === "table-data"
+          ? `${name} (数据)`
+          : tabType === "designer"
+            ? `${name} (设计)`
+            : name,
+      type: tabType,
+      connectionId,
+      metadata: {
+        database,
+        schema,
+        objectName: name,
+        objectType: type,
+        ddlKind:
+          tabType === "object-ddl"
+            ? type === "view"
+              ? "view"
+              : "function"
+            : undefined,
+      },
+    });
   };
 
   // One click opens one tab. Tables and views open their data (views are
@@ -272,114 +312,109 @@ function ObjectLeaf({
   const typeLabel = type === "table" ? "表" : type === "view" ? "视图" : "函数";
 
   return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <div>
-          <TreeRow
-            level={level}
-            icon={icon}
-            label={name}
-            expandable={false}
-            loading={ops.busy}
-            onClick={handleClick}
+    <RowMenu
+      label={name}
+      items={
+        <>
+          {type !== "function" && (
+            <ContextMenuItem onSelect={() => openTab("table-data")}>
+              <Table2 />
+              打开数据
+            </ContextMenuItem>
+          )}
+          {type === "table" && (
+            <>
+              <ContextMenuItem onSelect={() => openTab("table-structure")}>
+                <Hash />
+                查看结构
+              </ContextMenuItem>
+              <ContextMenuItem onSelect={() => openTab("designer")}>
+                <Pencil />
+                在设计器中编辑
+              </ContextMenuItem>
+            </>
+          )}
+          {type !== "table" && (
+            <ContextMenuItem onSelect={() => openTab("object-ddl")}>
+              <FileCode />
+              查看定义
+            </ContextMenuItem>
+          )}
+          <ContextMenuItem
+            onSelect={() => void navigator.clipboard.writeText(name)}
           >
-            {type === "table" && (
-              <>
-                {action(
-                  "查看结构",
-                  "table-structure",
-                  <Hash className="size-3" />,
-                )}
-                {action(
-                  "在设计器中编辑",
-                  "designer",
-                  <Pencil className="size-3" />,
-                )}
-              </>
+            <Copy />
+            复制名称
+          </ContextMenuItem>
+          {type === "table" && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                disabled={ops.readonly}
+                onSelect={() => void ops.rename(name)}
+              >
+                <TextCursorInput />
+                重命名…
+              </ContextMenuItem>
+              <ContextMenuItem
+                disabled={ops.readonly}
+                onSelect={() => void ops.copy(name, false)}
+              >
+                <Copy />
+                复制表（仅结构）…
+              </ContextMenuItem>
+              <ContextMenuItem
+                disabled={ops.readonly}
+                onSelect={() => void ops.copy(name, true)}
+              >
+                <Copy />
+                复制表（结构和数据）…
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                variant="destructive"
+                disabled={ops.readonly}
+                onSelect={() => void ops.truncate(name)}
+              >
+                <Eraser />
+                清空表…
+              </ContextMenuItem>
+            </>
+          )}
+          {type !== "table" && <ContextMenuSeparator />}
+          <ContextMenuItem
+            variant="destructive"
+            disabled={ops.readonly}
+            onSelect={() => void ops.drop(type, name)}
+          >
+            <Trash2 />
+            删除{typeLabel}…
+          </ContextMenuItem>
+        </>
+      }
+    >
+      <TreeRow
+        level={level}
+        icon={icon}
+        label={name}
+        expandable={false}
+        loading={ops.busy}
+        onClick={handleClick}
+      >
+        {type === "table" && (
+          <>
+            {action("查看结构", "table-structure", <Hash className="size-3" />)}
+            {action(
+              "在设计器中编辑",
+              "designer",
+              <Pencil className="size-3" />,
             )}
-            {type === "view" &&
-              action("查看定义", "object-ddl", <FileCode className="size-3" />)}
-          </TreeRow>
-        </div>
-      </ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuLabel>{name}</ContextMenuLabel>
-        {type !== "function" && (
-          <ContextMenuItem onSelect={() => openTab("table-data")}>
-            <Table2 />
-            打开数据
-          </ContextMenuItem>
-        )}
-        {type === "table" && (
-          <>
-            <ContextMenuItem onSelect={() => openTab("table-structure")}>
-              <Hash />
-              查看结构
-            </ContextMenuItem>
-            <ContextMenuItem onSelect={() => openTab("designer")}>
-              <Pencil />
-              在设计器中编辑
-            </ContextMenuItem>
           </>
         )}
-        {type !== "table" && (
-          <ContextMenuItem onSelect={() => openTab("object-ddl")}>
-            <FileCode />
-            查看定义
-          </ContextMenuItem>
-        )}
-        <ContextMenuItem
-          onSelect={() => void navigator.clipboard.writeText(name)}
-        >
-          <Copy />
-          复制名称
-        </ContextMenuItem>
-        {type === "table" && (
-          <>
-            <ContextMenuSeparator />
-            <ContextMenuItem
-              disabled={ops.readonly}
-              onSelect={() => void ops.rename(name)}
-            >
-              <TextCursorInput />
-              重命名…
-            </ContextMenuItem>
-            <ContextMenuItem
-              disabled={ops.readonly}
-              onSelect={() => void ops.copy(name, false)}
-            >
-              <Copy />
-              复制表（仅结构）…
-            </ContextMenuItem>
-            <ContextMenuItem
-              disabled={ops.readonly}
-              onSelect={() => void ops.copy(name, true)}
-            >
-              <Copy />
-              复制表（结构和数据）…
-            </ContextMenuItem>
-            <ContextMenuSeparator />
-            <ContextMenuItem
-              variant="destructive"
-              disabled={ops.readonly}
-              onSelect={() => void ops.truncate(name)}
-            >
-              <Eraser />
-              清空表…
-            </ContextMenuItem>
-          </>
-        )}
-        {type !== "table" && <ContextMenuSeparator />}
-        <ContextMenuItem
-          variant="destructive"
-          disabled={ops.readonly}
-          onSelect={() => void ops.drop(type, name)}
-        >
-          <Trash2 />
-          删除{typeLabel}…
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
+        {type === "view" &&
+          action("查看定义", "object-ddl", <FileCode className="size-3" />)}
+      </TreeRow>
+    </RowMenu>
   );
 }
 
@@ -490,7 +525,7 @@ function useObjectOperations(
   };
 }
 
-// ─── CategoryNode — "Tables" / "Views" / "Functions" folder ───────
+// ─── CategoryNode — 表 / 视图 / 函数 folder ─────────────────────────
 
 interface CategoryNodeProps {
   label: string;
@@ -526,31 +561,30 @@ function CategoryNode({
 
   return (
     <>
-      <TreeRow
-        level={level}
-        icon={<Folder className="size-3" />}
-        label={
-          filter
-            ? `${label} (${shown.length}/${items.length})`
-            : `${label} (${items.length})`
+      <RowMenu
+        label={label}
+        items={
+          type === "table" && (
+            <ContextMenuItem onSelect={() => setBatchExportOpen(true)}>
+              <Download />
+              批量导出表…
+            </ContextMenuItem>
+          )
         }
-        expandable
-        expanded={open}
-        onClick={() => setExpanded(!open)}
       >
-        {type === "table" && (
-          <button
-            className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-            title="批量导出所有表"
-            onClick={(e) => {
-              e.stopPropagation();
-              setBatchExportOpen(true);
-            }}
-          >
-            <Download className="size-3" />
-          </button>
-        )}
-      </TreeRow>
+        <TreeRow
+          level={level}
+          icon={<Folder className="size-3" />}
+          label={
+            filter
+              ? `${label} (${shown.length}/${items.length})`
+              : `${label} (${items.length})`
+          }
+          expandable
+          expanded={open}
+          onClick={() => setExpanded(!open)}
+        />
+      </RowMenu>
       {open &&
         shown.map((name) => (
           <ObjectLeaf
@@ -599,8 +633,6 @@ function TriggersCategory({
     isError,
   } = useTriggers(connectionId, database, schema, expanded);
   const addTab = useWorkspaceStore((s) => s.addTab);
-  const tabs = useWorkspaceStore((s) => s.tabs);
-  const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
   const queryClient = useQueryClient();
   const [deleting, setDeleting] = useState<string | null>(null);
 
@@ -608,25 +640,20 @@ function TriggersCategory({
     const id = [connectionId, database, schema, "trigger", name, "ddl"].join(
       "/",
     );
-    const existing = tabs.find((t) => t.id === id);
-    if (existing) {
-      setActiveTab(id);
-    } else {
-      addTab({
-        id,
-        title: name,
-        type: "object-ddl",
-        connectionId,
-        metadata: {
-          database,
-          schema,
-          objectName: name,
-          objectType: "trigger",
-          ddlKind: "trigger",
-          table,
-        },
-      });
-    }
+    addTab({
+      id,
+      title: name,
+      type: "object-ddl",
+      connectionId,
+      metadata: {
+        database,
+        schema,
+        objectName: name,
+        objectType: "trigger",
+        ddlKind: "trigger",
+        table,
+      },
+    });
   };
 
   const handleDelete = async (name: string, table: string) => {
@@ -656,7 +683,7 @@ function TriggersCategory({
       <TreeRow
         level={level}
         icon={<Zap className="size-3" />}
-        label={`Triggers${expanded && !isLoading ? ` (${triggers.length})` : ""}`}
+        label={`触发器${expanded && !isLoading ? ` (${triggers.length})` : ""}`}
         expandable
         expanded={expanded}
         loading={expanded && isLoading}
@@ -679,36 +706,48 @@ function TriggersCategory({
           />
         ) : (
           triggers.map((t) => (
-            <TreeRow
+            <RowMenu
               key={`${t.table}.${t.name}`}
-              level={level + 1}
-              icon={<Zap className="size-3" />}
-              label={`${t.name} · ${t.table}`}
-              onClick={() => openDdl(t.name, t.table)}
+              label={t.name}
+              items={
+                <>
+                  <ContextMenuItem onSelect={() => openDdl(t.name, t.table)}>
+                    <FileCode />
+                    查看定义
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    onSelect={() => void navigator.clipboard.writeText(t.name)}
+                  >
+                    <Copy />
+                    复制名称
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    variant="destructive"
+                    disabled={deleting !== null}
+                    onSelect={() => void handleDelete(t.name, t.table)}
+                  >
+                    <Trash2 />
+                    删除触发器…
+                  </ContextMenuItem>
+                </>
+              }
             >
-              <button
-                className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-destructive"
-                title="删除触发器"
-                disabled={deleting !== null}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void handleDelete(t.name, t.table);
-                }}
-              >
-                {deleting === t.name ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <Trash2 className="size-3" />
-                )}
-              </button>
-            </TreeRow>
+              <TreeRow
+                level={level + 1}
+                icon={<Zap className="size-3" />}
+                label={`${t.name} · ${t.table}`}
+                loading={deleting === t.name}
+                onClick={() => openDdl(t.name, t.table)}
+              />
+            </RowMenu>
           ))
         ))}
     </>
   );
 }
 
-// ─── PgManagerCategory — Sequences / Enums with a manager tab ─────
+// ─── PgManagerCategory — 序列 / 枚举 with a manager tab ─────────────
 
 interface PgManagerCategoryProps {
   label: string;
@@ -744,50 +783,38 @@ function PgManagerCategory({
     isError,
   } = useList(connectionId, database, schema, expanded);
   const addTab = useWorkspaceStore((s) => s.addTab);
-  const tabs = useWorkspaceStore((s) => s.tabs);
-  const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
 
-  const openManager = () => {
-    const id = [connectionId, database, schema, managerKind, "manager"].join(
-      "/",
-    );
-    const existing = tabs.find((t) => t.id === id);
-    if (existing) {
-      setActiveTab(id);
-    } else {
-      addTab({
-        id,
-        title: `${schema} · ${label}`,
-        type: "object-manager",
-        connectionId,
-        metadata: { database, schema, managerKind },
-      });
-    }
-  };
+  const openManager = () =>
+    addTab({
+      id: [connectionId, database, schema, managerKind, "manager"].join("/"),
+      title: `${schema} · ${label}`,
+      type: "object-manager",
+      connectionId,
+      metadata: { database, schema, managerKind },
+    });
 
   return (
     <>
-      <TreeRow
-        level={level}
-        icon={icon}
-        label={`${label}${expanded && !isLoading ? ` (${items.length})` : ""}`}
-        expandable
-        expanded={expanded}
-        loading={expanded && isLoading}
-        error={isError}
-        onClick={() => setExpanded((v) => !v)}
+      <RowMenu
+        label={label}
+        items={
+          <ContextMenuItem onSelect={openManager}>
+            <ExternalLink />
+            管理{label}…
+          </ContextMenuItem>
+        }
       >
-        <button
-          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-          title={`管理${label}`}
-          onClick={(e) => {
-            e.stopPropagation();
-            openManager();
-          }}
-        >
-          <ExternalLink className="size-3" />
-        </button>
-      </TreeRow>
+        <TreeRow
+          level={level}
+          icon={icon}
+          label={`${label}${expanded && !isLoading ? ` (${items.length})` : ""}`}
+          expandable
+          expanded={expanded}
+          loading={expanded && isLoading}
+          error={isError}
+          onClick={() => setExpanded((v) => !v)}
+        />
+      </RowMenu>
       {expanded &&
         (isLoading ? null : isError ? (
           <TreeRow
@@ -856,7 +883,7 @@ function SchemaNode({
       {expanded && data && (
         <>
           <CategoryNode
-            label="Tables"
+            label="表"
             items={data.tables}
             type="table"
             level={level + 1}
@@ -865,7 +892,7 @@ function SchemaNode({
             schema={schema}
           />
           <CategoryNode
-            label="Views"
+            label="视图"
             items={data.views}
             type="view"
             level={level + 1}
@@ -874,7 +901,7 @@ function SchemaNode({
             schema={schema}
           />
           <CategoryNode
-            label="Functions"
+            label="函数"
             items={data.functions}
             type="function"
             level={level + 1}
@@ -889,7 +916,7 @@ function SchemaNode({
             schema={schema}
           />
           <PgManagerCategory
-            label="Sequences"
+            label="序列"
             icon={<ListOrdered className="size-3" />}
             managerKind="sequences"
             level={level + 1}
@@ -899,7 +926,7 @@ function SchemaNode({
             useList={useSequences}
           />
           <PgManagerCategory
-            label="Enums"
+            label="枚举"
             icon={<Shapes className="size-3" />}
             managerKind="enums"
             level={level + 1}
@@ -922,12 +949,36 @@ interface MySqlDbNodeProps {
   level: number;
 }
 
-/** Asks, drops the database, and refreshes the database list. */
-function useDropDatabase(connectionId: string, database: string) {
+/**
+ * A database row: click toggles it; backup, restore, a query in this
+ * database and drop live in its context menu.
+ */
+function DatabaseRow({
+  database,
+  connectionId,
+  level,
+  expanded,
+  loading,
+  error,
+  onToggle,
+}: {
+  database: string;
+  connectionId: string;
+  level: number;
+  expanded: boolean;
+  loading: boolean;
+  error: boolean;
+  onToggle: () => void;
+}) {
   const [dropping, setDropping] = useState(false);
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [restoreOpen, setRestoreOpen] = useState(false);
   const queryClient = useQueryClient();
-  const handleDrop = async (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const addTab = useWorkspaceStore((s) => s.addTab);
+  const { data: connections = [] } = useConnections();
+  const readonly = !!connections.find((c) => c.id === connectionId)?.readonly;
+
+  const handleDrop = async () => {
     if (
       !(await confirmDialog(
         `确定要删除数据库 "${database}" 吗？此操作不可撤销！`,
@@ -949,65 +1000,79 @@ function useDropDatabase(connectionId: string, database: string) {
       setDropping(false);
     }
   };
-  return { dropping, handleDrop };
-}
 
-function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
-  const [expanded, setExpanded] = useState(false);
-  const [backupOpen, setBackupOpen] = useState(false);
-  const [restoreOpen, setRestoreOpen] = useState(false);
-  const { data, isLoading, isError } = useObjects(
-    connectionId,
-    database,
-    undefined,
-    expanded,
-  );
-  const { dropping, handleDrop } = useDropDatabase(connectionId, database);
-  const filter = useContext(TreeFilterContext);
-
-  // An open database stays, so its tables can be filtered.
-  if (!expanded && !matchesFilter(database, filter)) return null;
+  const newQuery = () =>
+    addTab({
+      id: `query-${connectionId}-${Date.now()}`,
+      title: "新查询",
+      type: "query",
+      connectionId,
+      metadata: { database },
+    });
 
   return (
     <>
-      <TreeRow
-        level={level}
-        icon={<Database className="size-3" />}
+      <RowMenu
         label={database}
-        expandable
-        expanded={expanded}
-        loading={(expanded && isLoading) || dropping}
-        error={isError}
-        onClick={() => setExpanded((v) => !v)}
+        items={
+          <>
+            <ContextMenuItem onSelect={newQuery}>
+              <Terminal />
+              在此库新建查询
+            </ContextMenuItem>
+            <ContextMenuItem
+              onSelect={() =>
+                void queryClient.invalidateQueries({
+                  predicate: (q) =>
+                    q.queryKey[1] === connectionId &&
+                    q.queryKey[2] === database,
+                })
+              }
+            >
+              <RefreshCw />
+              刷新
+            </ContextMenuItem>
+            <ContextMenuItem
+              onSelect={() => void navigator.clipboard.writeText(database)}
+            >
+              <Copy />
+              复制名称
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem onSelect={() => setBackupOpen(true)}>
+              <Archive />
+              备份数据库…
+            </ContextMenuItem>
+            <ContextMenuItem
+              disabled={readonly}
+              onSelect={() => setRestoreOpen(true)}
+            >
+              <ArchiveRestore />
+              恢复数据库…
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              disabled={readonly}
+              onSelect={() => void handleDrop()}
+            >
+              <Trash2 />
+              删除数据库…
+            </ContextMenuItem>
+          </>
+        }
       >
-        <button
-          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-          title="备份数据库"
-          onClick={(e) => {
-            e.stopPropagation();
-            setBackupOpen(true);
-          }}
-        >
-          <Archive className="size-3" />
-        </button>
-        <button
-          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-          title="恢复数据库"
-          onClick={(e) => {
-            e.stopPropagation();
-            setRestoreOpen(true);
-          }}
-        >
-          <ArchiveRestore className="size-3" />
-        </button>
-        <button
-          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-destructive"
-          title="删除数据库"
-          onClick={handleDrop}
-        >
-          <Trash2 className="size-3" />
-        </button>
-      </TreeRow>
+        <TreeRow
+          level={level}
+          icon={<Database className="size-3" />}
+          label={database}
+          expandable
+          expanded={expanded}
+          loading={loading || dropping}
+          error={error}
+          onClick={onToggle}
+        />
+      </RowMenu>
       <BackupDialog
         open={backupOpen}
         onOpenChange={setBackupOpen}
@@ -1020,10 +1085,38 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
         connectionId={connectionId}
         database={database}
       />
+    </>
+  );
+}
+
+function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
+  const [expanded, setExpanded] = useState(false);
+  const { data, isLoading, isError } = useObjects(
+    connectionId,
+    database,
+    undefined,
+    expanded,
+  );
+  const filter = useContext(TreeFilterContext);
+
+  // An open database stays, so its tables can be filtered.
+  if (!expanded && !matchesFilter(database, filter)) return null;
+
+  return (
+    <>
+      <DatabaseRow
+        database={database}
+        connectionId={connectionId}
+        level={level}
+        expanded={expanded}
+        loading={expanded && isLoading}
+        error={isError}
+        onToggle={() => setExpanded((v) => !v)}
+      />
       {expanded && data && (
         <>
           <CategoryNode
-            label="Tables"
+            label="表"
             items={data.tables}
             type="table"
             level={level + 1}
@@ -1031,7 +1124,7 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
             database={database}
           />
           <CategoryNode
-            label="Views"
+            label="视图"
             items={data.views}
             type="view"
             level={level + 1}
@@ -1039,7 +1132,7 @@ function MySqlDbNode({ database, connectionId, level }: MySqlDbNodeProps) {
             database={database}
           />
           <CategoryNode
-            label="Functions"
+            label="函数"
             items={data.functions}
             type="function"
             level={level + 1}
@@ -1068,69 +1161,25 @@ interface PgDbNodeProps {
 function PgDbNode({ database, connectionId, level }: PgDbNodeProps) {
   // Auto-expand since PG always shows a single database
   const [expanded, setExpanded] = useState(true);
-  const [backupOpen, setBackupOpen] = useState(false);
-  const [restoreOpen, setRestoreOpen] = useState(false);
   const {
     data: schemas = [],
     isLoading,
     isError,
   } = useSchemas(connectionId, database, expanded);
-  const { dropping, handleDrop } = useDropDatabase(connectionId, database);
   const filter = useContext(TreeFilterContext);
 
   if (!expanded && !matchesFilter(database, filter)) return null;
 
   return (
     <>
-      <TreeRow
+      <DatabaseRow
+        database={database}
+        connectionId={connectionId}
         level={level}
-        icon={<Database className="size-3" />}
-        label={database}
-        expandable
         expanded={expanded}
-        loading={(expanded && isLoading) || dropping}
+        loading={expanded && isLoading}
         error={isError}
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <button
-          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-          title="备份数据库"
-          onClick={(e) => {
-            e.stopPropagation();
-            setBackupOpen(true);
-          }}
-        >
-          <Archive className="size-3" />
-        </button>
-        <button
-          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-          title="恢复数据库"
-          onClick={(e) => {
-            e.stopPropagation();
-            setRestoreOpen(true);
-          }}
-        >
-          <ArchiveRestore className="size-3" />
-        </button>
-        <button
-          className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-destructive"
-          title="删除数据库"
-          onClick={handleDrop}
-        >
-          <Trash2 className="size-3" />
-        </button>
-      </TreeRow>
-      <BackupDialog
-        open={backupOpen}
-        onOpenChange={setBackupOpen}
-        connectionId={connectionId}
-        database={database}
-      />
-      <RestoreDialog
-        open={restoreOpen}
-        onOpenChange={setRestoreOpen}
-        connectionId={connectionId}
-        database={database}
+        onToggle={() => setExpanded((v) => !v)}
       />
       {expanded &&
         schemas.map((schema) => (
@@ -1169,68 +1218,39 @@ export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
   const queryClient = useQueryClient();
   const { data: connections = [] } = useConnections();
   const addTab = useWorkspaceStore((s) => s.addTab);
-  const tabs = useWorkspaceStore((s) => s.tabs);
-  const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
+  const readonly = !!connections.find((c) => c.id === connectionId)?.readonly;
 
-  const openUsersTab = () => {
-    const tabId = `${connectionId}/users`;
-    const existing = tabs.find((t) => t.id === tabId);
-    if (existing) {
-      setActiveTab(tabId);
-    } else {
-      addTab({
-        id: tabId,
-        title: "用户管理",
-        type: "users",
-        connectionId,
-      });
-    }
-  };
+  const openUsersTab = () =>
+    addTab({
+      id: `${connectionId}/users`,
+      title: "用户管理",
+      type: "users",
+      connectionId,
+    });
 
-  const openProcessTab = () => {
-    const tabId = `${connectionId}/processes`;
-    const existing = tabs.find((t) => t.id === tabId);
-    if (existing) {
-      setActiveTab(tabId);
-    } else {
-      addTab({
-        id: tabId,
-        title: "活跃查询",
-        type: "process-list",
-        connectionId,
-      });
-    }
-  };
+  const openProcessTab = () =>
+    addTab({
+      id: `${connectionId}/processes`,
+      title: "活跃查询",
+      type: "process-list",
+      connectionId,
+    });
 
-  const openDiskUsageTab = () => {
-    const tabId = `${connectionId}/disk-usage`;
-    const existing = tabs.find((t) => t.id === tabId);
-    if (existing) {
-      setActiveTab(tabId);
-    } else {
-      addTab({
-        id: tabId,
-        title: "磁盘占用",
-        type: "disk-usage",
-        connectionId,
-      });
-    }
-  };
+  const openDiskUsageTab = () =>
+    addTab({
+      id: `${connectionId}/disk-usage`,
+      title: "磁盘占用",
+      type: "disk-usage",
+      connectionId,
+    });
 
-  const openSchemaDiffTab = () => {
-    const tabId = "schema-diff";
-    const existing = tabs.find((t) => t.id === tabId);
-    if (existing) {
-      setActiveTab(tabId);
-    } else {
-      addTab({
-        id: tabId,
-        title: "结构对比",
-        type: "schema-diff",
-        connectionId,
-      });
-    }
-  };
+  const openSchemaDiffTab = () =>
+    addTab({
+      id: "schema-diff",
+      title: "结构对比",
+      type: "schema-diff",
+      connectionId,
+    });
 
   if (isLoading) {
     return (
@@ -1309,55 +1329,54 @@ export function ObjectTree({ connectionId, dbType }: ObjectTreeProps) {
   return (
     <>
       <div className="py-0.5">
-        {/* Header row with action buttons */}
-        <div className="group flex items-center justify-between px-2 py-0.5">
+        {/* Header row: connection-level tools in one menu */}
+        <div className="flex items-center justify-between px-2 py-0.5">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             数据库
           </span>
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
-            <button
-              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-              title="跨连接传输"
-              onClick={() => setTransferOpen(true)}
-            >
-              <Send className="size-3" />
-            </button>
-            <button
-              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-              title="结构对比"
-              onClick={openSchemaDiffTab}
-            >
-              <GitCompare className="size-3" />
-            </button>
-            <button
-              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-              title="磁盘占用"
-              onClick={openDiskUsageTab}
-            >
-              <HardDrive className="size-3" />
-            </button>
-            <button
-              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-              title="活跃查询"
-              onClick={openProcessTab}
-            >
-              <Activity className="size-3" />
-            </button>
-            <button
-              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-              title="用户管理"
-              onClick={openUsersTab}
-            >
-              <Users className="size-3" />
-            </button>
-            <button
-              className="rounded p-0.5 text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
-              title="新建数据库"
-              onClick={() => setCreateOpen(true)}
-            >
-              <Plus className="size-3" />
-            </button>
-          </div>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-sidebar-border hover:text-foreground"
+                title="新建数据库、传输、对比、监控与用户管理"
+              >
+                <Wrench className="size-3" />
+                工具
+                <ChevronDown className="size-3" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44 text-xs">
+              <DropdownMenuItem
+                disabled={readonly}
+                onSelect={() => setCreateOpen(true)}
+              >
+                <Plus className="size-3.5" />
+                新建数据库…
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => setTransferOpen(true)}>
+                <Send className="size-3.5" />
+                跨连接传输…
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={openSchemaDiffTab}>
+                <GitCompare className="size-3.5" />
+                结构对比
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={openProcessTab}>
+                <Activity className="size-3.5" />
+                活跃查询
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={openDiskUsageTab}>
+                <HardDrive className="size-3.5" />
+                磁盘占用
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={openUsersTab}>
+                <Users className="size-3.5" />
+                用户管理
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         {/* Filter: databases by name; inside open databases, objects by name */}

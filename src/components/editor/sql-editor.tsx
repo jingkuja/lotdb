@@ -42,6 +42,8 @@ interface SqlEditorProps {
   schema?: CmSchema;
   onChange?: (value: string) => void;
   onExecute?: (sql: string) => void;
+  /** ⌘⇧E: EXPLAIN the current statement or selection */
+  onExplain?: () => void;
   /** Sync formatter: receives current SQL, returns formatted SQL */
   onFormat?: (sql: string) => string | Promise<string>;
   /** Editor font size in px (default 13) */
@@ -59,6 +61,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
       schema,
       onChange,
       onExecute,
+      onExplain,
       onFormat,
       fontSize = 13,
       fontFamily = "JetBrains Mono",
@@ -77,6 +80,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
     // Stable callback refs — avoids re-registering extensions on every render
     const onChangeRef = useRef(onChange);
     const onExecuteRef = useRef(onExecute);
+    const onExplainRef = useRef(onExplain);
     const onFormatRef = useRef(onFormat);
     useEffect(() => {
       onChangeRef.current = onChange;
@@ -84,6 +88,9 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
     useEffect(() => {
       onExecuteRef.current = onExecute;
     }, [onExecute]);
+    useEffect(() => {
+      onExplainRef.current = onExplain;
+    }, [onExplain]);
     useEffect(() => {
       onFormatRef.current = onFormat;
     }, [onFormat]);
@@ -128,6 +135,14 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(
           key: "Mod-Enter",
           run: () => {
             onExecuteRef.current?.(getSelection());
+            return true;
+          },
+        },
+        {
+          key: "Mod-Shift-e",
+          run: () => {
+            if (!onExplainRef.current) return false;
+            onExplainRef.current();
             return true;
           },
         },

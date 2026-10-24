@@ -10,6 +10,11 @@ export const SHORTCUTS: ShortcutDef[] = [
   // Global
   { category: "全局", label: "新建查询", keys: ["⌘", "N"] },
   { category: "全局", label: "关闭当前标签页", keys: ["⌘", "W"] },
+  {
+    category: "全局",
+    label: "重新打开关闭的查询",
+    keys: ["⌘", "⇧", "T"],
+  },
   { category: "全局", label: "切换到上一个标签页", keys: ["⌘", "⇧", "["] },
   { category: "全局", label: "切换到下一个标签页", keys: ["⌘", "⇧", "]"] },
   { category: "全局", label: "搜索数据库对象", keys: ["⌘", "K"] },

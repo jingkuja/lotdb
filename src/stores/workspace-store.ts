@@ -22,6 +22,15 @@ export interface Tab {
   metadata?: Record<string, unknown>;
 }
 
+/** A query tab closed with a draft in it; ⌘⇧T or the tab bar reopens it. */
+export interface ClosedQuery {
+  tab: Tab;
+  sql: string;
+  closedAt: number;
+}
+
+const MAX_CLOSED_QUERIES = 20;
+
 interface WorkspaceState {
   dirtyIds: Record<string, boolean>;
   setDirty: (id: string, dirty: boolean) => void;
@@ -29,9 +38,14 @@ interface WorkspaceState {
   tabs: Tab[];
   activeTabId: string | null;
   sidebarWidth: number;
+  /** Opens the tab, or switches to it when one with this id is open. */
   addTab: (tab: Tab) => void;
   /** Resolves false when the user keeps the tab open. */
   removeTab: (id: string) => Promise<boolean>;
+  closedQueries: ClosedQuery[];
+  /** Reopens a closed query (the most recent one by default). */
+  reopenClosedQuery: (closedAt?: number) => void;
+  clearClosedQueries: () => void;
   setActiveTab: (id: string) => void;
   setSidebarWidth: (width: number) => void;
 }
@@ -56,18 +70,15 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       activeTabId: null,
       sidebarWidth: 260,
       addTab: (tab) =>
-        set((state) => ({
-          tabs: [...state.tabs, tab],
-          activeTabId: tab.id,
-        })),
+        set((state) =>
+          state.tabs.some((t) => t.id === tab.id)
+            ? { activeTabId: tab.id }
+            : { tabs: [...state.tabs, tab], activeTabId: tab.id },
+        ),
       removeTab: async (id) => {
+        // Only work that would be lost asks first; a query draft is kept in
+        // closedQueries instead.
         const messages = pendingWorkspaceMessages(id);
-        const tab = get().tabs.find((t) => t.id === id);
-        if (
-          tab?.type === "query" &&
-          useEditorStore.getState().getContent(id).trim()
-        )
-          messages.push("关闭将删除此查询草稿。保留标签页可在下次启动时恢复。");
         if (
           messages.length &&
           !(await confirmDialog(messages.join("\n") + "\n仍要关闭？", {
@@ -76,11 +87,20 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           }))
         )
           return false;
+        const tab = get().tabs.find((t) => t.id === id);
+        const sql = useEditorStore.getState().getContent(id);
         useEditorStore.getState().removeContent(id);
         set((state) => {
           const tabs = state.tabs.filter((t) => t.id !== id);
           return {
             tabs,
+            closedQueries:
+              tab?.type === "query" && sql.trim()
+                ? [
+                    { tab, sql, closedAt: Date.now() },
+                    ...state.closedQueries,
+                  ].slice(0, MAX_CLOSED_QUERIES)
+                : state.closedQueries,
             activeTabId:
               state.activeTabId === id
                 ? (tabs[tabs.length - 1]?.id ?? null)
@@ -89,6 +109,25 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         });
         return true;
       },
+      closedQueries: [],
+      reopenClosedQuery: (closedAt) => {
+        const { closedQueries, tabs } = get();
+        const entry =
+          closedAt === undefined
+            ? closedQueries[0]
+            : closedQueries.find((q) => q.closedAt === closedAt);
+        if (!entry) return;
+        const id = tabs.some((t) => t.id === entry.tab.id)
+          ? `${entry.tab.id}-${Date.now()}`
+          : entry.tab.id;
+        useEditorStore.getState().setContent(id, entry.sql);
+        set((state) => ({
+          tabs: [...state.tabs, { ...entry.tab, id }],
+          activeTabId: id,
+          closedQueries: state.closedQueries.filter((q) => q !== entry),
+        }));
+      },
+      clearClosedQueries: () => set({ closedQueries: [] }),
       setActiveTab: (id) => set({ activeTabId: id }),
       setSidebarWidth: (width) => set({ sidebarWidth: width }),
     }),
@@ -98,6 +137,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         tabs: s.tabs,
         activeTabId: s.activeTabId,
         sidebarWidth: s.sidebarWidth,
+        closedQueries: s.closedQueries,
       }),
     },
   ),

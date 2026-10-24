@@ -21,6 +21,8 @@ import {
   Check,
   Download,
   Upload,
+  CircleHelp,
+  Lock,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -74,6 +76,13 @@ interface TableDataTabProps {
   table: string;
 }
 
+const GRID_HELP = [
+  "单击选中单元格，Shift+单击或拖动扩展选区，⌘A 全选",
+  "双击、Enter 或 F2 编辑；Tab 暂存并移到下一格，Esc 取消",
+  "Delete 把选中的单元格设为 NULL；⌘C 复制所选；右键更多操作",
+  "修改先暂存，预览 SQL 后提交，提交前可回滚",
+].join("\n");
+
 export function TableDataTab({
   tabId,
   connectionId,
@@ -115,11 +124,9 @@ export function TableDataTab({
     markPoolOpen(conn.id);
     await refetch();
   };
-  const {
-    pageSize: PAGE_SIZE,
-    gridFontSize,
-    confirmDml,
-  } = usePreferencesStore((s) => s.prefs);
+  const { pageSize: PAGE_SIZE, confirmDml } = usePreferencesStore(
+    (s) => s.prefs,
+  );
 
   const [previousPageSize, setPreviousPageSize] = useState(PAGE_SIZE);
   if (previousPageSize !== PAGE_SIZE) {
@@ -529,10 +536,7 @@ export function TableDataTab({
     Object.keys(pendingEdits).length + pendingDeletes.size + newRows.length;
 
   return (
-    <div
-      className="flex h-full flex-col overflow-hidden"
-      style={{ "--grid-font-size": `${gridFontSize}px` } as React.CSSProperties}
-    >
+    <div className="flex h-full flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-1.5">
         <Button
@@ -687,6 +691,23 @@ export function TableDataTab({
           </>
         )}
 
+        {data && conn?.readonly && (
+          <span
+            className="flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"
+            title="只读连接，无法编辑数据"
+          >
+            <Lock className="size-3" />
+            只读
+          </span>
+        )}
+        {data && !conn?.readonly && pkColumns.length === 0 && (
+          <span
+            className="rounded bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"
+            title="此表没有主键，无法定位已有行，只能新增行"
+          >
+            无主键 · 仅可新增
+          </span>
+        )}
         {sort && (
           <span className="rounded bg-primary/10 px-2 py-0.5 text-[11px] text-primary">
             排序: {sort.column} {sort.dir}
@@ -694,6 +715,14 @@ export function TableDataTab({
         )}
 
         <div className="flex-1" />
+
+        <span
+          className="flex size-7 items-center justify-center text-muted-foreground"
+          aria-label="操作说明"
+          title={GRID_HELP}
+        >
+          <CircleHelp className="size-3.5" />
+        </span>
 
         {data && (
           <span className="text-xs text-muted-foreground">
@@ -703,19 +732,17 @@ export function TableDataTab({
               : ""}
           </span>
         )}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 text-xs"
-          disabled={counting}
-          onClick={() => setCountRequested(true)}
-        >
-          {counting
-            ? "统计中…"
-            : totalCount !== undefined
-              ? "总数已统计"
-              : "统计总行数"}
-        </Button>
+        {(counting || totalCount === undefined) && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs"
+            disabled={counting}
+            onClick={() => setCountRequested(true)}
+          >
+            {counting ? "统计中…" : "统计总行数"}
+          </Button>
+        )}
         {countError && (
           <span role="alert" className="text-xs text-destructive">
             总数统计失败
@@ -750,15 +777,6 @@ export function TableDataTab({
         </Button>
       </div>
 
-      {data && (
-        <p className="px-3 py-1 text-xs text-muted-foreground">
-          {conn?.readonly
-            ? "只读连接，无法编辑数据。"
-            : pkColumns.length === 0
-              ? "此表无主键，无法编辑已有行。"
-              : "双击单元格或按 Enter 编辑，Tab 暂存并移到下一格，Esc 取消；⌘C 复制所选，右键更多操作。修改后预览并提交。"}
-        </p>
-      )}
       {hasPending && (
         <p className="px-3 py-1 text-xs text-amber-600">
           请提交或回滚变更后再翻页、排序或筛选。

@@ -21,6 +21,8 @@ import {
   Ban,
   Unplug,
   ChevronDown,
+  Copy,
+  Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { pickSavePath } from "@/lib/file-dialog";
@@ -143,30 +145,7 @@ function SingleResultView({ result }: { result: QueryResult }) {
     );
   }
 
-  return (
-    <div className="flex flex-1 flex-col overflow-hidden">
-      {/* Status bar */}
-      <div className="flex items-center gap-3 border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
-        <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
-          <CheckCircle2 className="size-3" />
-          {result.rows.length} 行
-        </span>
-        {result.truncated && (
-          <span
-            className="flex items-center gap-1 text-amber-600 dark:text-amber-400"
-            title="结果达到行数或 16 MiB 大小上限；请缩小查询范围，导出仅包含已加载数据。"
-          >
-            <TriangleAlert className="size-3" />
-            已截断，仅显示前 {result.rows.length} 行
-          </span>
-        )}
-        <span>{result.executionMs} ms</span>
-        <span>{result.columns.length} 列</span>
-      </div>
-
-      <ResultGrid result={result} />
-    </div>
-  );
+  return <ResultGrid result={result} />;
 }
 
 function ResultGrid({ result }: { result: QueryResult }) {
@@ -195,12 +174,33 @@ function ResultGrid({ result }: { result: QueryResult }) {
   };
   if (!active) return null;
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-1 text-xs">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/* One bar: result stats on the left, actions on the right */}
+      <div className="flex flex-wrap items-center gap-3 border-b border-border px-3 py-0.5 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
+          <CheckCircle2 className="size-3" />
+          {result.rows.length} 行
+        </span>
+        {result.truncated && (
+          <span
+            className="flex items-center gap-1 text-amber-600 dark:text-amber-400"
+            title="结果达到行数或 16 MiB 大小上限；请缩小查询范围，导出仅包含已加载数据。"
+          >
+            <TriangleAlert className="size-3" />
+            已截断，仅显示前 {result.rows.length} 行
+          </span>
+        )}
+        <span>{result.columns.length} 列</span>
+        <span>{result.executionMs} ms</span>
+        <span role="status" className="min-w-0 truncate" title={message}>
+          {message}
+        </span>
+        <div className="flex-1" />
         <Button
           variant="ghost"
           size="sm"
-          className="h-6 text-xs"
+          className="h-6 gap-1 px-2 text-xs"
+          title="把全部结果按 CSV 复制到剪贴板；复制选中的单元格用 ⌘C"
           onClick={async () => {
             try {
               await navigator.clipboard.writeText(
@@ -212,6 +212,7 @@ function ResultGrid({ result }: { result: QueryResult }) {
             }
           }}
         >
+          <Copy className="size-3" />
           复制 CSV
         </Button>
         <DropdownMenu>
@@ -219,15 +220,16 @@ function ResultGrid({ result }: { result: QueryResult }) {
             <Button
               variant="ghost"
               size="sm"
-              className="h-6 gap-1 text-xs"
+              className="h-6 gap-1 px-2 text-xs"
               disabled={busy}
               title={`导出当前已加载的 ${result.rows.length} 行`}
             >
-              导出 CSV
+              <Download className="size-3" />
+              导出
               <ChevronDown className="size-3" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="text-xs">
+          <DropdownMenuContent align="end" className="text-xs">
             <DropdownMenuItem onClick={() => void exportCsv(false)}>
               CSV（UTF-8）
             </DropdownMenuItem>
@@ -236,10 +238,6 @@ function ResultGrid({ result }: { result: QueryResult }) {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <span role="status" className="text-muted-foreground">
-          {message ||
-            "拖选或 Shift+方向键选择单元格，⌘C 复制；双击查看完整值；右键更多操作"}
-        </span>
       </div>
       <DataGrid
         columns={result.columns}

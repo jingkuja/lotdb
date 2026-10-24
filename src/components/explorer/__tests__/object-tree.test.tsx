@@ -76,12 +76,12 @@ it("lists system databases apart and filters by name", async () => {
 
   // Open shop, then filter: other closed databases hide, tables narrow.
   fireEvent.click(screen.getByText("shop"));
-  await screen.findByText("Tables (3)");
+  await screen.findByText("表 (3)");
   fireEvent.change(screen.getByLabelText("过滤对象"), {
     target: { value: "ORDER" },
   });
   expect(screen.queryByText("crm")).toBeNull();
-  expect(screen.getByText("Tables (2/3)")).toBeTruthy();
+  expect(screen.getByText("表 (2/3)")).toBeTruthy();
   expect(screen.getByText("orders")).toBeTruthy();
   expect(screen.getByText("order_items")).toBeTruthy();
   expect(screen.queryByText("users")).toBeNull();
@@ -106,7 +106,7 @@ it("drops, truncates and copies tables from the context menu", async () => {
   });
   renderTree();
   fireEvent.click(await screen.findByText("shop"));
-  fireEvent.click(await screen.findByText("Tables (3)"));
+  fireEvent.click(await screen.findByText("表 (3)"));
 
   fireEvent.contextMenu(screen.getByText("orders"));
   fireEvent.click(await screen.findByText("删除表…"));
@@ -148,4 +148,35 @@ it("drops, truncates and copies tables from the context menu", async () => {
   fireEvent.click(await screen.findByText("删除表…"));
   await waitFor(() => expect(confirmDialog).toHaveBeenCalledTimes(3));
   expect(dropObject).toHaveBeenCalledTimes(1);
+});
+
+it("keeps database and connection tools in menus", async () => {
+  renderTree();
+  // Database row: actions come from its context menu, not hover buttons.
+  expect(screen.queryByTitle("删除数据库")).toBeNull();
+  fireEvent.contextMenu(await screen.findByText("shop"));
+  fireEvent.click(await screen.findByText("在此库新建查询"));
+  expect(useWorkspaceStore.getState().tabs).toEqual([
+    expect.objectContaining({
+      type: "query",
+      connectionId: "c",
+      metadata: { database: "shop" },
+    }),
+  ]);
+
+  // Connection-level tools sit behind the header's 工具 menu.
+  fireEvent.keyDown(screen.getByText("工具"), { key: "Enter" });
+  fireEvent.click(await screen.findByText("活跃查询"));
+  expect(useWorkspaceStore.getState().activeTabId).toBe("c/processes");
+
+  // Double-clicking a table opens one tab.
+  fireEvent.click(screen.getByText("shop"));
+  fireEvent.click(await screen.findByText("表 (3)"));
+  fireEvent.click(screen.getByText("users"));
+  fireEvent.click(screen.getByText("users"));
+  expect(
+    useWorkspaceStore
+      .getState()
+      .tabs.filter((t) => t.id === "c/shop/table/users/data"),
+  ).toHaveLength(1);
 });

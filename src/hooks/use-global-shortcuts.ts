@@ -12,8 +12,14 @@ interface Options {
  * Call once at the top of the component tree.
  */
 export function useGlobalShortcuts({ onShowShortcuts, onShowSearch }: Options) {
-  const { tabs, activeTabId, removeTab, setActiveTab, addTab } =
-    useWorkspaceStore();
+  const {
+    tabs,
+    activeTabId,
+    removeTab,
+    setActiveTab,
+    addTab,
+    reopenClosedQuery,
+  } = useWorkspaceStore();
   const { activeConnectionId, openPoolIds } = useConnectionStore();
 
   useEffect(() => {
@@ -52,6 +58,13 @@ export function useGlobalShortcuts({ onShowShortcuts, onShowSearch }: Options) {
       if (mod && !e.shiftKey && !e.altKey && e.key === "w") {
         e.preventDefault();
         if (activeTabId) void removeTab(activeTabId);
+        return;
+      }
+
+      // ── Cmd+Shift+T — reopen the last closed query ───────────────
+      if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        reopenClosedQuery();
         return;
       }
 
@@ -100,6 +113,7 @@ export function useGlobalShortcuts({ onShowShortcuts, onShowSearch }: Options) {
     removeTab,
     setActiveTab,
     addTab,
+    reopenClosedQuery,
     onShowShortcuts,
     onShowSearch,
   ]);

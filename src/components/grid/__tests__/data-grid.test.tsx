@@ -1,12 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  within,
-} from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { DataGrid } from "../data-grid";
 vi.mock("@tanstack/react-virtual", () => ({
   useVirtualizer: ({ count }: { count: number }) => ({
@@ -44,12 +38,17 @@ it("keeps new-row inputs aligned with reordered columns and supports all three v
   expect(
     screen.getAllByRole("textbox").map((el) => el.getAttribute("aria-label")),
   ).toEqual(["name", "id"]);
-  const cell = within(screen.getByLabelText("name").parentElement!);
-  fireEvent.click(cell.getByTitle("设为 NULL"));
+  const pick = (item: string) => {
+    fireEvent.keyDown(screen.getByLabelText("name 的取值方式"), {
+      key: "Enter",
+    });
+    fireEvent.click(screen.getByText(item));
+  };
+  pick("设为 NULL");
   expect(onChange).toHaveBeenLastCalledWith(0, "name", null);
-  fireEvent.click(cell.getByTitle("使用默认值"));
+  pick("使用默认值（DEFAULT）");
   expect(onChange).toHaveBeenLastCalledWith(0, "name", undefined);
-  fireEvent.click(cell.getByTitle("设为空字符串"));
+  pick("设为空字符串");
   expect(onChange).toHaveBeenLastCalledWith(0, "name", "");
 });
 
