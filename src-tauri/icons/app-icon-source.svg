@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+    <clipPath id="faceClip"><ellipse cx="512" cy="600" rx="228" ry="212"/></clipPath>
+  </defs>
+  <!-- card on the macOS icon grid -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#F2594B" filter="url(#sh)"/>
+
+  <g transform="translate(0 14)">
+  <g stroke="#2B2118" stroke-width="13" stroke-linejoin="round" stroke-linecap="round">
+    <!-- ponytail -->
+    <path d="M700 560 C 770 590, 790 680, 770 790 C 735 735, 700 690, 690 640 Z" fill="#2B2118"/>
+    <!-- sprout -->
+    <path d="M512 290 C 512 260, 510 240, 512 212" fill="none"/>
+    <path d="M500 220 C 470 170, 400 165, 372 200 C 400 238, 470 245, 500 220 Z" fill="#3FA66A"/>
+    <path d="M524 220 C 560 168, 640 160, 668 192 C 640 236, 560 248, 524 220 Z" fill="#3FA66A"/>
+    <!-- hair dome + side locks -->
+    <path d="M262 600 C 250 420, 360 300, 512 300 C 664 300, 774 420, 762 600 L 752 650 L 700 600 L 324 600 L 290 690 C 272 660, 264 630, 262 600 Z" fill="#2B2118"/>
+    <!-- face -->
+    <ellipse cx="512" cy="600" rx="228" ry="212" fill="#FFC63D"/>
+  </g>
+
+  <!-- lower face shade -->
+  <g clip-path="url(#faceClip)">
+    <path d="M270 640 C 360 700, 664 700, 754 640 L 754 830 L 270 830 Z" fill="#F7B733"/>
+  </g>
+  <!-- bangs: hair overlapping the top of the face -->
+  <g stroke="#2B2118" stroke-width="13" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M300 540 C 320 470, 400 420, 512 420 C 624 420, 704 470, 724 540 C 740 470, 700 350, 512 340 C 324 350, 284 470, 300 540 Z" fill="#2B2118"/>
+    <ellipse cx="512" cy="600" rx="228" ry="212" fill="none"/>
+    <!-- side strands down the cheeks -->
+    <path d="M300 540 C 285 600, 290 650, 310 700" fill="none"/>
+    <path d="M724 540 C 739 600, 734 650, 714 700" fill="none"/>
+  </g>
+  <!-- hair shine and parting lines -->
+  <path d="M418 378 C 460 360, 540 354, 596 364" fill="none" stroke="#5E554E" stroke-width="13" stroke-linecap="round"/>
+  <path d="M474 372 C 466 392, 466 410, 470 422" fill="none" stroke="#5E554E" stroke-width="6" stroke-linecap="round"/>
+  <path d="M568 364 C 578 388, 578 408, 574 422" fill="none" stroke="#5E554E" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- flower -->
+  <g stroke="#2B2118" stroke-width="7">
+    <g fill="#F4A3B5">
+      <circle cx="512" cy="186" r="17"/>
+      <circle cx="530" cy="200" r="17"/>
+      <circle cx="523" cy="222" r="17"/>
+      <circle cx="501" cy="222" r="17"/>
+      <circle cx="494" cy="200" r="17"/>
+    </g>
+    <circle cx="512" cy="206" r="10" fill="#FFC63D"/>
+  </g>
+
+  <!-- face details -->
+  <g fill="none" stroke="#2B2118" stroke-linecap="round" stroke-linejoin="round">
+    <!-- brows -->
+    <path d="M400 518 C 420 504, 448 504, 466 516" stroke-width="10"/>
+    <path d="M558 516 C 576 504, 604 504, 624 518" stroke-width="10"/>
+    <!-- smiling eyes -->
+    <path d="M392 590 C 408 556, 452 556, 468 590" stroke-width="13"/>
+    <path d="M556 590 C 572 556, 616 556, 632 590" stroke-width="13"/>
+    <!-- lashes -->
+    <path d="M392 590 L 378 598 M 398 578 L 382 578" stroke-width="8"/>
+    <path d="M632 590 L 646 598 M 626 578 L 642 578" stroke-width="8"/>
+  </g>
+  <!-- blush -->
+  <ellipse cx="380" cy="648" rx="46" ry="28" fill="#FF8A5B" opacity="0.85"/>
+  <ellipse cx="644" cy="648" rx="46" ry="28" fill="#FF8A5B" opacity="0.85"/>
+  <!-- mouth -->
+  <g stroke="#2B2118" stroke-width="11" stroke-linejoin="round">
+    <path d="M458 628 C 490 636, 534 636, 566 628 C 560 680, 464 680, 458 628 Z" fill="#7A2A1E"/>
+  </g>
+  <clipPath id="mouthClip"><path d="M458 628 C 490 636, 534 636, 566 628 C 560 680, 464 680, 458 628 Z"/></clipPath>
+  <g clip-path="url(#mouthClip)">
+    <ellipse cx="512" cy="672" rx="34" ry="18" fill="#F07A86"/>
+  </g>
+</g>
+</svg>

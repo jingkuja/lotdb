@@ -518,7 +518,8 @@ HOME=/tmp/lotdb-home CFFIXED_USER_HOME=/tmp/lotdb-home \
 
 | 文件 | 用途 |
 |------|------|
-| `src-tauri/icons/app-icon-source.png` | 1024×1024 源图。圆角方块按 macOS 图标网格放置（824px 圆角块，四周留 100px 透明边，带阴影），内容是粉色底上的“透透 · 比个心”形象 |
+| `src-tauri/icons/app-icon-source.svg` | 图标矢量原稿：好运红（#F2594B）圆角底上的“透透”大头（头发、小花芽、月牙笑眼），配色取自品牌“标志与色彩” |
+| `src-tauri/icons/app-icon-source.png` | 1024×1024 源图，由上面的 SVG 渲染而来。圆角方块按 macOS 图标网格放置（824px 圆角块，四周留 100px 透明边，带阴影） |
 | `src-tauri/icons/icon.icns`、`icon.ico`、`*.png`、`ios/`、`android/` | 由 `pnpm icons` 生成，`tauri.conf.json` 的 `bundle.icon` 会引用 |
 | `public/app-icon.png`（256px） | 欢迎页 Logo |
 | `public/favicon.png`（64px） | 窗口和开发模式下的 favicon |
